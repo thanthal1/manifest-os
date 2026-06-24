@@ -2,9 +2,14 @@
 //!
 //! In dry-run, every command is printed but nothing executes — this is how you
 //! safely preview an install on any machine (including non-Arch dev boxes).
+//!
+//! Privilege model: the install is run by a normal user who has `sudo`.
+//!   - `run`   — user-level (git clone, makepkg, paru)
+//!   - `sudo`  — root (pacman, editing /etc/pacman.conf)
+//!   - paru and makepkg must NEVER run as root, so they go through `run`.
 
 use anyhow::{bail, Result};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Shared execution context threaded through the install pipeline.
 pub struct Ctx {
@@ -17,32 +22,74 @@ impl Ctx {
         Self { dry_run }
     }
 
-    /// Run a program with args. Streams stdout/stderr to the user's terminal.
+    /// Run a program as the current user. Streams output to the terminal.
     pub fn run(&self, program: &str, args: &[&str]) -> Result<()> {
-        eprintln!("  $ {program} {}", args.join(" "));
+        self.exec(program, args, false)
+    }
+
+    /// Run a program as root via `sudo`.
+    pub fn sudo(&self, program: &str, args: &[&str]) -> Result<()> {
+        self.exec(program, args, true)
+    }
+
+    fn exec(&self, program: &str, args: &[&str], root: bool) -> Result<()> {
+        let prefix = if root { "sudo " } else { "" };
+        eprintln!("  $ {prefix}{program} {}", args.join(" "));
         if self.dry_run {
             return Ok(());
         }
-        let status = Command::new(program).args(args).status();
-        match status {
+        let mut cmd = if root {
+            let mut c = Command::new("sudo");
+            c.arg(program);
+            c
+        } else {
+            Command::new(program)
+        };
+        match cmd.args(args).status() {
             Ok(s) if s.success() => Ok(()),
             Ok(s) => bail!("`{program}` exited with status {s}"),
             Err(e) => bail!("failed to launch `{program}`: {e} (is it installed?)"),
         }
     }
 
-    /// Run a raw shell command line via `sh -c`. Used for pre/post hooks, which
-    /// the manifest author writes as arbitrary shell.
-    pub fn shell(&self, line: &str) -> Result<()> {
-        eprintln!("  $ {line}");
+    /// Run a raw shell command line via `sh -c`. Used for pre/post hooks and
+    /// multi-step bootstraps. Set `root` to wrap the whole line in `sudo sh -c`.
+    pub fn shell(&self, line: &str, root: bool) -> Result<()> {
+        let prefix = if root { "sudo " } else { "" };
+        eprintln!("  $ {prefix}{line}");
         if self.dry_run {
             return Ok(());
         }
-        let status = Command::new("sh").arg("-c").arg(line).status();
-        match status {
+        let mut cmd = if root {
+            let mut c = Command::new("sudo");
+            c.args(["sh", "-c"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c");
+            c
+        };
+        match cmd.arg(line).status() {
             Ok(s) if s.success() => Ok(()),
-            Ok(s) => bail!("hook exited with status {s}: {line}"),
-            Err(e) => bail!("failed to run hook via sh: {e}"),
+            Ok(s) => bail!("command exited with status {s}: {line}"),
+            Err(e) => bail!("failed to run via sh: {e}"),
         }
+    }
+
+    /// Run a detection command quietly and report whether it succeeded.
+    ///
+    /// In dry-run this does NOT execute and returns `false`, so the pipeline
+    /// prints the full "would do X" path rather than silently skipping it.
+    pub fn check(&self, program: &str, args: &[&str]) -> bool {
+        if self.dry_run {
+            return false;
+        }
+        Command::new(program)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 }

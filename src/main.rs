@@ -9,6 +9,7 @@
 mod exec;
 mod install;
 mod manifest;
+mod pacman;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

@@ -12,6 +12,7 @@
 
 use crate::exec::Ctx;
 use crate::manifest::Manifest;
+use crate::pacman;
 use anyhow::Result;
 
 pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
@@ -22,72 +23,22 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run { "  [dry-run: nothing will be executed]" } else { "" }
     );
 
-    enable_repos(manifest, ctx)?;
-    bootstrap_paru(ctx)?;
+    step("Enabling repositories");
+    pacman::enable_repos(manifest, ctx)?;
+
+    step("Bootstrapping paru");
+    pacman::bootstrap_paru(ctx)?;
+
     run_hooks("pre_install", &manifest.pre_install, ctx)?;
-    install_packages(manifest, ctx)?;
+
+    step("Installing packages");
+    pacman::install_packages(manifest, ctx)?;
+
     install_dotfiles(manifest, ctx)?;
     enable_services(manifest, ctx)?;
     run_hooks("post_install", &manifest.post_install, ctx)?;
 
     println!("\n✓ Done.{}", if ctx.dry_run { " (dry-run — no changes made)" } else { "" });
-    Ok(())
-}
-
-/// Step 3 — enable multilib / CachyOS repos as declared. CachyOS is also
-/// implied by `kernel: "cachy"`, since linux-cachyos lives in that repo.
-fn enable_repos(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
-    let repos = &manifest.repos;
-    let needs_cachy = repos.cachyos || manifest.system.kernel.as_deref() == Some("cachy");
-
-    if !repos.multilib && !needs_cachy {
-        return Ok(());
-    }
-    step("Enabling repositories");
-
-    if repos.multilib {
-        // [multilib] lives in /etc/pacman.conf; uncommenting it is the real op.
-        // TODO(phase1): edit pacman.conf in place instead of just signaling intent.
-        eprintln!("  · multilib (uncomment [multilib] in /etc/pacman.conf)");
-    }
-    if needs_cachy {
-        // CachyOS ships an installer script that adds the repo + signing key.
-        // TODO(phase1): fetch + run the official key/repo bootstrap.
-        eprintln!("  · cachyos repo + signing key");
-        if repos.cachy_optimized_packages {
-            eprintln!("  · cachyos-v3/v4 optimized package repos");
-        }
-    }
-    Ok(())
-}
-
-/// Step 4 — ensure paru exists. paru is the one hardcoded AUR helper.
-/// Bootstrapped from the AUR via base-devel + git + makepkg.
-fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
-    step("Bootstrapping paru");
-    // If paru is already present we're done. (Detection is skipped in dry-run.)
-    // TODO(phase1): `command -v paru` check, then clone paru-bin + makepkg -si.
-    ctx.run("sh", &["-c", "command -v paru >/dev/null 2>&1 && echo 'paru present' || echo 'would bootstrap paru-bin'"])?;
-    Ok(())
-}
-
-/// Step 6 — install every package (plus the kernel package) via paru. paru
-/// transparently resolves both official-repo and AUR packages in one call.
-fn install_packages(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
-    let mut pkgs: Vec<&str> = Vec::new();
-    if let Some(kernel) = manifest.kernel_package() {
-        pkgs.push(kernel);
-    }
-    pkgs.extend(manifest.packages.iter().map(String::as_str));
-
-    if pkgs.is_empty() {
-        return Ok(());
-    }
-    step(&format!("Installing {} package(s) via paru", pkgs.len()));
-
-    let mut args = vec!["-S", "--needed", "--noconfirm"];
-    args.extend(pkgs);
-    ctx.run("paru", &args)?;
     Ok(())
 }
 
@@ -115,7 +66,7 @@ fn enable_services(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     step("Enabling services");
 
     for unit in &svc.system {
-        ctx.run("systemctl", &["enable", unit])?;
+        ctx.sudo("systemctl", &["enable", unit])?;
     }
     for unit in &svc.user {
         ctx.run("systemctl", &["--user", "enable", unit])?;
@@ -123,14 +74,14 @@ fn enable_services(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Steps 5 & 9 — run author-provided shell hooks in order.
+/// Steps 5 & 9 — run author-provided shell hooks in order, at user level.
 fn run_hooks(phase: &str, hooks: &[String], ctx: &Ctx) -> Result<()> {
     if hooks.is_empty() {
         return Ok(());
     }
     step(&format!("Running {phase} hooks"));
     for line in hooks {
-        ctx.shell(line)?;
+        ctx.shell(line, false)?;
     }
     Ok(())
 }
