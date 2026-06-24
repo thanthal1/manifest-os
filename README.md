@@ -32,6 +32,33 @@ The install flow that exists today:
 > Network, disk, partitioning and filesystem are **not** the manifest's job —
 > they belong to the ISO's TUI layer.
 
+## Desktops (one field, full setup)
+
+Add a single `"desktop"` field and the installer expands it into the entire
+environment — core packages, a display manager, XDG portals, a polkit agent,
+companion apps (terminal, notifications, launcher, bar, wallpaper, applets),
+services, and any greeter/session config that has to be written:
+
+```json
+{ "schema_version": "1.0.0", "meta": { "name": "x" }, "desktop": "hyprland" }
+```
+
+25 environments are supported out of the box (`manifest desktops` to list):
+
+- **Desktops:** GNOME, KDE Plasma, Xfce, Cinnamon, MATE, LXQt, LXDE, Budgie,
+  Deepin, COSMIC
+- **Wayland WMs:** Hyprland, Sway, Niri, River, labwc, Wayfire
+- **X11 WMs:** i3, bspwm, awesome, Qtile, Openbox, xmonad, herbstluftwm,
+  Fluxbox, IceWM
+
+Each recipe picks a sensible display manager (GDM/SDDM/LightDM/greetd/ly/
+cosmic-greeter) and writes its config automatically. Override it per manifest
+with `"display_manager"`. See [`examples/hyprland-rice.json`](examples/hyprland-rice.json)
+and [`examples/gnome.json`](examples/gnome.json).
+
+> All 118 packages across the catalog are validated against the real Arch repos
+> in CI-style container runs — no broken package names.
+
 ## Try it (safely, anywhere)
 
 The `--dry-run` flag prints every step without touching the system, so it works
@@ -50,6 +77,7 @@ install is destructive and meant to be rolled back during development.
 ```bash
 manifest install <file.json> [--dry-run]   # apply a manifest
 manifest verify  <file.json>               # validate structure + schema version
+manifest desktops                          # list supported desktops / WMs
 manifest export | sync | diff              # Phase 5 (not yet implemented)
 ```
 

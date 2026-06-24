@@ -10,6 +10,7 @@
 //! bootstrap; 10 is the final report.) Network, disk and partitioning are NOT
 //! here — those belong to the ISO's TUI layer, never the manifest.
 
+use crate::desktop;
 use crate::exec::Ctx;
 use crate::manifest::Manifest;
 use crate::pacman;
@@ -23,6 +24,10 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run { "  [dry-run: nothing will be executed]" } else { "" }
     );
 
+    // Resolve the desktop recipe up front so a bad `desktop` name fails before
+    // we touch the system.
+    let desktop = desktop::resolve(manifest)?;
+
     step("Enabling repositories");
     pacman::enable_repos(manifest, ctx)?;
 
@@ -35,7 +40,19 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     run_hooks("pre_install", &manifest.pre_install, ctx)?;
 
     step("Installing packages");
-    pacman::install_packages(manifest, ctx)?;
+    let desktop_pkgs = desktop.as_ref().map(|d| d.packages.clone()).unwrap_or_default();
+    if let Some(d) = &desktop {
+        println!("  · desktop: {} (+{} packages)", d.display_name, d.packages.len());
+    }
+    pacman::install_packages(manifest, &desktop_pkgs, ctx)?;
+
+    if let Some(d) = &desktop {
+        step("Configuring desktop");
+        desktop::apply(d, ctx)?;
+        if !d.aur.is_empty() {
+            println!("  · note: AUR packages pulled — {}", d.aur.join(", "));
+        }
+    }
 
     install_dotfiles(manifest, ctx)?;
     enable_services(manifest, ctx)?;

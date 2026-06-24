@@ -6,6 +6,7 @@
 //! parser fetched per `schema_version`. Phase 1 implements the install flow
 //! locally.
 
+mod desktop;
 mod exec;
 mod install;
 mod manifest;
@@ -54,6 +55,8 @@ enum Command {
     Diff {
         file: PathBuf,
     },
+    /// List the desktop environments / window managers the installer can set up.
+    Desktops,
 }
 
 fn main() {
@@ -82,6 +85,20 @@ fn run() -> Result<()> {
                     .map(|k| format!(", kernel: {k}"))
                     .unwrap_or_default()
             );
+            Ok(())
+        }
+        Command::Desktops => {
+            println!("Supported desktops (use as \"desktop\" in a manifest):\n");
+            for r in desktop::catalog() {
+                let kind = match r.session {
+                    desktop::Session::Wayland => "wayland",
+                    desktop::Session::X11 => "x11",
+                    desktop::Session::Both => "wayland/x11",
+                };
+                let dm = r.default_dm.unwrap_or("(tty)");
+                println!("  {:<14} {:<12} dm:{:<8} {}", r.key, kind, dm, r.display_name);
+            }
+            println!("\nOverride the login manager with the manifest's \"display_manager\" field.");
             Ok(())
         }
         Command::Export | Command::Sync { .. } | Command::Diff { .. } => {

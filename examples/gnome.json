@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "GNOME Workstation",
+    "author": "you",
+    "description": "Stock GNOME on the zen kernel — batteries included.",
+    "tags": ["gnome", "wayland", "desktop"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "workstation",
+    "kernel": "linux-zen"
+  },
+  "desktop": "gnome",
+  "packages": [
+    "firefox",
+    "code"
+  ]
+}

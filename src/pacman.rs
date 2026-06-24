@@ -101,12 +101,18 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
 /// Step 6 — install every package (plus the kernel package) via paru. paru
 /// transparently resolves both official-repo and AUR packages in one call and
 /// escalates with sudo internally, so it runs at user level.
-pub fn install_packages(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
+pub fn install_packages(manifest: &Manifest, extra: &[String], ctx: &Ctx) -> Result<()> {
+    // Order: kernel, then desktop-recipe packages, then the manifest's own list.
+    // De-duplicated, first occurrence wins.
     let mut pkgs: Vec<&str> = Vec::new();
     if let Some(kernel) = manifest.kernel_package() {
         pkgs.push(kernel);
     }
-    pkgs.extend(manifest.packages.iter().map(String::as_str));
+    for p in extra.iter().chain(manifest.packages.iter()) {
+        if !pkgs.contains(&p.as_str()) {
+            pkgs.push(p.as_str());
+        }
+    }
 
     if pkgs.is_empty() {
         return Ok(());

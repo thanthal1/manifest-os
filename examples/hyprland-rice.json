@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Hyprland Rice",
+    "author": "you",
+    "description": "Hyprland on CachyOS kernel with extra apps and dotfiles.",
+    "tags": ["hyprland", "wayland", "rice", "cachyos"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "archbox",
+    "kernel": "cachy"
+  },
+  "repos": {
+    "multilib": true,
+    "cachyos": true
+  },
+  "desktop": "hyprland",
+  "display_manager": "greetd",
+  "packages": [
+    "firefox",
+    "thunar",
+    "neovim",
+    "btop"
+  ],
+  "dotfiles": {
+    "source": "https://github.com/you/dotfiles",
+    "branch": "main",
+    "method": "symlink"
+  },
+  "post_install": [
+    "echo 'Hyprland ready — reboot into the greetd login.'"
+  ]
+}

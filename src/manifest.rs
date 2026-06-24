@@ -34,6 +34,17 @@ pub struct Manifest {
 
     pub dotfiles: Option<Dotfiles>,
 
+    /// Optional desktop environment or window manager to set up automatically.
+    /// One of the recipe keys in `desktop.rs` (e.g. "gnome", "plasma",
+    /// "hyprland", "sway", "niri", "i3", "xfce"). The installer expands this
+    /// into packages, a display manager, portals, a polkit agent, services and
+    /// any required greeter/session config.
+    pub desktop: Option<String>,
+
+    /// Override the display manager the desktop recipe picks by default.
+    /// One of: "gdm", "sddm", "lightdm", "greetd", "ly".
+    pub display_manager: Option<String>,
+
     /// Shell commands run *before* package installation.
     #[serde(default)]
     pub pre_install: Vec<String>,

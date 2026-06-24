@@ -9,6 +9,7 @@
 //!   - paru and makepkg must NEVER run as root, so they go through `run`.
 
 use anyhow::{bail, Result};
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Shared execution context threaded through the install pipeline.
@@ -73,6 +74,39 @@ impl Ctx {
             Ok(s) if s.success() => Ok(()),
             Ok(s) => bail!("command exited with status {s}: {line}"),
             Err(e) => bail!("failed to run via sh: {e}"),
+        }
+    }
+
+    /// Write a file as root, creating parent directories first. Used for
+    /// greeter configs, env drop-ins and other desktop setup that isn't a
+    /// package install.
+    pub fn write_root(&self, path: &str, content: &str) -> Result<()> {
+        println!("  > write {path} ({} bytes, root)", content.len());
+        if self.dry_run {
+            return Ok(());
+        }
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let parent = parent.to_string_lossy();
+            let status = Command::new("sudo").args(["mkdir", "-p", &parent]).status();
+            if !matches!(status, Ok(s) if s.success()) {
+                bail!("failed to create directory {parent}");
+            }
+        }
+        let mut child = Command::new("sudo")
+            .args(["tee", path])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to launch `sudo tee`: {e}"))?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(content.as_bytes())?;
+        match child.wait() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => bail!("writing {path} exited with status {s}"),
+            Err(e) => bail!("failed writing {path}: {e}"),
         }
     }
 
