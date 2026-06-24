@@ -135,27 +135,8 @@ impl Manifest {
         if self.schema_version.trim().is_empty() {
             anyhow::bail!("`schema_version` is required and must be non-empty");
         }
-        if let Some(kernel) = &self.system.kernel {
-            const KNOWN: [&str; 4] = ["linux", "linux-lts", "linux-zen", "cachy"];
-            if !KNOWN.contains(&kernel.as_str()) {
-                anyhow::bail!(
-                    "unknown kernel `{kernel}` (expected one of: {})",
-                    KNOWN.join(", ")
-                );
-            }
-        }
+        // Validate the kernel name up front (defaults to `linux` when unset).
+        crate::kernel::resolve(self.system.kernel.as_deref())?;
         Ok(())
-    }
-
-    /// Maps `system.kernel` to the package it pulls in. CachyOS kernel also
-    /// implies enabling the CachyOS repo + key (handled in the install flow).
-    pub fn kernel_package(&self) -> Option<&'static str> {
-        match self.system.kernel.as_deref() {
-            Some("linux") => Some("linux"),
-            Some("linux-lts") => Some("linux-lts"),
-            Some("linux-zen") => Some("linux-zen"),
-            Some("cachy") => Some("linux-cachyos"),
-            _ => None,
-        }
     }
 }

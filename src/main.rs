@@ -9,6 +9,7 @@
 mod desktop;
 mod exec;
 mod install;
+mod kernel;
 mod manifest;
 mod pacman;
 
@@ -57,6 +58,8 @@ enum Command {
     },
     /// List the desktop environments / window managers the installer can set up.
     Desktops,
+    /// List the kernels the installer can install.
+    Kernels,
 }
 
 fn main() {
@@ -74,16 +77,14 @@ fn run() -> Result<()> {
         }
         Command::Verify { file } => {
             let manifest = Manifest::from_path(&file)?;
+            let kernel = kernel::resolve(manifest.system.kernel.as_deref())?;
+            let default_note = if manifest.system.kernel.is_none() { " (default)" } else { "" };
             println!(
-                "✓ valid — schema v{}, {} package(s){}",
+                "✓ valid — schema v{}, {} package(s), kernel: {}{}",
                 manifest.schema_version,
                 manifest.packages.len(),
-                manifest
-                    .system
-                    .kernel
-                    .as_deref()
-                    .map(|k| format!(", kernel: {k}"))
-                    .unwrap_or_default()
+                kernel.package,
+                default_note,
             );
             Ok(())
         }
@@ -100,6 +101,16 @@ fn run() -> Result<()> {
                 println!("                 {}", r.notes);
             }
             println!("\nOverride the login manager with the manifest's \"display_manager\" field.");
+            Ok(())
+        }
+        Command::Kernels => {
+            println!("Supported kernels (use as system.kernel in a manifest):\n");
+            for k in kernel::catalog() {
+                let def = if k.key == kernel::DEFAULT_KEY { "  [default]" } else { "" };
+                println!("  {:<16} {}{}", k.key, k.display, def);
+                println!("                   {}", k.notes);
+            }
+            println!("\nUnset system.kernel installs `{}`. Headers are installed alongside.", kernel::DEFAULT_KEY);
             Ok(())
         }
         Command::Export | Command::Sync { .. } | Command::Diff { .. } => {

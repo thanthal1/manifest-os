@@ -4,6 +4,7 @@
 //! before acting, so `manifest install` is safe to re-run on the same VM.
 
 use crate::exec::Ctx;
+use crate::kernel::Kernel;
 use crate::manifest::Manifest;
 use anyhow::Result;
 
@@ -17,9 +18,9 @@ const PARU_AUR: &str = "https://aur.archlinux.org/paru.git";
 /// Step 3 — enable multilib / CachyOS repos as declared, then refresh the
 /// package databases so later steps can see them. CachyOS is also implied by
 /// `kernel: "cachy"`, since linux-cachyos lives in that repo.
-pub fn enable_repos(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
+pub fn enable_repos(manifest: &Manifest, kernel: &Kernel, ctx: &Ctx) -> Result<()> {
     let repos = &manifest.repos;
-    let needs_cachy = repos.cachyos || manifest.system.kernel.as_deref() == Some("cachy");
+    let needs_cachy = repos.cachyos || kernel.needs_cachyos_repo;
 
     if repos.multilib {
         if ctx.check("grep", &["-q", r"^\[multilib\]", PACMAN_CONF]) {
@@ -101,13 +102,15 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
 /// Step 6 — install every package (plus the kernel package) via paru. paru
 /// transparently resolves both official-repo and AUR packages in one call and
 /// escalates with sudo internally, so it runs at user level.
-pub fn install_packages(manifest: &Manifest, extra: &[String], ctx: &Ctx) -> Result<()> {
-    // Order: kernel, then desktop-recipe packages, then the manifest's own list.
-    // De-duplicated, first occurrence wins.
-    let mut pkgs: Vec<&str> = Vec::new();
-    if let Some(kernel) = manifest.kernel_package() {
-        pkgs.push(kernel);
-    }
+pub fn install_packages(
+    manifest: &Manifest,
+    kernel: &Kernel,
+    extra: &[String],
+    ctx: &Ctx,
+) -> Result<()> {
+    // Order: kernel + headers, then desktop-recipe packages, then the
+    // manifest's own list. De-duplicated, first occurrence wins.
+    let mut pkgs: Vec<&str> = vec![kernel.package, kernel.headers];
     for p in extra.iter().chain(manifest.packages.iter()) {
         if !pkgs.contains(&p.as_str()) {
             pkgs.push(p.as_str());

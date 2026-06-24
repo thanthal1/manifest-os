@@ -32,6 +32,25 @@ The install flow that exists today:
 > Network, disk, partitioning and filesystem are **not** the manifest's job —
 > they belong to the ISO's TUI layer.
 
+## Kernels (always one, switchable)
+
+Every install gets a kernel — without one the system won't boot. Omit
+`system.kernel` and you get stock Arch **`linux`** (the bootstrap default);
+set it to switch. The matching `*-headers` are always installed too, so DKMS
+drivers (e.g. `nvidia-dkms`) build cleanly.
+
+| `system.kernel` | Package | Notes |
+|---|---|---|
+| *(unset)* / `linux` | `linux` | Mainline, Arch default |
+| `linux-lts` | `linux-lts` | Long-term support |
+| `linux-zen` | `linux-zen` | Desktop-tuned |
+| `linux-hardened` | `linux-hardened` | Security mitigations |
+| `cachy` | `linux-cachyos` | BORE/EEVDF, x86-64-v3/v4; pulls the CachyOS repo + key |
+
+`manifest kernels` lists them. Installing a kernel auto-regenerates the
+initramfs (pacman's mkinitcpio hook); adding a *bootloader* entry is the ISO
+boot step's job, not the manifest's.
+
 ## Desktops (one field, full setup)
 
 Add a single `"desktop"` field and the installer expands it into the entire
@@ -78,6 +97,7 @@ install is destructive and meant to be rolled back during development.
 manifest install <file.json> [--dry-run]   # apply a manifest
 manifest verify  <file.json>               # validate structure + schema version
 manifest desktops                          # list supported desktops / WMs
+manifest kernels                           # list installable kernels
 manifest export | sync | diff              # Phase 5 (not yet implemented)
 ```
 

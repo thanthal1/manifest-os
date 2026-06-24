@@ -12,6 +12,7 @@
 
 use crate::desktop;
 use crate::exec::Ctx;
+use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
 use anyhow::Result;
@@ -24,12 +25,13 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run { "  [dry-run: nothing will be executed]" } else { "" }
     );
 
-    // Resolve the desktop recipe up front so a bad `desktop` name fails before
-    // we touch the system.
+    // Resolve kernel + desktop up front so bad names fail before we touch the
+    // system. The kernel defaults to stock Arch `linux` when unset.
+    let kernel = kernel::resolve(manifest.system.kernel.as_deref())?;
     let desktop = desktop::resolve(manifest)?;
 
     step("Enabling repositories");
-    pacman::enable_repos(manifest, ctx)?;
+    pacman::enable_repos(manifest, kernel, ctx)?;
 
     step("Updating system");
     pacman::sync_system(ctx)?;
@@ -40,11 +42,15 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     run_hooks("pre_install", &manifest.pre_install, ctx)?;
 
     step("Installing packages");
+    println!("  · kernel: {} ({} + {})", kernel.display, kernel.package, kernel.headers);
+    if kernel.key != crate::kernel::DEFAULT_KEY {
+        println!("  · note: non-default kernel — ensure the bootloader has an entry for it");
+    }
     let desktop_pkgs = desktop.as_ref().map(|d| d.packages.clone()).unwrap_or_default();
     if let Some(d) = &desktop {
         println!("  · desktop: {} (+{} packages)", d.display_name, d.packages.len());
     }
-    pacman::install_packages(manifest, &desktop_pkgs, ctx)?;
+    pacman::install_packages(manifest, kernel, &desktop_pkgs, ctx)?;
 
     if let Some(d) = &desktop {
         step("Configuring desktop");
