@@ -32,6 +32,44 @@ The install flow that exists today:
 > Network, disk, partitioning and filesystem are **not** the manifest's job —
 > they belong to the ISO's TUI layer.
 
+## Bootloader
+
+A `boot` block installs and configures the bootloader so a non-default kernel
+actually boots. UEFI/BIOS is auto-detected; the root device and CPU microcode
+are resolved automatically.
+
+```json
+"boot": {
+  "loader": "systemd-boot",      // or "grub"
+  "cmdline": ["quiet", "splash"],
+  "timeout": 4
+}
+```
+
+- **systemd-boot** (UEFI): `bootctl install`, writes `loader.conf` + a
+  per-kernel entry with `root=PARTUUID=…` and the microcode initrd.
+- **grub** (UEFI or BIOS): sets `/etc/default/grub`, runs `grub-install` for the
+  detected firmware, then `grub-mkconfig`.
+
+Opt-in by presence — omit `boot` and the installer leaves the bootloader alone.
+This step is designed for the ISO's chroot context and must be tested in a VM.
+
+## Dotfiles
+
+```json
+"dotfiles": {
+  "source": "https://github.com/you/dotfiles",
+  "branch": "main",
+  "method": "symlink"            // or "copy"
+}
+```
+
+The repo is treated as a mirror of `$HOME` and placed **per file** — a repo's
+`.config/nvim/init.lua` lands at `~/.config/nvim/init.lua` without replacing the
+whole `~/.config`. `symlink` links each file back to a persistent clone (so
+editing the repo updates the live config); `copy` copies them. `.git`, README
+and LICENSE are skipped.
+
 ## System basics
 
 The `system` block sets the machine's identity and localization. All applied

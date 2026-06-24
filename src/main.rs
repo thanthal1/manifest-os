@@ -6,7 +6,9 @@
 //! parser fetched per `schema_version`. Phase 1 implements the install flow
 //! locally.
 
+mod boot;
 mod desktop;
+mod dotfiles;
 mod exec;
 mod install;
 mod kernel;

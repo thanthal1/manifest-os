@@ -18,6 +18,11 @@
   },
   "desktop": "hyprland",
   "display_manager": "greetd",
+  "boot": {
+    "loader": "systemd-boot",
+    "cmdline": ["quiet", "splash"],
+    "timeout": 4
+  },
   "packages": [
     "firefox",
     "thunar",

@@ -10,7 +10,9 @@
 //! bootstrap; 10 is the final report.) Network, disk and partitioning are NOT
 //! here — those belong to the ISO's TUI layer, never the manifest.
 
+use crate::boot;
 use crate::desktop;
+use crate::dotfiles;
 use crate::exec::Ctx;
 use crate::kernel;
 use crate::manifest::Manifest;
@@ -58,6 +60,11 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         system::apply(&manifest.system, ctx)?;
     }
 
+    if let Some(boot_cfg) = &manifest.boot {
+        step("Configuring bootloader");
+        boot::apply(boot_cfg, kernel, ctx)?;
+    }
+
     if let Some(d) = &desktop {
         step("Configuring desktop");
         desktop::apply(d, ctx)?;
@@ -66,26 +73,14 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         }
     }
 
-    install_dotfiles(manifest, ctx)?;
+    if let Some(df) = &manifest.dotfiles {
+        step("Installing dotfiles");
+        dotfiles::install(df, ctx)?;
+    }
     enable_services(manifest, ctx)?;
     run_hooks("post_install", &manifest.post_install, ctx)?;
 
     println!("\n✓ Done.{}", if ctx.dry_run { " (dry-run — no changes made)" } else { "" });
-    Ok(())
-}
-
-/// Step 7 — clone dotfiles. Phase 1 is git-clone only; symlink/copy placement
-/// is a later refinement.
-fn install_dotfiles(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
-    let Some(df) = &manifest.dotfiles else {
-        return Ok(());
-    };
-    step("Installing dotfiles");
-    ctx.run(
-        "git",
-        &["clone", "--branch", &df.branch, "--depth", "1", &df.source, "/tmp/manifest-dotfiles"],
-    )?;
-    // TODO(phase1): place files per `method` (symlink|copy) into $HOME.
     Ok(())
 }
 

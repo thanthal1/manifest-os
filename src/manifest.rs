@@ -45,6 +45,11 @@ pub struct Manifest {
     /// One of: "gdm", "sddm", "lightdm", "greetd", "ly".
     pub display_manager: Option<String>,
 
+    /// Bootloader installation + configuration. When present, the installer
+    /// installs and configures the bootloader so a non-default kernel actually
+    /// boots. Designed to run in the ISO's chroot context.
+    pub boot: Option<Boot>,
+
     /// Shell commands run *before* package installation.
     #[serde(default)]
     pub pre_install: Vec<String>,
@@ -129,6 +134,24 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Boot {
+    /// "systemd-boot" (UEFI only) or "grub" (UEFI or BIOS).
+    pub loader: String,
+    /// Extra kernel command-line parameters, e.g. ["quiet", "nvidia_drm.modeset=1"].
+    #[serde(default)]
+    pub cmdline: Vec<String>,
+    /// Boot menu timeout in seconds.
+    pub timeout: Option<u32>,
+    /// EFI system partition mount point. Standard Arch layout mounts it at /boot.
+    #[serde(default = "default_esp")]
+    pub esp: String,
+}
+
+fn default_esp() -> String {
+    "/boot".to_string()
+}
+
 impl Manifest {
     /// Load and parse a manifest from a JSON file on disk.
     pub fn from_path(path: &Path) -> Result<Self> {
@@ -152,6 +175,14 @@ impl Manifest {
         }
         // Validate the kernel name up front (defaults to `linux` when unset).
         crate::kernel::resolve(self.system.kernel.as_deref())?;
+        if let Some(boot) = &self.boot {
+            if !matches!(boot.loader.as_str(), "systemd-boot" | "grub") {
+                anyhow::bail!(
+                    "unknown bootloader `{}` (expected `systemd-boot` or `grub`)",
+                    boot.loader
+                );
+            }
+        }
         Ok(())
     }
 }

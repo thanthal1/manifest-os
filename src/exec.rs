@@ -110,6 +110,33 @@ impl Ctx {
         }
     }
 
+    /// Run a command and capture its trimmed stdout. `root` runs it via sudo.
+    /// In dry-run nothing executes and an empty string is returned, so callers
+    /// must substitute a placeholder for preview output.
+    pub fn output(&self, root: bool, program: &str, args: &[&str]) -> Result<String> {
+        if self.dry_run {
+            return Ok(String::new());
+        }
+        let mut cmd = if root {
+            let mut c = Command::new("sudo");
+            c.arg(program);
+            c
+        } else {
+            Command::new(program)
+        };
+        let out = cmd
+            .args(args)
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to launch `{program}`: {e}"))?;
+        if !out.status.success() {
+            bail!(
+                "`{program}` failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     /// Run a detection command quietly and report whether it succeeded.
     ///
     /// In dry-run this does NOT execute and returns `false`, so the pipeline
