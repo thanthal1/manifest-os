@@ -96,7 +96,8 @@ fn run() -> Result<()> {
                     desktop::Session::Both => "wayland/x11",
                 };
                 let dm = r.default_dm.unwrap_or("(tty)");
-                println!("  {:<14} {:<12} dm:{:<8} {}", r.key, kind, dm, r.display_name);
+                println!("  {:<14} {:<12} dm:{:<14} {}", r.key, kind, dm, r.display_name);
+                println!("                 {}", r.notes);
             }
             println!("\nOverride the login manager with the manifest's \"display_manager\" field.");
             Ok(())

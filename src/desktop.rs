@@ -133,7 +133,6 @@ pub struct Resolved {
     pub services: Vec<String>,
     pub env: Vec<(&'static str, &'static str)>,
     pub aur: Vec<&'static str>,
-    pub notes: &'static str,
 }
 
 /// Expand `manifest.desktop` (+ optional `display_manager` override) into a
@@ -161,7 +160,7 @@ pub fn resolve(manifest: &Manifest) -> Result<Option<Resolved>> {
 
     // Assemble the package set, de-duplicated, order preserved.
     let mut packages: Vec<String> = Vec::new();
-    let mut push = |p: &str, packages: &mut Vec<String>| {
+    let push = |p: &str, packages: &mut Vec<String>| {
         if !packages.iter().any(|x| x == p) {
             packages.push(p.to_string());
         }
@@ -208,7 +207,6 @@ pub fn resolve(manifest: &Manifest) -> Result<Option<Resolved>> {
         services,
         env: r.env.to_vec(),
         aur: r.aur.to_vec(),
-        notes: r.notes,
     }))
 }
 
