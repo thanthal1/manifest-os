@@ -32,6 +32,31 @@ The install flow that exists today:
 > Network, disk, partitioning and filesystem are **not** the manifest's job —
 > they belong to the ISO's TUI layer.
 
+## System basics
+
+The `system` block sets the machine's identity and localization. All applied
+with file operations (so they also work inside `arch-chroot`):
+
+```json
+"system": {
+  "hostname": "archbox",
+  "locale":   "en_US.UTF-8",
+  "timezone": "America/New_York",
+  "keymap":   "us",
+  "kernel":   "linux-zen"
+}
+```
+
+| Field | Effect |
+|---|---|
+| `hostname` | writes `/etc/hostname` + the `/etc/hosts` loopback block |
+| `locale` | uncomments it in `/etc/locale.gen`, runs `locale-gen`, sets `/etc/locale.conf` |
+| `timezone` | symlinks `/etc/localtime` (validated), syncs the RTC (best-effort) |
+| `keymap` | writes `/etc/vconsole.conf` |
+| `kernel` | see below |
+
+Every field is optional and idempotent.
+
 ## Kernels (always one, switchable)
 
 Every install gets a kernel — without one the system won't boot. Omit

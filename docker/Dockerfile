@@ -8,7 +8,7 @@ FROM archlinux:latest
 
 # Base toolchain: sudo for privilege escalation, base-devel+git for paru,
 # rust to build the binary, curl for the CachyOS repo path.
-RUN pacman -Syu --noconfirm --needed sudo base-devel git rust curl
+RUN pacman -Syu --noconfirm --needed sudo base-devel git rust curl tzdata
 
 # Non-root user with passwordless sudo. makepkg/paru refuse to run as root, and
 # the install flow assumes a normal user who can escalate via sudo.

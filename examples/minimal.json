@@ -12,6 +12,7 @@
     "hostname": "archbox",
     "locale": "en_US.UTF-8",
     "timezone": "America/New_York",
+    "keymap": "us",
     "kernel": "linux-zen"
   },
   "repos": {

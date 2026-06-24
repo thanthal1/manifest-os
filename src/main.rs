@@ -12,6 +12,7 @@ mod install;
 mod kernel;
 mod manifest;
 mod pacman;
+mod system;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

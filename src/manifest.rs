@@ -73,11 +73,26 @@ pub struct Meta {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct System {
+    /// System hostname, written to /etc/hostname and /etc/hosts.
     pub hostname: Option<String>,
+    /// LANG locale, e.g. "en_US.UTF-8". Generated and set as the system locale.
     pub locale: Option<String>,
+    /// IANA timezone, e.g. "America/New_York". Symlinked into /etc/localtime.
     pub timezone: Option<String>,
-    /// One of: "linux", "linux-lts", "linux-zen", "cachy".
+    /// Console keymap for the TTY, e.g. "us", "uk". Written to /etc/vconsole.conf.
+    pub keymap: Option<String>,
+    /// One of: "linux", "linux-lts", "linux-zen", "linux-hardened", "cachy".
     pub kernel: Option<String>,
+}
+
+impl System {
+    /// Whether any setting in this block needs applying.
+    pub fn is_empty(&self) -> bool {
+        self.hostname.is_none()
+            && self.locale.is_none()
+            && self.timezone.is_none()
+            && self.keymap.is_none()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

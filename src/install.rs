@@ -15,6 +15,7 @@ use crate::exec::Ctx;
 use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
+use crate::system;
 use anyhow::Result;
 
 pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
@@ -51,6 +52,11 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         println!("  · desktop: {} (+{} packages)", d.display_name, d.packages.len());
     }
     pacman::install_packages(manifest, kernel, &desktop_pkgs, ctx)?;
+
+    if !manifest.system.is_empty() {
+        step("Configuring system");
+        system::apply(&manifest.system, ctx)?;
+    }
 
     if let Some(d) = &desktop {
         step("Configuring desktop");
