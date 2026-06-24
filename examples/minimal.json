@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Minimal Tiling",
+    "author": "you",
+    "description": "A tiny first manifest to exercise the install flow.",
+    "tags": ["minimal", "wayland"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "archbox",
+    "locale": "en_US.UTF-8",
+    "timezone": "America/New_York",
+    "kernel": "linux-zen"
+  },
+  "repos": {
+    "multilib": true
+  },
+  "packages": [
+    "git",
+    "neovim",
+    "foot",
+    "sway",
+    "waybar"
+  ],
+  "services": {
+    "system": ["NetworkManager"],
+    "user": ["pipewire", "wireplumber"]
+  },
+  "dotfiles": {
+    "source": "https://github.com/you/dotfiles",
+    "branch": "main",
+    "method": "symlink"
+  },
+  "pre_install": [
+    "mkdir -p ~/.config/sway"
+  ],
+  "post_install": [
+    "echo 'install complete'"
+  ]
+}

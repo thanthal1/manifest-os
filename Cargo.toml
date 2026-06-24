@@ -1,0 +1,22 @@
+[package]
+name = "manifest"
+version = "0.1.0"
+edition = "2021"
+description = "Declare a complete Arch Linux system in a single manifest.json and reproduce it with one command."
+license = "MIT"
+repository = "https://github.com/manifest-os/manifest"
+
+[[bin]]
+name = "manifest"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

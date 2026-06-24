@@ -1,0 +1,150 @@
+//! The `manifest.json` schema (v1.0.0) and its deserialization.
+//!
+//! The manifest is the single source of truth: packages, kernel, repos,
+//! services, dotfiles and pre/post hooks. Fields are deliberately permissive —
+//! almost everything is optional so a minimal manifest (just a package list)
+//! is valid and useful.
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+
+/// A fully parsed manifest.
+#[derive(Debug, Deserialize)]
+pub struct Manifest {
+    /// Semantic version of the schema this manifest targets, e.g. "1.0.0".
+    /// The core CLI reads this to decide which parser/behavior applies.
+    pub schema_version: String,
+
+    #[serde(default)]
+    pub meta: Meta,
+
+    #[serde(default)]
+    pub system: System,
+
+    #[serde(default)]
+    pub repos: Repos,
+
+    /// Packages installed via paru (official repos + AUR, transparently).
+    #[serde(default)]
+    pub packages: Vec<String>,
+
+    #[serde(default)]
+    pub services: Services,
+
+    pub dotfiles: Option<Dotfiles>,
+
+    /// Shell commands run *before* package installation.
+    #[serde(default)]
+    pub pre_install: Vec<String>,
+
+    /// Shell commands run *after* services are enabled.
+    #[serde(default)]
+    pub post_install: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Meta {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub version: String,
+    /// "free" | "paid" — catalog metadata, ignored by the installer.
+    #[serde(default)]
+    pub license: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct System {
+    pub hostname: Option<String>,
+    pub locale: Option<String>,
+    pub timezone: Option<String>,
+    /// One of: "linux", "linux-lts", "linux-zen", "cachy".
+    pub kernel: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Repos {
+    #[serde(default)]
+    pub multilib: bool,
+    #[serde(default)]
+    pub cachyos: bool,
+    #[serde(default)]
+    pub cachy_optimized_packages: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Services {
+    /// systemd system units (`systemctl enable`).
+    #[serde(default)]
+    pub system: Vec<String>,
+    /// systemd user units (`systemctl --user enable`).
+    #[serde(default)]
+    pub user: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Dotfiles {
+    pub source: String,
+    #[serde(default = "default_branch")]
+    pub branch: String,
+    /// "symlink" | "copy" — how dotfiles are placed. Phase 1 clones only.
+    #[serde(default)]
+    pub method: String,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
+}
+
+impl Manifest {
+    /// Load and parse a manifest from a JSON file on disk.
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading manifest at {}", path.display()))?;
+        Self::from_str(&raw)
+    }
+
+    /// Parse a manifest from a JSON string.
+    pub fn from_str(raw: &str) -> Result<Self> {
+        let manifest: Manifest =
+            serde_json::from_str(raw).context("manifest is not valid JSON for schema v1.0.0")?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Cheap structural checks beyond what serde guarantees.
+    fn validate(&self) -> Result<()> {
+        if self.schema_version.trim().is_empty() {
+            anyhow::bail!("`schema_version` is required and must be non-empty");
+        }
+        if let Some(kernel) = &self.system.kernel {
+            const KNOWN: [&str; 4] = ["linux", "linux-lts", "linux-zen", "cachy"];
+            if !KNOWN.contains(&kernel.as_str()) {
+                anyhow::bail!(
+                    "unknown kernel `{kernel}` (expected one of: {})",
+                    KNOWN.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Maps `system.kernel` to the package it pulls in. CachyOS kernel also
+    /// implies enabling the CachyOS repo + key (handled in the install flow).
+    pub fn kernel_package(&self) -> Option<&'static str> {
+        match self.system.kernel.as_deref() {
+            Some("linux") => Some("linux"),
+            Some("linux-lts") => Some("linux-lts"),
+            Some("linux-zen") => Some("linux-zen"),
+            Some("cachy") => Some("linux-cachyos"),
+            _ => None,
+        }
+    }
+}
