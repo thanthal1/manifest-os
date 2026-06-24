@@ -26,6 +26,9 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     step("Enabling repositories");
     pacman::enable_repos(manifest, ctx)?;
 
+    step("Updating system");
+    pacman::sync_system(ctx)?;
+
     step("Bootstrapping paru");
     pacman::bootstrap_paru(ctx)?;
 

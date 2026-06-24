@@ -8,7 +8,11 @@ use crate::manifest::Manifest;
 use anyhow::Result;
 
 const PACMAN_CONF: &str = "/etc/pacman.conf";
-const PARU_AUR: &str = "https://aur.archlinux.org/paru-bin.git";
+// Bootstrap from the *source* paru package, not paru-bin. The prebuilt -bin
+// binary links against a fixed libalpm soname and breaks whenever pacman bumps
+// its ABI (e.g. libalpm.so.15 -> .16). Building from source links against the
+// installed libalpm, so it is always ABI-correct on a freshly upgraded system.
+const PARU_AUR: &str = "https://aur.archlinux.org/paru.git";
 
 /// Step 3 — enable multilib / CachyOS repos as declared, then refresh the
 /// package databases so later steps can see them. CachyOS is also implied by
@@ -16,8 +20,6 @@ const PARU_AUR: &str = "https://aur.archlinux.org/paru-bin.git";
 pub fn enable_repos(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     let repos = &manifest.repos;
     let needs_cachy = repos.cachyos || manifest.system.kernel.as_deref() == Some("cachy");
-
-    let mut changed = false;
 
     if repos.multilib {
         if ctx.check("grep", &["-q", r"^\[multilib\]", PACMAN_CONF]) {
@@ -29,7 +31,6 @@ pub fn enable_repos(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
                 "sed",
                 &["-i", r"/\[multilib\]/,/Include/ s/^#//", PACMAN_CONF],
             )?;
-            changed = true;
         }
     }
 
@@ -39,18 +40,21 @@ pub fn enable_repos(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         } else {
             println!("  · adding cachyos repo + signing key");
             add_cachyos_repo(ctx)?;
-            changed = true;
         }
         if repos.cachy_optimized_packages {
             println!("  · cachyos-v3/v4 optimized repos handled by cachyos-repo script");
         }
     }
-
-    // A repo change requires a database refresh before installing.
-    if changed {
-        ctx.sudo("pacman", &["-Sy"])?;
-    }
     Ok(())
+}
+
+/// Full system upgrade. Run after enabling repos and before building any AUR
+/// package. This is mandatory on Arch: a bare `pacman -Sy` (refresh without
+/// upgrade) leaves the system in a partial-upgrade state, so a freshly built
+/// AUR package can link against a newer libalpm than the one installed. Always
+/// `-Syu`, never `-Sy`.
+pub fn sync_system(ctx: &Ctx) -> Result<()> {
+    ctx.sudo("pacman", &["-Syu", "--noconfirm"])
 }
 
 /// Whether a named repo is configured in pacman.conf.
@@ -88,7 +92,7 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
     let build = format!(
         "cd \"$(mktemp -d)\" && \
          git clone --depth 1 {PARU_AUR} && \
-         cd paru-bin && \
+         cd paru && \
          makepkg -si --noconfirm"
     );
     ctx.shell(&build, false)

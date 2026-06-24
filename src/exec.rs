@@ -34,7 +34,7 @@ impl Ctx {
 
     fn exec(&self, program: &str, args: &[&str], root: bool) -> Result<()> {
         let prefix = if root { "sudo " } else { "" };
-        eprintln!("  $ {prefix}{program} {}", args.join(" "));
+        println!("  $ {prefix}{program} {}", args.join(" "));
         if self.dry_run {
             return Ok(());
         }
@@ -56,7 +56,7 @@ impl Ctx {
     /// multi-step bootstraps. Set `root` to wrap the whole line in `sudo sh -c`.
     pub fn shell(&self, line: &str, root: bool) -> Result<()> {
         let prefix = if root { "sudo " } else { "" };
-        eprintln!("  $ {prefix}{line}");
+        println!("  $ {prefix}{line}");
         if self.dry_run {
             return Ok(());
         }
