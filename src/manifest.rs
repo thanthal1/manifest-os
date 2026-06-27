@@ -50,6 +50,15 @@ pub struct Manifest {
     /// boots. Designed to run in the ISO's chroot context.
     pub boot: Option<Boot>,
 
+    /// First-run questions a manifest author defines. Answers are injected
+    /// wherever `{{id}}` appears and drive `conditional_packages`.
+    #[serde(default)]
+    pub survey: Vec<Question>,
+
+    /// Package lists gated on survey answers.
+    #[serde(default)]
+    pub conditional_packages: Vec<ConditionalPackages>,
+
     /// Users to create (declarative — no useradd/sudoers shell needed).
     #[serde(default)]
     pub users: Vec<UserSpec>,
@@ -65,6 +74,32 @@ pub struct Manifest {
     /// Shell commands run *after* everything else. Escape hatch only.
     #[serde(default)]
     pub post_install: Vec<String>,
+}
+
+/// A first-run survey question.
+#[derive(Debug, Deserialize)]
+pub struct Question {
+    pub id: String,
+    /// "text" | "secret" | "boolean" | "select" | "multiselect" | "number" | "path"
+    #[serde(rename = "type")]
+    pub qtype: String,
+    pub label: String,
+    #[serde(default)]
+    pub required: bool,
+    /// Default answer (any JSON scalar). Used when unattended.
+    pub default: Option<serde_json::Value>,
+    /// Choices for select / multiselect.
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+/// A package list applied only when its condition holds.
+#[derive(Debug, Deserialize)]
+pub struct ConditionalPackages {
+    /// e.g. "install_gaming == true" or "gpu == nvidia".
+    #[serde(rename = "if")]
+    pub condition: String,
+    pub packages: Vec<String>,
 }
 
 /// A user account to create.

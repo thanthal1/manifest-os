@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0.0",
+  "meta": { "name": "Survey Demo", "description": "Author-defined first-run questions." },
+  "survey": [
+    { "id": "hostname", "type": "text", "label": "Hostname", "default": "archbox" },
+    { "id": "theme", "type": "select", "label": "Theme", "options": ["dark", "light"], "default": "dark" },
+    { "id": "install_gaming", "type": "boolean", "label": "Include gaming packages?", "default": false },
+    { "id": "gpu", "type": "select", "label": "GPU vendor", "options": ["nvidia", "amd", "intel"], "default": "intel" },
+    { "id": "wifi_password", "type": "secret", "label": "WiFi password", "required": false }
+  ],
+  "system": { "hostname": "{{hostname}}" },
+  "packages": ["git", "neovim"],
+  "conditional_packages": [
+    { "if": "install_gaming == true", "packages": ["steam", "gamemode"] },
+    { "if": "gpu == nvidia", "packages": ["nvidia-dkms", "nvidia-utils"] },
+    { "if": "gpu == amd", "packages": ["mesa", "vulkan-radeon"] }
+  ],
+  "files": [
+    { "path": "~/.config/manifest-theme", "content": "theme={{theme}}\n" }
+  ],
+  "post_install": [
+    "echo selected theme is {{theme}}"
+  ]
+}

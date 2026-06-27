@@ -15,6 +15,7 @@ mod install;
 mod kernel;
 mod manifest;
 mod pacman;
+mod survey;
 mod system;
 mod users;
 
@@ -45,6 +46,9 @@ enum Command {
         /// Print every step without executing anything.
         #[arg(long)]
         dry_run: bool,
+        /// JSON object of survey answers ({"id": value}) for unattended installs.
+        #[arg(long)]
+        answers: Option<PathBuf>,
     },
     /// Validate a manifest's structure and schema version.
     Verify {
@@ -76,8 +80,17 @@ fn main() {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
-        Command::Install { file, dry_run } => {
-            let manifest = Manifest::from_path(&file)?;
+        Command::Install { file, dry_run, answers } => {
+            let raw = std::fs::read_to_string(&file)?;
+            // Run the survey, inject {{answers}}, then parse the final manifest.
+            let answered = survey::collect(&raw, answers.as_deref())?;
+            let substituted = survey::substitute(&raw, &answered);
+            let mut manifest = Manifest::from_str(&substituted)?;
+            let extra = survey::conditional_packages(&manifest.conditional_packages, &answered);
+            if !extra.is_empty() {
+                println!("survey: +{} conditional package(s)", extra.len());
+                manifest.packages.extend(extra);
+            }
             install::run(&manifest, &Ctx::new(dry_run))
         }
         Command::Verify { file } => {
