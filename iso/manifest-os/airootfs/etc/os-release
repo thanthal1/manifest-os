@@ -1,0 +1,10 @@
+NAME="Manifest OS"
+PRETTY_NAME="Manifest OS"
+ID=manifestos
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;203;166;247"
+HOME_URL="https://manifest.os/"
+DOCUMENTATION_URL="https://manifest.os/spec"
+SUPPORT_URL="https://manifest.os"
+LOGO=manifestos

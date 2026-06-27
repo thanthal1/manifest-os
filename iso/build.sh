@@ -43,6 +43,20 @@ echo "bundled $(ls "$repo"/examples/*.json | wc -l) example manifest(s)"
 # grep -I skips binary files (e.g. the baked-in manifest binary).
 find "$profile" -type f -exec grep -Ilq . {} \; -exec sed -i 's/\r$//' {} + 2>/dev/null || true
 
+# Repair systemd enablement symlinks. A Windows (no-symlink) git checkout turns
+# airootfs/etc/systemd/system/*.wants/*.service symlinks into text files holding
+# the target path, so systemd ignores them and pacman-init / vboxservice /
+# networkd never get enabled (empty keyring -> pacstrap fails on the live ISO).
+# Any single-line, space-free file naming a unit is a mangled link; relink it.
+while IFS= read -r -d '' f; do
+    c="$(cat "$f")"
+    case "$c" in
+        *$'\n'* | *" "*) continue ;;                       # multi-line / has spaces = real file
+        *.service | *.socket | *.target | *.mount | *.timer | *.automount) ln -sfn "$c" "$f" ;;
+    esac
+done < <(find "$profile/airootfs/etc/systemd/system" -type f -print0)
+echo "repaired systemd enablement symlinks"
+
 rm -rf "$work"
 mkarchiso -v -w "$work" -o "$out" "$profile"
 echo "ISO written to: $out"

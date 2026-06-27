@@ -14,6 +14,31 @@ use crate::tui::InstallPlan;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+/// Manifest OS identity — replaces the upstream (Arch) os-release so fastfetch,
+/// login banners, lsb_release etc. report Manifest OS.
+const OS_RELEASE: &str = r#"NAME="Manifest OS"
+PRETTY_NAME="Manifest OS"
+ID=manifestos
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;203;166;247"
+HOME_URL="https://manifest.os/"
+DOCUMENTATION_URL="https://manifest.os/spec"
+SUPPORT_URL="https://manifest.os"
+LOGO=manifestos
+"#;
+
+/// System-wide fastfetch config: use the Manifest OS logo.
+const FASTFETCH_CONF: &str = r#"{
+  "logo": { "type": "file", "source": "/usr/share/manifest-os/logo.txt", "padding": { "top": 1, "left": 2 } },
+  "display": { "separator": "  " },
+  "modules": [ "title", "separator", "os", "kernel", "wm", "packages", "shell", "memory", "break", "colors" ]
+}
+"#;
+
+/// The Manifest OS logo, embedded at build time.
+const LOGO: &str = include_str!("logo.txt");
+
 pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     if plan.disk.is_empty() {
         bail!("no disk selected");
@@ -33,6 +58,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
 
     pacstrap(ctx)?;
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
+    brand_system(ctx)?;
     create_bootstrap_user(ctx)?;
 
     let manifest_in_root = stage_manifest(&plan.manifest, ctx)?;
@@ -109,6 +135,17 @@ fn pacstrap(ctx: &Ctx) -> Result<()> {
         "pacstrap",
         &["-K", "/mnt", "base", "linux", "linux-firmware", "mkinitcpio", "sudo"],
     )
+}
+
+/// Write the Manifest OS identity into the new root: os-release (so fastfetch
+/// & friends say "Manifest OS"), the logo, and a fastfetch config that uses it.
+fn brand_system(ctx: &Ctx) -> Result<()> {
+    step("Branding the system (Manifest OS)");
+    // /etc/os-release is a symlink to /usr/lib/os-release; write the target.
+    ctx.write_root("/mnt/usr/lib/os-release", OS_RELEASE)?;
+    ctx.write_root("/mnt/usr/share/manifest-os/logo.txt", LOGO)?;
+    ctx.write_root("/mnt/etc/xdg/fastfetch/config.jsonc", FASTFETCH_CONF)?;
+    Ok(())
 }
 
 /// A throwaway sudo user inside the new root, so `manifest install` can run as
