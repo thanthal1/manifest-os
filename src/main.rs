@@ -17,6 +17,7 @@ mod manifest;
 mod pacman;
 mod survey;
 mod system;
+mod tui;
 mod users;
 
 use anyhow::Result;
@@ -69,6 +70,8 @@ enum Command {
     Desktops,
     /// List the kernels the installer can install.
     Kernels,
+    /// Launch the guided installer TUI (the friendly first-boot experience).
+    Tui,
 }
 
 fn main() {
@@ -130,6 +133,26 @@ fn run() -> Result<()> {
             }
             println!("\nUnset system.kernel installs `{}`. Headers are installed alongside.", kernel::DEFAULT_KEY);
             Ok(())
+        }
+        Command::Tui => {
+            match tui::run()? {
+                Some(plan) => {
+                    println!("\n→ Install plan from the wizard:");
+                    println!("    disk:       {} (will be erased)", plan.disk);
+                    println!("    filesystem: {}", plan.filesystem);
+                    println!("    swap:       {}", plan.swap);
+                    println!("    manifest:   {}", plan.manifest);
+                    println!(
+                        "\nNext: partition {} → pacstrap base → `manifest install {}` in the new root.",
+                        plan.disk, plan.manifest
+                    );
+                    Ok(())
+                }
+                None => {
+                    println!("Installer cancelled.");
+                    Ok(())
+                }
+            }
         }
         Command::Export | Command::Sync { .. } | Command::Diff { .. } => {
             anyhow::bail!("not implemented yet — planned for Phase 5 (export/sync/diff)")
