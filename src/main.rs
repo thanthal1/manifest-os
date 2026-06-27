@@ -86,6 +86,25 @@ fn main() {
     }
 }
 
+/// After a successful install, show a clear completion screen and reboot — so
+/// the installer ends gracefully instead of dumping the user at a shell.
+fn finish_and_reboot() {
+    use std::io::Write;
+    println!("\n  ╭───────────────────────────────────────────────╮");
+    println!("  │   ✓  Manifest OS installed successfully!       │");
+    println!("  ╰───────────────────────────────────────────────╯");
+    print!("\n  Remove the install USB, then press Enter to reboot");
+    print!("  (Ctrl-C for a shell). ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    println!("  Rebooting…");
+    // systemctl reboot on a booted system; reboot(8) as a fallback.
+    if std::process::Command::new("systemctl").arg("reboot").status().is_err() {
+        let _ = std::process::Command::new("reboot").status();
+    }
+}
+
 fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Install { file, dry_run, answers } => {
@@ -140,7 +159,13 @@ fn run() -> Result<()> {
             Ok(())
         }
         Command::Tui { dry_run } => match tui::run()? {
-            Some(plan) => installer::execute(&plan, &Ctx::new(dry_run)),
+            Some(plan) => {
+                installer::execute(&plan, &Ctx::new(dry_run))?;
+                if !dry_run {
+                    finish_and_reboot();
+                }
+                Ok(())
+            }
             None => {
                 println!("Installer cancelled.");
                 Ok(())
