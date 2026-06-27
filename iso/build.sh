@@ -32,6 +32,12 @@ fi
 install -Dm755 "$bin" "$profile/airootfs/usr/local/bin/manifest"
 echo "baked in: $bin"
 
+# Ship the example manifests so the TUI can list and install them by name.
+for m in "$repo"/examples/*.json; do
+    install -Dm644 "$m" "$profile/airootfs/usr/share/manifest-os/examples/$(basename "$m")"
+done
+echo "bundled $(ls "$repo"/examples/*.json | wc -l) example manifest(s)"
+
 # Normalize line endings — a Windows checkout may carry CRLF, which makes
 # mkarchiso choke when it sources profiledef.sh ($'\r': command not found).
 # grep -I skips binary files (e.g. the baked-in manifest binary).

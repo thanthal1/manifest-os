@@ -16,3 +16,5 @@ vendor-archiso/
 iso/work/
 iso/out/
 iso/manifest-os/airootfs/usr/local/bin/manifest
+
+iso/manifest-os/airootfs/usr/share/manifest-os/
