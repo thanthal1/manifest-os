@@ -32,6 +32,11 @@ fi
 install -Dm755 "$bin" "$profile/airootfs/usr/local/bin/manifest"
 echo "baked in: $bin"
 
+# Normalize line endings — a Windows checkout may carry CRLF, which makes
+# mkarchiso choke when it sources profiledef.sh ($'\r': command not found).
+# grep -I skips binary files (e.g. the baked-in manifest binary).
+find "$profile" -type f -exec grep -Ilq . {} \; -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+
 rm -rf "$work"
 mkarchiso -v -w "$work" -o "$out" "$profile"
 echo "ISO written to: $out"

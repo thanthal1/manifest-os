@@ -1,0 +1,5 @@
+# Manifest OS targets Linux — keep LF in the working tree even on Windows
+# checkouts, so shell scripts and the archiso profile build cleanly.
+* text=auto eol=lf
+*.png binary
+*.iso binary
