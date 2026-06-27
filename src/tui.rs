@@ -599,22 +599,71 @@ fn list_disks() -> Vec<Disk> {
         .collect()
 }
 
+/// Manifests offered in the picker: the ISO's bundled examples plus any found
+/// on removable media (a `manifests/` folder or loose `*.json`).
 fn bundled_manifests() -> Vec<String> {
-    // On the ISO these ship under /usr/share/manifest-os/examples/.
-    let dir = "/usr/share/manifest-os/examples";
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut v: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                (p.extension().map(|x| x == "json").unwrap_or(false))
-                    .then(|| p.to_string_lossy().to_string())
-            })
-            .collect();
-        v.sort();
-        if !v.is_empty() {
-            return v;
-        }
+    let mut v = json_files_in("/usr/share/manifest-os/examples");
+    v.extend(scan_removable_manifests());
+    v.sort();
+    v.dedup();
+    if v.is_empty() {
+        v = vec!["niri-rice".into(), "hyprland-rice".into(), "gnome".into(), "minimal".into()];
     }
-    vec!["niri-rice".into(), "hyprland-rice".into(), "gnome".into(), "minimal".into()]
+    v
+}
+
+fn json_files_in(dir: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            (p.extension().map(|x| x == "json").unwrap_or(false))
+                .then(|| p.to_string_lossy().to_string())
+        })
+        .collect()
+}
+
+/// Scan removable drives for manifests. Each removable partition is mounted
+/// read-only (the TUI runs as root on the ISO), then `manifests/*.json` and any
+/// loose `*.json` at its root are collected. Drop a JSON in a `manifests/`
+/// folder on a USB stick and it shows up here.
+fn scan_removable_manifests() -> Vec<String> {
+    let mut found = Vec::new();
+    let Ok(out) = Command::new("lsblk")
+        .args(["-P", "-p", "-o", "NAME,TYPE,RM,FSTYPE,MOUNTPOINT"])
+        .output()
+    else {
+        return found;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let val = |k: &str| -> String {
+            line.split(&format!("{k}=\""))
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or("")
+                .to_string()
+        };
+        if val("TYPE") != "part" || val("RM") != "1" || val("FSTYPE").is_empty() {
+            continue;
+        }
+        let name = val("NAME");
+        let mut mp = val("MOUNTPOINT");
+        if mp.is_empty() {
+            let dir = format!("/run/manifest-usb/{}", name.replace('/', "_"));
+            let _ = Command::new("mkdir").args(["-p", &dir]).status();
+            let ok = Command::new("mount")
+                .args(["-o", "ro", &name, &dir])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                continue;
+            }
+            mp = dir;
+        }
+        found.extend(json_files_in(&format!("{mp}/manifests")));
+        found.extend(json_files_in(&mp));
+    }
+    found
 }
