@@ -25,6 +25,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
         if uefi { "UEFI" } else { "BIOS" }
     );
 
+    ensure_keyring(ctx)?;
     partition(&plan.disk, uefi, ctx)?;
     let (root_part, esp_part) = partition_names(&plan.disk, uefi);
     format_disks(&root_part, esp_part.as_deref(), &plan.filesystem, ctx)?;
@@ -39,6 +40,16 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     run_manifest(&manifest_in_root, ctx)?;
 
     println!("\n✓ Manifest OS installed. Remove the media and reboot.");
+    Ok(())
+}
+
+/// Make sure the live keyring is populated so pacstrap can verify signatures.
+/// On some boots `pacman-init` hasn't run (e.g. mangled enablement), leaving an
+/// empty keyring; init+populate is idempotent and cheap.
+fn ensure_keyring(ctx: &Ctx) -> Result<()> {
+    step("Preparing package keyring");
+    ctx.sudo("pacman-key", &["--init"])?;
+    ctx.sudo("pacman-key", &["--populate", "archlinux"])?;
     Ok(())
 }
 
@@ -91,7 +102,13 @@ fn mount(root: &str, esp: Option<&str>, ctx: &Ctx) -> Result<()> {
 
 fn pacstrap(ctx: &Ctx) -> Result<()> {
     step("Installing base system (pacstrap)");
-    ctx.sudo("pacstrap", &["-K", "/mnt", "base", "linux", "linux-firmware", "sudo"])
+    // `mkinitcpio` is named explicitly: `base` pulls a virtual `initramfs`
+    // with three providers, which otherwise triggers a prompt that fails
+    // non-interactively.
+    ctx.sudo(
+        "pacstrap",
+        &["-K", "/mnt", "base", "linux", "linux-firmware", "mkinitcpio", "sudo"],
+    )
 }
 
 /// A throwaway sudo user inside the new root, so `manifest install` can run as
@@ -106,11 +123,13 @@ fn create_bootstrap_user(ctx: &Ctx) -> Result<()> {
     )
 }
 
-/// Place the chosen manifest at /mnt/root/manifest.json. Accepts a bundled
-/// name, a local path, or an http(s) URL.
+/// Place the chosen manifest somewhere the install runs from. Uses /etc (root-
+/// owned, world-readable) so the non-root installer account can read it — NOT
+/// /root, which it cannot. Accepts a bundled name, a local path, or an http(s)
+/// URL.
 fn stage_manifest(choice: &str, ctx: &Ctx) -> Result<String> {
     step("Staging manifest");
-    let dest = "/mnt/root/manifest.json";
+    let dest = "/mnt/etc/manifest-install.json";
     if choice.starts_with("http://") || choice.starts_with("https://") {
         ctx.sudo("curl", &["-fsSL", "-o", dest, choice])?;
     } else {
@@ -122,7 +141,7 @@ fn stage_manifest(choice: &str, ctx: &Ctx) -> Result<String> {
         };
         ctx.sudo("cp", &[&src, dest])?;
     }
-    Ok("/root/manifest.json".to_string())
+    Ok("/etc/manifest-install.json".to_string())
 }
 
 /// Copy this very binary into the new root so it can run inside the chroot.
