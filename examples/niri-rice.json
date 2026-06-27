@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Niri Scrollable Rice",
+    "description": "A self-contained niri desktop — user, configs and all are declared here, no hooks.",
+    "tags": ["niri", "wayland", "rice", "scrollable"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "niri-vm",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us"
+  },
+  "boot": {
+    "loader": "grub",
+    "cmdline": ["quiet"],
+    "timeout": 3
+  },
+  "users": [
+    {
+      "name": "niri",
+      "groups": ["wheel", "video", "input"],
+      "shell": "/bin/bash",
+      "sudo": true,
+      "password": "niri"
+    }
+  ],
+  "desktop": "niri",
+  "display_manager": "greetd",
+  "packages": ["ttf-jetbrains-mono-nerd", "firefox"],
+  "files": [
+    {
+      "path": "/home/niri/.config/niri/config.kdl",
+      "owner": "niri:niri",
+      "content": "input {\n    keyboard {\n        xkb {\n            layout \"us\"\n        }\n    }\n}\n\nspawn-at-startup \"waybar\"\nspawn-at-startup \"swaybg\" \"-c\" \"#1e1e2e\"\nspawn-at-startup \"mako\"\n\nprefer-no-csd\n\nlayout {\n    gaps 16\n    focus-ring {\n        width 3\n        active-color \"#cba6f7\"\n        inactive-color \"#45475a\"\n    }\n}\n\nbinds {\n    Mod+Return { spawn \"foot\"; }\n    Mod+D { spawn \"fuzzel\"; }\n    Mod+Q { close-window; }\n    Mod+Left { focus-column-left; }\n    Mod+Right { focus-column-right; }\n    Mod+1 { focus-workspace 1; }\n    Mod+2 { focus-workspace 2; }\n    Mod+Shift+E { quit; }\n}\n"
+    },
+    {
+      "path": "/home/niri/.config/waybar/config.jsonc",
+      "owner": "niri:niri",
+      "content": "{\"layer\":\"top\",\"height\":30,\"modules-left\":[\"niri/workspaces\"],\"modules-center\":[\"clock\"],\"modules-right\":[\"cpu\",\"memory\",\"network\"],\"clock\":{\"format\":\"{:%H:%M  %a %d %b}\"},\"cpu\":{\"format\":\"  {usage}%\"},\"memory\":{\"format\":\"  {percentage}%\"},\"network\":{\"format-ethernet\":\"  {ipaddr}\"}}\n"
+    },
+    {
+      "path": "/home/niri/.config/waybar/style.css",
+      "owner": "niri:niri",
+      "content": "* { font-family: \"JetBrainsMono Nerd Font\"; font-size: 13px; }\nwindow#waybar { background: #1e1e2e; color: #cdd6f4; }\n#workspaces button.active { color: #cba6f7; }\n#clock { color: #cba6f7; padding: 0 14px; font-weight: bold; }\n#cpu { color: #89b4fa; padding: 0 10px; }\n#memory { color: #a6e3a1; padding: 0 10px; }\n#network { color: #94e2d5; padding: 0 10px; }\n"
+    },
+    {
+      "path": "/home/niri/.config/foot/foot.ini",
+      "owner": "niri:niri",
+      "content": "font=JetBrainsMono Nerd Font:size=11\npad=12x12\n[colors-dark]\nalpha=0.94\nbackground=1e1e2e\nforeground=cdd6f4\n"
+    }
+  ]
+}

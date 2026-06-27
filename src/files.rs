@@ -8,6 +8,7 @@
 use crate::exec::Ctx;
 use crate::manifest::FileSpec;
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 pub fn apply(files: &[FileSpec], ctx: &Ctx) -> Result<()> {
     for f in files {
@@ -20,16 +21,43 @@ pub fn apply(files: &[FileSpec], ctx: &Ctx) -> Result<()> {
                 ctx.run("chmod", &[mode, &path])?;
             }
         } else {
+            // Capture which directories we're about to create, so `owner` can
+            // claim the whole new tree (e.g. provisioning /home/x/.config/...),
+            // not just the leaf file.
+            let created = if f.owner.is_some() && !ctx.dry_run {
+                topmost_created(Path::new(&path))
+            } else {
+                None
+            };
             ctx.write_root(&path, &f.content)?;
             if let Some(mode) = &f.mode {
                 ctx.sudo("chmod", &[mode, &path])?;
             }
             if let Some(owner) = &f.owner {
-                ctx.sudo("chown", &[owner, &path])?;
+                match &created {
+                    Some(top) => ctx.sudo("chown", &["-R", owner, &top.to_string_lossy()])?,
+                    None => ctx.sudo("chown", &[owner, &path])?,
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The highest ancestor directory that does not yet exist — i.e. the topmost
+/// directory `mkdir -p` will create. Used to chown an entire freshly-created
+/// path tree to the file's owner.
+fn topmost_created(path: &Path) -> Option<PathBuf> {
+    let mut topmost = None;
+    let mut cur = path.parent();
+    while let Some(p) = cur {
+        if p.exists() {
+            break;
+        }
+        topmost = Some(p.to_path_buf());
+        cur = p.parent();
+    }
+    topmost
 }
 
 /// Resolve `~/...` to the invoking user's home (a user-level write); anything
