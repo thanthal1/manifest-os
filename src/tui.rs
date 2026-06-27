@@ -62,6 +62,7 @@ struct App {
     net_sel: usize,
     wifi_pass: String,
     pass_focus: bool,
+    net_status: String,
 
     disks: Vec<Disk>,
     disk_sel: usize,
@@ -87,6 +88,7 @@ impl App {
             net_sel: 0,
             wifi_pass: String::new(),
             pass_focus: false,
+            net_status: String::new(),
             disks: list_disks(),
             disk_sel: 0,
             disk_field: 0,
@@ -397,29 +399,40 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
 fn draw_network(f: &mut Frame, area: Rect, app: &App) {
     let mut lines = Vec::new();
     if app.online {
-        lines.push(Line::from(Span::styled("✓ You're online.", Style::default().fg(GREEN).bold())));
+        let msg = if app.net_status.is_empty() { "✓ You're online.".to_string() } else { app.net_status.clone() };
+        lines.push(Line::from(Span::styled(msg, Style::default().fg(GREEN).bold())));
         lines.push(Line::from(Span::styled("Press Enter to continue.", Style::default().fg(SUBT))));
     } else if app.wifi_dev.is_some() {
-        lines.push(Line::from(Span::styled("Not connected. Press 's' to scan for WiFi.", Style::default().fg(YELLOW))));
-        lines.push(Line::from(""));
+        // Surface the last connection result (e.g. wrong password) prominently.
+        if !app.net_status.is_empty() {
+            lines.push(Line::from(Span::styled(app.net_status.clone(), Style::default().fg(RED).bold())));
+            lines.push(Line::from(""));
+        }
         if app.pass_focus {
             let masked: String = "•".repeat(app.wifi_pass.len());
+            let target = app.networks.get(app.net_sel).cloned().unwrap_or_default();
+            lines.push(Line::from(Span::styled(format!("Connecting to: {target}"), Style::default().fg(TEXT))));
             lines.push(Line::from(vec![
                 Span::styled("Password: ", Style::default().fg(TEXT)),
                 Span::styled(masked, Style::default().fg(ACCENT)),
                 Span::styled("▏", Style::default().fg(ACCENT)),
             ]));
         } else {
+            let header = if app.networks.is_empty() {
+                "Not connected. Press 's' to scan for WiFi.".to_string()
+            } else {
+                format!("Available networks ({}):", app.networks.len())
+            };
+            lines.push(Line::from(Span::styled(header, Style::default().fg(YELLOW))));
+            lines.push(Line::from(""));
             for (i, n) in app.networks.iter().enumerate() {
                 let sel = i == app.net_sel;
                 let style = if sel { Style::default().fg(BASE).bg(ACCENT) } else { Style::default().fg(TEXT) };
                 lines.push(Line::from(Span::styled(format!("  {n}  "), style)));
             }
-            if app.networks.is_empty() {
-                lines.push(Line::from(Span::styled("  (no networks yet — press 's')", Style::default().fg(SUBT))));
-            } else {
+            if !app.networks.is_empty() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("Select one, press 'p' to enter its password.", Style::default().fg(SUBT))));
+                lines.push(Line::from(Span::styled("↑↓ pick · 'p' enter password · 's' rescan", Style::default().fg(SUBT))));
             }
         }
     } else {
@@ -547,35 +560,88 @@ fn wifi_device() -> Option<String> {
     None
 }
 
-fn scan_wifi(dev: &str) -> Vec<String> {
-    let _ = Command::new("iwctl").args(["station", dev, "scan"]).output();
-    std::thread::sleep(Duration::from_secs(2));
-    let out = Command::new("iwctl")
-        .args(["station", dev, "get-networks"])
-        .output();
-    let Ok(out) = out else { return Vec::new() };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let t = l.trim();
-            // Skip headers / decoration; take the first column as the SSID.
-            if t.is_empty() || t.starts_with("---") || t.contains("Available") || t.contains("Network name") {
-                return None;
+/// Strip ANSI escape sequences (iwctl colorizes its table output).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // consume up to and including the final letter of the CSI sequence
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
             }
-            t.split_whitespace().next().map(|s| s.to_string())
-        })
-        .take(12)
-        .collect()
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
-fn connect_wifi(app: &mut App) {
-    if let (Some(dev), Some(ssid)) = (app.wifi_dev.clone(), app.networks.get(app.net_sel).cloned()) {
-        let _ = Command::new("iwctl")
-            .args(["--passphrase", &app.wifi_pass, "station", &dev, "connect", &ssid])
-            .output();
-        std::thread::sleep(Duration::from_secs(3));
-        app.online = is_online();
+fn scan_wifi(dev: &str) -> Vec<String> {
+    let _ = Command::new("iwctl").args(["station", dev, "scan"]).output();
+    // iwd's scan takes a few seconds to populate all networks.
+    std::thread::sleep(Duration::from_secs(4));
+    let out = match Command::new("iwctl").args(["station", dev, "get-networks"]).output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut nets = Vec::new();
+    for raw in text.lines() {
+        let line = strip_ansi(raw);
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.contains("Available networks")
+            || trimmed.contains("Network name")
+            || trimmed.chars().all(|c| c == '-' || c.is_whitespace())
+        {
+            continue;
+        }
+        // Drop the leading "> " connected-marker column, then the SSID runs up
+        // to the 2+ space gap before the Security column (keeps SSIDs w/ spaces).
+        let body = line.trim_start();
+        let body = body.strip_prefix('>').unwrap_or(body).trim_start();
+        let ssid = body.split("  ").next().unwrap_or("").trim();
+        if !ssid.is_empty() && !nets.iter().any(|n| n == ssid) {
+            nets.push(ssid.to_string());
+        }
     }
+    nets.truncate(20);
+    nets
+}
+
+/// Connect, then actually verify: poll for an IP/route until online or timeout,
+/// and report success or a likely cause (wrong password) back to the UI.
+fn connect_wifi(app: &mut App) {
+    let (Some(dev), Some(ssid)) = (app.wifi_dev.clone(), app.networks.get(app.net_sel).cloned())
+    else {
+        return;
+    };
+    let connected = Command::new("iwctl")
+        .args(["--passphrase", &app.wifi_pass, "station", &dev, "connect", &ssid])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    // Wait for association + DHCP (networkd), polling connectivity.
+    let mut online = false;
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_secs(2));
+        if is_online() {
+            online = true;
+            break;
+        }
+    }
+    app.online = online;
+    app.net_status = if online {
+        format!("✓ Connected to {ssid}")
+    } else if !connected {
+        format!("✗ Couldn't connect to {ssid} — wrong password?")
+    } else {
+        format!("✗ Joined {ssid} but no internet yet — wait a moment or retry")
+    };
 }
 
 fn list_disks() -> Vec<Disk> {
