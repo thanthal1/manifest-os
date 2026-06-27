@@ -10,11 +10,13 @@ mod boot;
 mod desktop;
 mod dotfiles;
 mod exec;
+mod files;
 mod install;
 mod kernel;
 mod manifest;
 mod pacman;
 mod system;
+mod users;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

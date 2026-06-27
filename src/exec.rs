@@ -137,6 +137,43 @@ impl Ctx {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    /// Write a file as the current user (no sudo), creating parent dirs.
+    pub fn write_user(&self, path: &str, content: &str) -> Result<()> {
+        println!("  > write {path} ({} bytes)", content.len());
+        if self.dry_run {
+            return Ok(());
+        }
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Set a user's password via `chpasswd`, feeding it over stdin so the
+    /// password is NEVER printed to the log.
+    pub fn set_password(&self, user: &str, password: &str) -> Result<()> {
+        println!("  · setting password for {user}");
+        if self.dry_run {
+            return Ok(());
+        }
+        let mut child = Command::new("sudo")
+            .arg("chpasswd")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to launch chpasswd: {e}"))?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(format!("{user}:{password}\n").as_bytes())?;
+        match child.wait() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => bail!("chpasswd exited with status {s}"),
+            Err(e) => bail!("chpasswd failed: {e}"),
+        }
+    }
+
     /// Run a detection command quietly and report whether it succeeded.
     ///
     /// In dry-run this does NOT execute and returns `false`, so the pipeline

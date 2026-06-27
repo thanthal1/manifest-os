@@ -70,6 +70,31 @@ whole `~/.config`. `symlink` links each file back to a persistent clone (so
 editing the repo updates the live config); `copy` copies them. `.git`, README
 and LICENSE are skipped.
 
+## Declarative config (instead of hooks)
+
+The manifest prefers **declared state** over shell. Common things that would
+otherwise be `post_install` commands have first-class blocks the CLI executes:
+
+```json
+"users": [
+  { "name": "matt", "groups": ["wheel","video"], "shell": "/bin/zsh", "sudo": true }
+],
+"files": [
+  { "path": "/etc/sysctl.d/99-swappiness.conf", "content": "vm.swappiness=10\n", "mode": "644" },
+  { "path": "~/.config/foo/bar.conf", "content": "..." }
+]
+```
+
+- **`users`** — creates accounts (idempotent), sets groups/shell, drops a
+  validated `/etc/sudoers.d` file for `sudo: true`, and sets `password` via
+  `chpasswd` over stdin (never logged; prefer a survey `secret`).
+- **`files`** — writes a file verbatim: `~/...` as the user, absolute paths as
+  root, creating parent dirs and applying `mode`/`owner`. Replaces
+  `mkdir`/`echo >`/`cat >` hooks.
+
+`pre_install` / `post_install` remain only as an escape hatch for the genuinely
+one-off.
+
 ## System basics
 
 The `system` block sets the machine's identity and localization. All applied

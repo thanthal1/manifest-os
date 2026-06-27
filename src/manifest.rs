@@ -50,13 +50,51 @@ pub struct Manifest {
     /// boots. Designed to run in the ISO's chroot context.
     pub boot: Option<Boot>,
 
-    /// Shell commands run *before* package installation.
+    /// Users to create (declarative — no useradd/sudoers shell needed).
+    #[serde(default)]
+    pub users: Vec<UserSpec>,
+
+    /// Config files to write (declarative — no mkdir/echo/cat shell needed).
+    #[serde(default)]
+    pub files: Vec<FileSpec>,
+
+    /// Shell commands run *before* package installation. Escape hatch only.
     #[serde(default)]
     pub pre_install: Vec<String>,
 
-    /// Shell commands run *after* services are enabled.
+    /// Shell commands run *after* everything else. Escape hatch only.
     #[serde(default)]
     pub post_install: Vec<String>,
+}
+
+/// A user account to create.
+#[derive(Debug, Deserialize)]
+pub struct UserSpec {
+    pub name: String,
+    /// Supplementary groups, e.g. ["wheel", "video", "input"].
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Login shell, e.g. "/bin/zsh". Defaults to the system default.
+    pub shell: Option<String>,
+    /// Grant passwordless-prompt sudo via a /etc/sudoers.d drop-in.
+    #[serde(default)]
+    pub sudo: bool,
+    /// Initial password. Sensitive — never logged. Prefer a survey `secret`.
+    pub password: Option<String>,
+}
+
+/// A file to write verbatim.
+#[derive(Debug, Deserialize)]
+pub struct FileSpec {
+    /// Destination. `~/...` writes to the invoking user's home; an absolute
+    /// path (e.g. /etc/...) is written as root.
+    pub path: String,
+    #[serde(default)]
+    pub content: String,
+    /// Octal permission string, e.g. "644" or "0440".
+    pub mode: Option<String>,
+    /// chown target, e.g. "root:root" or "alice". Implies a root-owned write.
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

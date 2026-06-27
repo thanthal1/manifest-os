@@ -14,10 +14,12 @@ use crate::boot;
 use crate::desktop;
 use crate::dotfiles;
 use crate::exec::Ctx;
+use crate::files;
 use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
 use crate::system;
+use crate::users;
 use anyhow::Result;
 
 pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
@@ -60,6 +62,11 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         system::apply(&manifest.system, ctx)?;
     }
 
+    if !manifest.users.is_empty() {
+        step("Creating users");
+        users::apply(&manifest.users, ctx)?;
+    }
+
     if let Some(boot_cfg) = &manifest.boot {
         step("Configuring bootloader");
         boot::apply(boot_cfg, kernel, ctx)?;
@@ -77,6 +84,13 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         step("Installing dotfiles");
         dotfiles::install(df, ctx)?;
     }
+
+    // After dotfiles, so an explicit `files` entry can override a dotfile.
+    if !manifest.files.is_empty() {
+        step("Writing files");
+        files::apply(&manifest.files, ctx)?;
+    }
+
     enable_services(manifest, ctx)?;
     run_hooks("post_install", &manifest.post_install, ctx)?;
 
