@@ -12,6 +12,7 @@ mod dotfiles;
 mod exec;
 mod files;
 mod install;
+mod installer;
 mod kernel;
 mod manifest;
 mod pacman;
@@ -71,7 +72,11 @@ enum Command {
     /// List the kernels the installer can install.
     Kernels,
     /// Launch the guided installer TUI (the friendly first-boot experience).
-    Tui,
+    Tui {
+        /// Preview the install steps without touching the disk.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -134,26 +139,13 @@ fn run() -> Result<()> {
             println!("\nUnset system.kernel installs `{}`. Headers are installed alongside.", kernel::DEFAULT_KEY);
             Ok(())
         }
-        Command::Tui => {
-            match tui::run()? {
-                Some(plan) => {
-                    println!("\n→ Install plan from the wizard:");
-                    println!("    disk:       {} (will be erased)", plan.disk);
-                    println!("    filesystem: {}", plan.filesystem);
-                    println!("    swap:       {}", plan.swap);
-                    println!("    manifest:   {}", plan.manifest);
-                    println!(
-                        "\nNext: partition {} → pacstrap base → `manifest install {}` in the new root.",
-                        plan.disk, plan.manifest
-                    );
-                    Ok(())
-                }
-                None => {
-                    println!("Installer cancelled.");
-                    Ok(())
-                }
+        Command::Tui { dry_run } => match tui::run()? {
+            Some(plan) => installer::execute(&plan, &Ctx::new(dry_run)),
+            None => {
+                println!("Installer cancelled.");
+                Ok(())
             }
-        }
+        },
         Command::Export | Command::Sync { .. } | Command::Diff { .. } => {
             anyhow::bail!("not implemented yet — planned for Phase 5 (export/sync/diff)")
         }
