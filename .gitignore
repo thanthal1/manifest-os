@@ -10,3 +10,9 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+vendor-archiso/
+
+# ISO build artifacts
+iso/work/
+iso/out/
+iso/manifest-os/airootfs/usr/local/bin/manifest

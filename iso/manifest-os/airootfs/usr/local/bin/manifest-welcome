@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Manifest OS first-boot welcome.
+#
+# Placeholder for the full Ratatui TUI. It already does the parts that can't be
+# baked into a manifest — bringing the network up (incl. WiFi via iwd) — then
+# points at the install flow. Disk partitioning + catalog browsing land in the
+# real TUI.
+set -uo pipefail
+
+c_reset=$'\e[0m'; c_accent=$'\e[38;5;141m'; c_dim=$'\e[2m'; c_ok=$'\e[38;5;114m'; c_warn=$'\e[38;5;215m'
+
+banner() {
+    clear
+    printf '%s' "$c_accent"
+    cat <<'ART'
+   __  __             _  __         _      ___  ___
+  |  \/  |__ _ _ _ (_)/ _|___ __| |_   / _ \/ __|
+  | |\/| / _` | ' \| |  _/ -_|_-<  _| | (_) \__ \
+  |_|  |_\__,_|_||_|_|_| \___/__/\__|  \___/|___/
+ART
+    printf '%s' "$c_reset"
+    echo "  ${c_dim}Declare it. Share it. Deploy it.${c_reset}"
+    echo
+}
+
+online() { timeout 6 ping -c1 -W3 archlinux.org &>/dev/null; }
+
+wifi_device() {
+    # First wireless interface name, if any.
+    for d in /sys/class/net/*/wireless; do
+        [ -e "$d" ] && { basename "$(dirname "$d")"; return 0; }
+    done
+    return 1
+}
+
+connect_wifi() {
+    local dev="$1" ssid pass
+    echo "  Scanning on ${dev}..."
+    iwctl station "$dev" scan &>/dev/null
+    sleep 2
+    iwctl station "$dev" get-networks
+    echo
+    read -rp "  WiFi network (SSID): " ssid
+    read -rsp "  Password: " pass; echo
+    if [ -n "$pass" ]; then
+        iwctl --passphrase "$pass" station "$dev" connect "$ssid"
+    else
+        iwctl station "$dev" connect "$ssid"
+    fi
+    sleep 3
+}
+
+step_network() {
+    echo "  [1/4] Network"
+    if online; then
+        echo "      ${c_ok}connected${c_reset}"
+        return
+    fi
+    local dev
+    if dev=$(wifi_device); then
+        echo "      offline — WiFi device: ${dev}"
+        connect_wifi "$dev"
+        if online; then echo "      ${c_ok}connected${c_reset}"; else echo "      ${c_warn}still offline${c_reset}"; fi
+    else
+        echo "      ${c_warn}offline, no WiFi device — connect ethernet (DHCP is automatic)${c_reset}"
+    fi
+}
+
+main() {
+    banner
+    step_network
+    echo "  [2/4] Disk        ${c_dim}(guided partitioning — in the full TUI)${c_reset}"
+    echo "  [3/4] Manifest    ${c_dim}browse catalog / enter URL / load from USB${c_reset}"
+    echo "  [4/4] Install"
+    echo
+    echo "  Until the guided TUI lands, install directly:"
+    echo "      ${c_accent}manifest install <file-or-url> --answers answers.json${c_reset}"
+    echo "      ${c_accent}manifest desktops${c_reset}   ${c_dim}# list supported desktops${c_reset}"
+    echo
+    echo "  ${c_dim}Dropping to a shell.${c_reset}"
+    echo
+    exec bash
+}
+
+main "$@"

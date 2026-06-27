@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Build the Manifest OS ISO. Must run on an Arch host as root, with the
+# `archiso` package installed (provides mkarchiso). Typically run in the VM.
+#
+#   sudo ./iso/build.sh
+#
+# Output: ./iso/out/manifestos-*.iso
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/.." && pwd)"
+profile="$here/manifest-os"
+work="$here/work"
+out="$here/out"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "must run as root (mkarchiso needs it): sudo $0" >&2
+    exit 1
+fi
+if ! command -v mkarchiso &>/dev/null; then
+    echo "mkarchiso not found — install it: pacman -S archiso" >&2
+    exit 1
+fi
+
+# Bake the freshly-built manifest binary into the live filesystem.
+bin="$repo/target/release/manifest"
+[[ -x "$bin" ]] || bin="$repo/dist/manifest"
+if [[ ! -x "$bin" ]]; then
+    echo "no manifest binary found (build with: cargo build --release)" >&2
+    exit 1
+fi
+install -Dm755 "$bin" "$profile/airootfs/usr/local/bin/manifest"
+echo "baked in: $bin"
+
+rm -rf "$work"
+mkarchiso -v -w "$work" -o "$out" "$profile"
+echo "ISO written to: $out"
