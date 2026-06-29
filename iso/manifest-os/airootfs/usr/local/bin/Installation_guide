@@ -1,5 +1,8 @@
 #!/bin/sh
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Open the Manifest OS documentation. The installer normally starts on its own;
+# this is here only for the live shell.
 
-exec xdg-open 'https://wiki.archlinux.org/title/Installation_guide'
+exec xdg-open 'https://manifest.os'
