@@ -2,9 +2,15 @@
   "schema_version": "1.0.0",
   "meta": {
     "name": "Niri Scrollable Rice",
-    "description": "A self-contained niri desktop — user, configs and all are declared here, no hooks.",
-    "tags": ["niri", "wayland", "rice", "scrollable"],
-    "version": "1.0.0",
+    "description": "A self-contained niri desktop with the Noctalia shell — bar, launcher, notifications and a settings GUI, all declared here.",
+    "tags": [
+      "niri",
+      "wayland",
+      "rice",
+      "scrollable",
+      "noctalia"
+    ],
+    "version": "1.1.0",
     "license": "free"
   },
   "system": {
@@ -15,13 +21,19 @@
   },
   "boot": {
     "loader": "grub",
-    "cmdline": ["quiet"],
+    "cmdline": [
+      "quiet"
+    ],
     "timeout": 3
   },
   "users": [
     {
       "name": "niri",
-      "groups": ["wheel", "video", "input"],
+      "groups": [
+        "wheel",
+        "video",
+        "input"
+      ],
       "shell": "/bin/bash",
       "sudo": true,
       "password": "niri"
@@ -29,27 +41,22 @@
   ],
   "desktop": "niri",
   "display_manager": "greetd",
-  "packages": ["ttf-jetbrains-mono-nerd", "firefox"],
+  "packages": [
+    "ttf-jetbrains-mono-nerd",
+    "firefox",
+    "noctalia-shell",
+    "brightnessctl"
+  ],
   "files": [
     {
       "path": "/home/niri/.config/niri/config.kdl",
       "owner": "niri:niri",
-      "content": "input {\n    keyboard {\n        xkb {\n            layout \"us\"\n        }\n    }\n}\n\nspawn-at-startup \"waybar\"\nspawn-at-startup \"swaybg\" \"-c\" \"#1e1e2e\"\nspawn-at-startup \"mako\"\n\nprefer-no-csd\n\nlayout {\n    gaps 16\n    focus-ring {\n        width 3\n        active-color \"#cba6f7\"\n        inactive-color \"#45475a\"\n    }\n}\n\nbinds {\n    Mod+Return { spawn \"foot\"; }\n    Mod+D { spawn \"fuzzel\"; }\n    Mod+Q { close-window; }\n    Mod+Left { focus-column-left; }\n    Mod+Right { focus-column-right; }\n    Mod+1 { focus-workspace 1; }\n    Mod+2 { focus-workspace 2; }\n    Mod+Shift+E { quit; }\n}\n"
-    },
-    {
-      "path": "/home/niri/.config/waybar/config.jsonc",
-      "owner": "niri:niri",
-      "content": "{\"layer\":\"top\",\"height\":30,\"modules-left\":[\"niri/workspaces\"],\"modules-center\":[\"clock\"],\"modules-right\":[\"cpu\",\"memory\",\"network\"],\"clock\":{\"format\":\"{:%H:%M  %a %d %b}\"},\"cpu\":{\"format\":\"  {usage}%\"},\"memory\":{\"format\":\"  {percentage}%\"},\"network\":{\"format-ethernet\":\"  {ipaddr}\"}}\n"
-    },
-    {
-      "path": "/home/niri/.config/waybar/style.css",
-      "owner": "niri:niri",
-      "content": "* { font-family: \"JetBrainsMono Nerd Font\"; font-size: 13px; }\nwindow#waybar { background: #1e1e2e; color: #cdd6f4; }\n#workspaces button.active { color: #cba6f7; }\n#clock { color: #cba6f7; padding: 0 14px; font-weight: bold; }\n#cpu { color: #89b4fa; padding: 0 10px; }\n#memory { color: #a6e3a1; padding: 0 10px; }\n#network { color: #94e2d5; padding: 0 10px; }\n"
+      "content": "input {\n    keyboard {\n        xkb {\n            layout \"us\"\n        }\n    }\n    touchpad {\n        tap\n        natural-scroll\n    }\n}\n\n// Noctalia is the desktop shell (bar, launcher, notifications, settings UI).\n// Use the AUR noctalia-qs runtime, falling back to upstream quickshell (qs).\nspawn-at-startup \"sh\" \"-c\" \"noctalia-qs -c noctalia-shell || qs -c noctalia-shell\"\nspawn-at-startup \"swaybg\" \"-c\" \"#1e1e2e\"\n\nprefer-no-csd\n\nlayout {\n    gaps 16\n    center-focused-column \"never\"\n    default-column-width { proportion 0.5; }\n    focus-ring {\n        width 3\n        active-color \"#cba6f7\"\n        inactive-color \"#45475a\"\n    }\n}\n\nscreenshot-path \"~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png\"\n\nbinds {\n    // Apps\n    Mod+Return hotkey-overlay-title=\"Open a terminal\" { spawn \"foot\"; }\n    Mod+D hotkey-overlay-title=\"Run an application\" { spawn \"fuzzel\"; }\n    Mod+Q { close-window; }\n\n    // Focus (arrows or vim keys)\n    Mod+Left  { focus-column-left; }\n    Mod+Right { focus-column-right; }\n    Mod+Up    { focus-window-up; }\n    Mod+Down  { focus-window-down; }\n    Mod+H     { focus-column-left; }\n    Mod+L     { focus-column-right; }\n    Mod+J     { focus-window-down; }\n    Mod+K     { focus-window-up; }\n\n    // Move windows / columns\n    Mod+Shift+Left  { move-column-left; }\n    Mod+Shift+Right { move-column-right; }\n    Mod+Shift+Up    { move-window-up; }\n    Mod+Shift+Down  { move-window-down; }\n\n    // Workspaces\n    Mod+1 { focus-workspace 1; }\n    Mod+2 { focus-workspace 2; }\n    Mod+3 { focus-workspace 3; }\n    Mod+4 { focus-workspace 4; }\n    Mod+Shift+1 { move-column-to-workspace 1; }\n    Mod+Shift+2 { move-column-to-workspace 2; }\n    Mod+Shift+3 { move-column-to-workspace 3; }\n    Mod+Shift+4 { move-column-to-workspace 4; }\n\n    // Window sizing / layout\n    Mod+F { fullscreen-window; }\n    Mod+M { maximize-column; }\n    Mod+C { center-column; }\n    Mod+R { switch-preset-column-width; }\n    Mod+Minus { set-column-width \"-10%\"; }\n    Mod+Equal { set-column-width \"+10%\"; }\n    Mod+Comma { consume-window-into-column; }\n    Mod+Period { expel-window-from-column; }\n\n    // Screenshots\n    Print { screenshot; }\n    Mod+Print { screenshot-window; }\n\n    // Volume & brightness keys\n    XF86AudioRaiseVolume { spawn \"wpctl\" \"set-volume\" \"@DEFAULT_AUDIO_SINK@\" \"5%+\"; }\n    XF86AudioLowerVolume { spawn \"wpctl\" \"set-volume\" \"@DEFAULT_AUDIO_SINK@\" \"5%-\"; }\n    XF86AudioMute { spawn \"wpctl\" \"set-mute\" \"@DEFAULT_AUDIO_SINK@\" \"toggle\"; }\n    XF86MonBrightnessUp { spawn \"brightnessctl\" \"set\" \"+5%\"; }\n    XF86MonBrightnessDown { spawn \"brightnessctl\" \"set\" \"5%-\"; }\n\n    // Session\n    Mod+Shift+Slash { show-hotkey-overlay; }\n    Mod+Shift+E { quit; }\n}\n"
     },
     {
       "path": "/home/niri/.config/foot/foot.ini",
       "owner": "niri:niri",
-      "content": "font=JetBrainsMono Nerd Font:size=11\npad=12x12\n[colors-dark]\nalpha=0.94\nbackground=1e1e2e\nforeground=cdd6f4\n"
+      "content": "font=JetBrainsMono Nerd Font:size=11\npad=12x12\n[colors]\nalpha=0.94\nbackground=1e1e2e\nforeground=cdd6f4\n"
     }
   ]
 }

@@ -18,7 +18,7 @@ use std::path::PathBuf;
     name = "manifest",
     version,
     about = "Declare it. Share it. Deploy it.",
-    long_about = "Reproduce a complete Arch Linux system from a single manifest.json."
+    long_about = "Reproduce a complete Linux system from a single manifest.json."
 )]
 struct Cli {
     #[command(subcommand)]

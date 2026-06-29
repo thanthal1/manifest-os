@@ -2,6 +2,7 @@
 name = "manifest"
 version = "0.1.0"
 edition = "2021"
+default-run = "manifest"
 description = "Declare a complete Arch Linux system in a single manifest.json and reproduce it with one command."
 license = "MIT"
 repository = "https://github.com/manifest-os/manifest"
