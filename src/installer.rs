@@ -393,9 +393,21 @@ fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
         .collect();
     let base = win.windows_part.trim_start_matches("/dev/");
     let start_sec = sysfs_u64(&format!("/sys/class/block/{base}/start"));
-    let new_end = start_sec * 512 + new_ntfs;
-    ctx.shell(&format!("parted -s {} resizepart {} {}B", win.disk, num, new_end), true)
-        .context("resizing the Windows partition failed")?;
+    // End sector: the shrunk filesystem plus 1 MiB of slack, so the partition is
+    // never smaller than its filesystem. We recreate the partition at the SAME
+    // start sector and preserve its type (0700, Microsoft basic data) and unique
+    // GUID, so Windows' boot references stay valid. (parted's resizepart refuses
+    // to shrink non-interactively; sgdisk never prompts.)
+    let new_end_sec = start_sec + new_ntfs / 512 + 2048;
+    let shrink = format!(
+        "guid=$(sgdisk -i {num} {disk} | sed -n 's/.*unique GUID: //p' | tr -d ' \\r'); \
+         sgdisk -d {num} -n {num}:{start}:{end} -t {num}:0700 ${{guid:+-u {num}:$guid}} {disk}",
+        num = num,
+        disk = win.disk,
+        start = start_sec,
+        end = new_end_sec
+    );
+    ctx.shell(&shrink, true).context("resizing the Windows partition failed")?;
     let _ = ctx.shell(&format!("partprobe {}", win.disk), true);
 
     // 3) Create our root in the freed (now largest free) space; identify the new
