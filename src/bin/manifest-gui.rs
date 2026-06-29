@@ -453,6 +453,10 @@ fn populate_survey(container: &gtk::Box, state: &Rc<RefCell<State>>) -> usize {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
+    // Drop any answers from a previously-viewed survey: if the user opened one
+    // manifest's survey then backed out and chose another, its (possibly secret)
+    // answers must not leak into the new install's `--answers`.
+    state.borrow_mut().answers.clear();
     let source = state.borrow().manifest.clone();
     let questions: Vec<_> = probe::manifest_survey(&source)
         .into_iter()
