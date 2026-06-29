@@ -29,11 +29,6 @@
     "neovim",
     "btop"
   ],
-  "dotfiles": {
-    "source": "https://github.com/you/dotfiles",
-    "branch": "main",
-    "method": "symlink"
-  },
   "post_install": [
     "echo 'Hyprland ready — reboot into the greetd login.'"
   ]

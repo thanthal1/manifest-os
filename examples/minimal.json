@@ -29,11 +29,6 @@
     "system": ["NetworkManager"],
     "user": ["pipewire", "wireplumber"]
   },
-  "dotfiles": {
-    "source": "https://github.com/you/dotfiles",
-    "branch": "main",
-    "method": "symlink"
-  },
   "pre_install": [
     "mkdir -p ~/.config/sway"
   ],
