@@ -51,14 +51,22 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     );
 
     ensure_keyring(ctx)?;
-    partition(&plan.disk, uefi, ctx)?;
-    let (root_part, esp_part) = partition_names(&plan.disk, uefi);
-    format_disks(&root_part, esp_part.as_deref(), &plan.filesystem, ctx)?;
-    mount(&root_part, esp_part.as_deref(), ctx)?;
-    setup_install_swap(&plan.swap, ctx)?;
+    // A dedicated swap partition (size in GiB) is the only choice that changes
+    // the disk layout; default to 2 GiB if "partition" was chosen without one.
+    let swap_part_gib: Option<u32> = if plan.swap == "partition" {
+        Some(plan.swap_size_gib.filter(|&g| g > 0).unwrap_or(2))
+    } else {
+        None
+    };
+    partition(&plan.disk, uefi, swap_part_gib, ctx)?;
+    let parts = partition_names(&plan.disk, uefi, swap_part_gib.is_some());
+    format_disks(&parts, &plan.filesystem, ctx)?;
+    mount(&parts, ctx)?;
+    setup_install_zram(ctx)?; // always-on: keeps low-memory machines off the OOM killer
 
     pacstrap(ctx)?;
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
+    setup_persistent_swap(plan, &parts, ctx)?;
     brand_system(ctx)?;
     create_bootstrap_user(ctx)?;
 
@@ -193,20 +201,31 @@ fn ensure_keyring(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Wipe and partition the disk. BIOS gets one Linux partition on an MBR; UEFI
-/// gets a GPT with an ESP plus a root partition.
-fn partition(disk: &str, uefi: bool, ctx: &Ctx) -> Result<()> {
+/// The partitions the install will use, by device path.
+struct Parts {
+    root: String,
+    esp: Option<String>,
+    swap: Option<String>,
+}
+
+/// Wipe and partition the disk. Layout depends on firmware and whether a
+/// dedicated swap partition was requested:
+///   BIOS:  [swap] root(*)
+///   UEFI:  ESP(550M) [swap] root
+fn partition(disk: &str, uefi: bool, swap_gib: Option<u32>, ctx: &Ctx) -> Result<()> {
     step("Partitioning");
-    let layout = if uefi {
-        "label: gpt\n,550M,U\n,,L\n"
-    } else {
-        "label: dos\n,,L,*\n"
+    let layout = match (uefi, swap_gib) {
+        (true, Some(g)) => format!("label: gpt\n,550M,U\n,{g}G,S\n,,L\n"),
+        (true, None) => "label: gpt\n,550M,U\n,,L\n".to_string(),
+        (false, Some(g)) => format!("label: dos\n,{g}G,S\n,,L,*\n"),
+        (false, None) => "label: dos\n,,L,*\n".to_string(),
     };
     ctx.shell(&format!("printf '{layout}' | sfdisk --force {disk}"), true)
 }
 
-/// Partition device paths, accounting for the `p` separator on nvme/mmc.
-fn partition_names(disk: &str, uefi: bool) -> (String, Option<String>) {
+/// Partition device paths, accounting for the `p` separator on nvme/mmc and the
+/// order produced by [`partition`].
+fn partition_names(disk: &str, uefi: bool, has_swap: bool) -> Parts {
     let sep = if disk
         .chars()
         .last()
@@ -217,42 +236,46 @@ fn partition_names(disk: &str, uefi: bool) -> (String, Option<String>) {
     } else {
         ""
     };
-    if uefi {
-        (format!("{disk}{sep}2"), Some(format!("{disk}{sep}1")))
-    } else {
-        (format!("{disk}{sep}1"), None)
+    let p = |n: u32| format!("{disk}{sep}{n}");
+    match (uefi, has_swap) {
+        (true, true) => Parts { esp: Some(p(1)), swap: Some(p(2)), root: p(3) },
+        (true, false) => Parts { esp: Some(p(1)), swap: None, root: p(2) },
+        (false, true) => Parts { esp: None, swap: Some(p(1)), root: p(2) },
+        (false, false) => Parts { esp: None, swap: None, root: p(1) },
     }
 }
 
-fn format_disks(root: &str, esp: Option<&str>, fs: &str, ctx: &Ctx) -> Result<()> {
+fn format_disks(parts: &Parts, fs: &str, ctx: &Ctx) -> Result<()> {
     step("Formatting");
-    if let Some(esp) = esp {
+    if let Some(esp) = &parts.esp {
         ctx.sudo("mkfs.fat", &["-F32", esp])?;
     }
     match fs {
-        "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", root])?,
-        _ => ctx.sudo("mkfs.ext4", &["-F", root])?,
+        "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", &parts.root])?,
+        _ => ctx.sudo("mkfs.ext4", &["-F", &parts.root])?,
+    }
+    if let Some(sw) = &parts.swap {
+        ctx.sudo("mkswap", &[sw])?;
     }
     Ok(())
 }
 
-fn mount(root: &str, esp: Option<&str>, ctx: &Ctx) -> Result<()> {
-    ctx.sudo("mount", &[root, "/mnt"])?;
-    if let Some(esp) = esp {
+fn mount(parts: &Parts, ctx: &Ctx) -> Result<()> {
+    ctx.sudo("mount", &[&parts.root, "/mnt"])?;
+    if let Some(esp) = &parts.esp {
         ctx.sudo("mkdir", &["-p", "/mnt/boot"])?;
         ctx.sudo("mount", &[esp, "/mnt/boot"])?;
     }
     Ok(())
 }
 
-/// The TUI defaults to zram so low-memory machines have breathing room while
-/// pacstrap and AUR builds run. This is install-time swap only; the installed
-/// system can still declare its own persistent swap/zram policy later.
-fn setup_install_swap(choice: &str, ctx: &Ctx) -> Result<()> {
-    match choice {
-        "zram" => {
-            step("Preparing low-memory swap");
-            let script = r#"
+/// Always-on, transient zram swap for the *install itself*, so low-memory
+/// machines have breathing room while pacstrap and AUR builds run (this is what
+/// kept weak boxes off the OOM killer). It does not touch the installed system;
+/// the persistent swap the user chose is configured by [`setup_persistent_swap`].
+fn setup_install_zram(ctx: &Ctx) -> Result<()> {
+    step("Preparing low-memory install swap");
+    let script = r#"
 if swapon --show=NAME | grep -qx /dev/zram0; then
     echo "  · zram swap already active"
     exit 0
@@ -277,17 +300,62 @@ mkswap /dev/zram0 >/dev/null
 swapon -p 100 /dev/zram0
 echo "  · enabled ${size_mb}M compressed zram swap"
 "#;
-            ctx.shell(script, true)
+    ctx.shell(script, true)
+}
+
+/// Configure the *installed* system's persistent swap, per the plan. Runs after
+/// genfstab so we can append our own entries.
+///   * `partition` — `mkswap` already ran in [`format_disks`]; add it to fstab.
+///   * `swapfile`  — create a sized file on root and add it to fstab.
+///   * `zram`      — install zram-generator + a config (compressed RAM swap).
+///   * `none`      — nothing.
+fn setup_persistent_swap(plan: &InstallPlan, parts: &Parts, ctx: &Ctx) -> Result<()> {
+    match plan.swap.as_str() {
+        "partition" => {
+            let Some(sw) = &parts.swap else { return Ok(()) };
+            step("Configuring swap (partition)");
+            ctx.shell(
+                &format!(
+                    "uuid=$(blkid -s UUID -o value {sw}) && \
+                     echo \"UUID=$uuid none swap defaults 0 0\" >> /mnt/etc/fstab"
+                ),
+                true,
+            )?;
+            println!("  · swap partition {sw} added to fstab");
         }
-        "none" => {
-            println!("  · install swap disabled");
-            Ok(())
+        "swapfile" => {
+            let gib = plan.swap_size_gib.filter(|&g| g > 0).unwrap_or(2);
+            step("Configuring swap (file)");
+            // btrfs needs a NOCOW swapfile; its mkswapfile handles that for us.
+            let make = if plan.filesystem == "btrfs" {
+                format!("btrfs filesystem mkswapfile --size {gib}g /mnt/swapfile")
+            } else {
+                format!(
+                    "fallocate -l {gib}G /mnt/swapfile && chmod 600 /mnt/swapfile && \
+                     mkswap /mnt/swapfile"
+                )
+            };
+            ctx.shell(
+                &format!("{make} && echo '/swapfile none swap defaults 0 0' >> /mnt/etc/fstab"),
+                true,
+            )?;
+            println!("  · {gib} GiB swapfile created and added to fstab");
         }
-        other => {
-            println!("  · unknown swap choice `{other}`; continuing without install swap");
-            Ok(())
+        "zram" => {
+            step("Configuring swap (zram)");
+            ctx.shell(
+                "arch-chroot /mnt pacman -S --needed --noconfirm zram-generator",
+                true,
+            )?;
+            ctx.write_root(
+                "/mnt/etc/systemd/zram-generator.conf",
+                "# Managed by Manifest OS\n[zram0]\nzram-size = min(ram, 8192)\ncompression-algorithm = zstd\n",
+            )?;
+            println!("  · compressed RAM swap configured (zram-generator)");
         }
+        _ => println!("  · no persistent swap"),
     }
+    Ok(())
 }
 
 fn pacstrap(ctx: &Ctx) -> Result<()> {

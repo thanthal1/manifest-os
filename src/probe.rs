@@ -27,7 +27,14 @@ pub struct Account {
 pub struct InstallPlan {
     pub disk: String,
     pub filesystem: String,
+    /// Persistent swap for the *installed* system, one of:
+    /// `"none"`, `"zram"` (compressed RAM swap via zram-generator),
+    /// `"swapfile"` (a file on root), or `"partition"` (a dedicated partition).
+    /// Independent of the always-on install-time zram that keeps low-memory
+    /// machines from OOMing during pacstrap/AUR builds.
     pub swap: String,
+    /// Size in GiB for `swapfile`/`partition` swap (ignored otherwise).
+    pub swap_size_gib: Option<u32>,
     /// A bundled example name, a local path, or an `http(s)` URL.
     pub manifest: String,
     /// Daily-driver account to create (None = use whatever the manifest declares).

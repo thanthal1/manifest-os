@@ -39,6 +39,7 @@ struct State {
     disk: String,
     filesystem: String,
     swap: String,
+    swap_size_gib: Option<u32>,
     full_name: String,
     username: String,
     password: String,
@@ -445,10 +446,7 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         let state = state.clone();
         move |v| state.borrow_mut().filesystem = v
     });
-    let sw = labeled_choice("Swap", &["zram", "none"], 0, {
-        let state = state.clone();
-        move |v| state.borrow_mut().swap = v
-    });
+    let sw = swap_row(state);
     fs.set_visible(false);
     sw.set_visible(false);
     content.append(&fs);
@@ -544,6 +542,11 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
             }
             let st = state.borrow();
             let setup = probe::manifest_display_name(&st.manifest);
+            let swap_str = match (st.swap.as_str(), st.swap_size_gib.unwrap_or(2)) {
+                ("swapfile", g) => format!("file ({g} GiB)"),
+                ("partition", g) => format!("partition ({g} GiB)"),
+                (s, _) => s.to_string(),
+            };
             summary.set_markup(&format!(
                 "<b>Setup:</b> {}\n<b>Disk:</b> {} (will be erased)\n<b>Account:</b> {} ({})\n<b>Filesystem:</b> {}   <b>Swap:</b> {}",
                 glib::markup_escape_text(&setup),
@@ -551,7 +554,7 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                 glib::markup_escape_text(&st.full_name),
                 glib::markup_escape_text(&st.username),
                 glib::markup_escape_text(&st.filesystem),
-                glib::markup_escape_text(&st.swap),
+                glib::markup_escape_text(&swap_str),
             ));
         });
     }
@@ -605,6 +608,7 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
             disk: st.disk.clone(),
             filesystem: st.filesystem.clone(),
             swap: st.swap.clone(),
+            swap_size_gib: st.swap_size_gib,
             manifest: st.manifest.clone(),
             account: if st.username.trim().is_empty() || st.password.is_empty() {
                 None
@@ -677,6 +681,59 @@ fn show_error(stack: &Rc<gtk::Stack>, err: &str) {
 // ---------------------------------------------------------------------------
 // Small widgets / helpers
 // ---------------------------------------------------------------------------
+
+/// Swap chooser: zram / none / file / partition, plus a size (GiB) field that
+/// appears only for file and partition. Reports into the shared state.
+fn swap_row(state: &Rc<RefCell<State>>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let label = gtk::Label::new(Some("Swap"));
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    row.append(&label);
+
+    let size = gtk::Entry::builder()
+        .placeholder_text("Size (GiB)")
+        .max_width_chars(9)
+        .build();
+    size.set_visible(false);
+
+    // (button label, value stored in state)
+    let opts = [("zram", "zram"), ("none", "none"), ("file", "swapfile"), ("partition", "partition")];
+    let toggles: Rc<RefCell<Vec<gtk::ToggleButton>>> = Rc::new(RefCell::new(Vec::new()));
+    for (i, (text, value)) in opts.iter().enumerate() {
+        let b = gtk::ToggleButton::with_label(text);
+        if i == 0 {
+            b.set_active(true);
+        }
+        let value = *value;
+        let state = state.clone();
+        let toggles_c = toggles.clone();
+        let size = size.clone();
+        b.connect_clicked(move |btn| {
+            if btn.is_active() {
+                state.borrow_mut().swap = value.to_string();
+                for o in toggles_c.borrow().iter() {
+                    if o != btn {
+                        o.set_active(false);
+                    }
+                }
+                size.set_visible(value == "swapfile" || value == "partition");
+            } else if !toggles_c.borrow().iter().any(|t| t.is_active()) {
+                btn.set_active(true);
+            }
+        });
+        toggles.borrow_mut().push(b.clone());
+        row.append(&b);
+    }
+    {
+        let state = state.clone();
+        size.connect_changed(move |e| {
+            state.borrow_mut().swap_size_gib = e.text().trim().parse::<u32>().ok();
+        });
+    }
+    row.append(&size);
+    row
+}
 
 /// A "Label: [A] [B]" segmented choice row that reports the chosen string.
 fn labeled_choice(
