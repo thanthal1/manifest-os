@@ -592,52 +592,58 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         intro.add_css_class("dim-label");
         content.append(&intro);
 
-        let modes = gtk::ListBox::new();
-        modes.add_css_class("boxed-list");
-        modes.set_selection_mode(gtk::SelectionMode::Single);
-        let along = adw::ActionRow::builder()
-            .title("Install alongside Windows")
-            .subtitle("Keep Windows — pick which to start each time (recommended)")
-            .build();
-        let erase = adw::ActionRow::builder()
-            .title("Erase the whole disk")
-            .subtitle("Remove Windows and everything else")
-            .build();
-        modes.append(&along);
-        modes.append(&erase);
-        content.append(&modes);
+        // Radio buttons (not a selectable list): a binary choice that must NOT
+        // change just because focus moved through it — important for keyboard
+        // users, who would otherwise flip "erase"/"alongside" by tabbing past.
+        let along = gtk::CheckButton::with_label(
+            "Install alongside Windows — keep Windows, pick which to start (recommended)",
+        );
+        let erase = gtk::CheckButton::with_label(
+            "Erase the whole disk — remove Windows and everything else",
+        );
+        erase.set_group(Some(&along));
+        along.set_active(true); // default to keeping Windows
+        content.append(&along);
+        content.append(&erase);
 
         // Start in dual-boot mode, targeting Windows' disk.
-        modes.select_row(modes.row_at_index(0).as_ref());
         {
             let mut st = state.borrow_mut();
             st.install_mode = "alongside".into();
             st.disk = w.disk.clone();
         }
 
-        let state_m = state.clone();
         let win_disk = w.disk.clone();
-        let list_for_modes = list.clone();
-        modes.connect_row_selected(move |_, row| {
-            let Some(row) = row else { return };
-            let mut st = state_m.borrow_mut();
-            if row.index() == 0 {
-                st.install_mode = "alongside".into();
-                st.disk = win_disk.clone();
-            } else {
-                st.install_mode = "erase".into();
-                drop(st);
-                // Re-apply the picked erase target.
-                if let Some(sel) = list_for_modes.selected_row() {
-                    let i = sel.index();
-                    if i >= 0 {
-                        if let Some(name) = disk_names.get(i as usize) {
-                            state_m.borrow_mut().disk = name.clone();
+        {
+            let state_m = state.clone();
+            let win_disk = win_disk.clone();
+            along.connect_toggled(move |b| {
+                if b.is_active() {
+                    let mut st = state_m.borrow_mut();
+                    st.install_mode = "alongside".into();
+                    st.disk = win_disk.clone();
+                }
+            });
+        }
+        {
+            let state_m = state.clone();
+            let list_for_modes = list.clone();
+            let disk_names = disk_names.clone();
+            erase.connect_toggled(move |b| {
+                if b.is_active() {
+                    state_m.borrow_mut().install_mode = "erase".into();
+                    // Re-apply the picked erase target.
+                    if let Some(sel) = list_for_modes.selected_row() {
+                        let i = sel.index();
+                        if i >= 0 {
+                            if let Some(name) = disk_names.get(i as usize) {
+                                state_m.borrow_mut().disk = name.clone();
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     content.append(&list);
