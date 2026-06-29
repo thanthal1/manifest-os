@@ -486,9 +486,16 @@ fn finalize_boot(uefi: bool, ctx: &Ctx) {
 
 /// Copy this very binary into the new root so it can run inside the chroot.
 fn stage_binary(ctx: &Ctx) -> Result<()> {
+    // Stage the CLI `manifest` binary into the target — NOT whichever front-end
+    // is running. The GUI (`manifest-gui`) is GTK-linked and cannot run inside
+    // the minimal chroot (no libgtk), so `manifest install` there would fail to
+    // load (exit 127). Prefer a `manifest` sibling of the current exe; fall back
+    // to the current exe (the CLI/TUI case, where it already is `manifest`).
     let exe = std::env::current_exe().context("locating the manifest binary")?;
-    let exe = exe.to_string_lossy();
-    ctx.sudo("install", &["-Dm755", &exe, "/mnt/usr/local/bin/manifest"])
+    let cli = exe.with_file_name("manifest");
+    let src = if cli.exists() { cli } else { exe };
+    let src = src.to_string_lossy();
+    ctx.sudo("install", &["-Dm755", &src, "/mnt/usr/local/bin/manifest"])
 }
 
 /// Run the manifest inside the new root, as the bootstrap user.
