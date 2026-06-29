@@ -37,6 +37,9 @@ pub struct InstallPlan {
     pub swap_size_gib: Option<u32>,
     /// A bundled example name, a local path, or an `http(s)` URL.
     pub manifest: String,
+    /// Answers to the manifest's `survey` questions, as `(id, value)` pairs.
+    /// Written to an `--answers` file so `{{id}}` tokens resolve during install.
+    pub answers: Vec<(String, String)>,
     /// Daily-driver account to create (None = use whatever the manifest declares).
     pub account: Option<Account>,
     /// Hostname override (None = use the manifest's, or the default).
@@ -240,6 +243,80 @@ fn scan_removable_manifests() -> Vec<String> {
     found
 }
 
+/// The whole disk the live medium booted from (e.g. `/dev/sdb`), so we never
+/// try to write logs onto the read-only install media itself.
+fn boot_disk() -> Option<String> {
+    let src = Command::new("findmnt")
+        .args(["-no", "SOURCE", "/run/archiso/bootmnt"])
+        .output()
+        .ok()?;
+    let src = String::from_utf8_lossy(&src.stdout).trim().to_string();
+    if src.is_empty() {
+        return None;
+    }
+    let pk = Command::new("lsblk").args(["-no", "PKNAME", &src]).output().ok()?;
+    let pk = String::from_utf8_lossy(&pk.stdout).lines().next()?.trim().to_string();
+    (!pk.is_empty()).then(|| format!("/dev/{pk}"))
+}
+
+/// Mountpoints of *writable* removable partitions, excluding the boot medium —
+/// mounting any that aren't mounted yet. Used to drop the install log onto a USB
+/// the user can read after a failure (the boot ISO9660 is read-only).
+pub fn writable_removable_mounts() -> Vec<String> {
+    let mut out = Vec::new();
+    let boot = boot_disk();
+    let Ok(o) = Command::new("lsblk")
+        .args(["-P", "-p", "-o", "NAME,TYPE,RM,FSTYPE,MOUNTPOINT"])
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let val = |k: &str| -> String {
+            line.split(&format!("{k}=\""))
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or("")
+                .to_string()
+        };
+        if val("TYPE") != "part" || val("RM") != "1" {
+            continue;
+        }
+        let name = val("NAME");
+        // Never touch the install media's own partitions.
+        if let Some(b) = &boot {
+            if name.starts_with(b.as_str()) {
+                continue;
+            }
+        }
+        // Only filesystems we can actually write a log onto.
+        if !matches!(
+            val("FSTYPE").as_str(),
+            "vfat" | "exfat" | "ext4" | "ext3" | "ext2" | "ntfs" | "f2fs"
+        ) {
+            continue;
+        }
+        let mp = val("MOUNTPOINT");
+        if !mp.is_empty() {
+            if !mp.starts_with("/run/archiso") {
+                out.push(mp);
+            }
+        } else {
+            let dir = format!("/run/manifest-logs/{}", name.replace('/', "_"));
+            let _ = Command::new("mkdir").args(["-p", &dir]).status();
+            let ok = Command::new("mount")
+                .args(["-o", "rw", &name, &dir])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                out.push(dir);
+            }
+        }
+    }
+    out
+}
+
 /// Friendly display name for a manifest source — its `meta.name` if we can read
 /// it, else the file stem. Used by the GUI to show "looks" instead of paths.
 pub fn manifest_display_name(source: &str) -> String {
@@ -254,6 +331,28 @@ pub fn manifest_display_name(source: &str) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| source.to_string())
+}
+
+/// Parse the `survey` questions out of a manifest source (a bundled name or a
+/// local path; URLs aren't fetched here). Lets the GUI ask a manifest's
+/// author-defined questions and inject the answers.
+pub fn manifest_survey(source: &str) -> Vec<crate::manifest::Question> {
+    let path = if std::path::Path::new(source).is_file() {
+        source.to_string()
+    } else if source.starts_with("http://") || source.starts_with("https://") {
+        return Vec::new();
+    } else {
+        format!("/usr/share/manifest-os/examples/{source}.json")
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    #[derive(serde::Deserialize)]
+    struct SurveyOnly {
+        #[serde(default)]
+        survey: Vec<crate::manifest::Question>,
+    }
+    serde_json::from_str::<SurveyOnly>(&raw).map(|s| s.survey).unwrap_or_default()
 }
 
 /// Friendly one-line description for a manifest source (its `meta.description`).

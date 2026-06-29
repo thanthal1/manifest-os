@@ -292,6 +292,7 @@ fn build_plan(app: &App) -> InstallPlan {
         swap: ["zram", "none"][app.swap_idx].to_string(),
         swap_size_gib: None,
         manifest,
+        answers: Vec::new(),
         account: None,
         hostname: None,
     }

@@ -72,12 +72,87 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
 
     let manifest_in_root = stage_manifest(&plan.manifest, ctx)?;
     ensure_boot_block(ctx)?;
+    personalize_manifest(plan, ctx)?;
+    let answers = write_answers(plan, ctx)?;
     stage_binary(ctx)?;
-    run_manifest(&manifest_in_root, ctx)?;
+    run_manifest(&manifest_in_root, answers.as_deref(), ctx)?;
     create_account(plan, ctx)?;
     finalize_boot(uefi, ctx);
+    save_install_log(ctx);
 
     println!("\n✓ Manifest OS installed.");
+    Ok(())
+}
+
+/// When a friendly install created an account, make the manifest's primary user
+/// *be* that account: rename the first declared user, repoint its `/home/<old>`
+/// file paths and `<old>:<old>` owners, and drop its password (set securely by
+/// [`create_account`]). This is why the chosen account gets the manifest's
+/// riced desktop instead of a bare one. Best-effort; never fail the install.
+fn personalize_manifest(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    let Some(acct) = plan.account.as_ref() else {
+        return Ok(());
+    };
+    let new_user = sanitize_username(&acct.username);
+    if new_user.is_empty() {
+        return Ok(());
+    }
+    step("Personalizing the manifest for your account");
+    if ctx.dry_run {
+        println!("  · would rename the manifest's user to `{new_user}`");
+        return Ok(());
+    }
+    let path = "/mnt/etc/manifest-install.json";
+    let raw = match std::fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let mut doc: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    // The manifest's primary user (first entry), if any.
+    let old_user = doc
+        .get("users")
+        .and_then(|u| u.as_array())
+        .and_then(|a| a.first())
+        .and_then(|u| u.get("name"))
+        .and_then(|n| n.as_str())
+        .map(str::to_string);
+    let Some(old_user) = old_user else {
+        // No declared user — create_account makes the account from scratch.
+        return Ok(());
+    };
+    if old_user == new_user {
+        return Ok(());
+    }
+    if let Some(u) = doc.get_mut("users").and_then(|u| u.as_array_mut()).and_then(|a| a.first_mut()) {
+        if let Some(obj) = u.as_object_mut() {
+            obj.insert("name".into(), serde_json::Value::String(new_user.clone()));
+            obj.remove("password"); // create_account sets it over stdin
+        }
+    }
+    // Repoint /home/<old>/… file paths and <old>:<old> owners onto the new user.
+    if let Some(files) = doc.get_mut("files").and_then(|f| f.as_array_mut()) {
+        let old_home = format!("/home/{old_user}/");
+        let new_home = format!("/home/{new_user}/");
+        let old_owner = format!("{old_user}:{old_user}");
+        for f in files.iter_mut().filter_map(|f| f.as_object_mut()) {
+            if let Some(p) = f.get("path").and_then(|p| p.as_str()) {
+                if let Some(rest) = p.strip_prefix(&old_home) {
+                    f.insert("path".into(), serde_json::Value::String(format!("{new_home}{rest}")));
+                }
+            }
+            if let Some(o) = f.get("owner").and_then(|o| o.as_str()) {
+                if o == old_owner {
+                    f.insert("owner".into(), serde_json::Value::String(format!("{new_user}:{new_user}")));
+                }
+            }
+        }
+    }
+    let out = serde_json::to_string_pretty(&doc).unwrap_or(raw);
+    let _ = std::fs::write(path, out);
+    println!("  · manifest user `{old_user}` → `{new_user}` (your account gets its setup)");
     Ok(())
 }
 
@@ -498,13 +573,76 @@ fn stage_binary(ctx: &Ctx) -> Result<()> {
     ctx.sudo("install", &["-Dm755", &src, "/mnt/usr/local/bin/manifest"])
 }
 
-/// Run the manifest inside the new root, as the bootstrap user.
-fn run_manifest(manifest_in_root: &str, ctx: &Ctx) -> Result<()> {
+/// Write the survey answers the front-end collected to a JSON object the chroot
+/// install can read via `--answers`, so the manifest's `{{id}}` tokens resolve.
+/// Returns the in-chroot path, or `None` when there are no answers. Lives in
+/// `/etc` so the non-root installer account can read it.
+fn write_answers(plan: &InstallPlan, ctx: &Ctx) -> Result<Option<String>> {
+    if plan.answers.is_empty() {
+        return Ok(None);
+    }
+    step("Recording your answers");
+    let map: serde_json::Map<String, serde_json::Value> = plan
+        .answers
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
+    ctx.write_root("/mnt/etc/manifest-answers.json", &json)?;
+    Ok(Some("/etc/manifest-answers.json".to_string()))
+}
+
+/// Run the manifest inside the new root, as the bootstrap user, optionally
+/// feeding it the survey answers file.
+fn run_manifest(manifest_in_root: &str, answers: Option<&str>, ctx: &Ctx) -> Result<()> {
     step("Applying the manifest");
-    ctx.shell(
-        &format!("arch-chroot /mnt runuser -l installer -c 'manifest install {manifest_in_root}'"),
+    let args = match answers {
+        Some(a) => format!("install {manifest_in_root} --answers {a}"),
+        None => format!("install {manifest_in_root}"),
+    };
+    let result = ctx.shell(
+        &format!("arch-chroot /mnt runuser -l installer -c 'manifest {args}'"),
         true,
-    )
+    );
+    // The answers file may hold survey secrets; don't leave it on the new system.
+    if answers.is_some() && !ctx.dry_run {
+        let _ = std::fs::remove_file("/mnt/etc/manifest-answers.json");
+    }
+    result
+}
+
+/// Save the install log somewhere it survives a failure: the target's
+/// `/var/log` and — since the boot ISO is read-only — any writable removable
+/// drive's `logs/` folder. Best-effort; the live log lives at
+/// `/tmp/manifest-install.log` (see the `.zlogin` launcher).
+pub fn save_install_log(ctx: &Ctx) {
+    if ctx.dry_run {
+        return;
+    }
+    let src = "/tmp/manifest-install.log";
+    if !Path::new(src).exists() {
+        return;
+    }
+    step("Saving the install log");
+    // 1) Onto the installed system (if the target is still mounted).
+    if Path::new("/mnt/var/log").exists() {
+        let _ = std::fs::copy(src, "/mnt/var/log/manifest-install.log");
+        println!("  · /var/log/manifest-install.log (on the installed system)");
+    }
+    // 2) Onto a writable removable drive's logs/ folder (the USB the user has).
+    let stamp = ctx
+        .output(false, "date", &["+%Y%m%d-%H%M%S"])
+        .unwrap_or_default();
+    let stamp = if stamp.is_empty() { "install".into() } else { stamp };
+    for mp in crate::probe::writable_removable_mounts() {
+        let dir = format!("{mp}/logs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let dest = format!("{dir}/manifest-install-{stamp}.log");
+            if std::fs::copy(src, &dest).is_ok() {
+                println!("  · {dest}");
+            }
+        }
+    }
 }
 
 fn step(title: &str) {

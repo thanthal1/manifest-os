@@ -15,6 +15,7 @@
 //! blocks. This binary only builds with `--features gui`.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,6 +37,7 @@ const APP_ID: &str = "os.manifest.Installer";
 struct State {
     advanced: bool,
     manifest: String, // bundled name, local path, or URL
+    answers: HashMap<String, String>, // answers to the manifest's survey questions
     disk: String,
     filesystem: String,
     swap: String,
@@ -114,9 +116,15 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&adv_toggle);
 
     // Pages.
+    // The survey page's question area is rebuilt per chosen manifest, so its
+    // container is shared between the setup page (which fills it) and the survey
+    // page (which shows it).
+    let survey_content = Rc::new(gtk::Box::new(gtk::Orientation::Vertical, 16));
+
     add_welcome(&stack);
     add_network(&stack);
-    add_setup(&stack, &state, &advanced_widgets);
+    add_setup(&stack, &state, &advanced_widgets, &survey_content);
+    add_survey(&stack, &survey_content);
     add_disk(&stack, &state, &advanced_widgets);
     add_account(&stack, &state, &advanced_widgets);
     add_review(&stack, &state);
@@ -338,7 +346,12 @@ fn add_network(stack: &Rc<gtk::Stack>) {
     stack.add_named(&root, Some("network"));
 }
 
-fn add_setup(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
+fn add_setup(
+    stack: &Rc<gtk::Stack>,
+    state: &Rc<RefCell<State>>,
+    adv: &Rc<RefCell<Vec<gtk::Widget>>>,
+    survey_content: &Rc<gtk::Box>,
+) {
     let (root, content, buttons) = page(
         "Choose your setup",
         "Pick a ready-made style. Each one is a complete, declared system.",
@@ -397,10 +410,127 @@ fn add_setup(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCel
     let back = nav_button("Back", false);
     back.connect_clicked(goto(stack, "network"));
     let next = nav_button("Continue", true);
-    next.connect_clicked(goto(stack, "disk"));
+    {
+        // Build the survey from the chosen manifest; go to it only if it asks
+        // anything, otherwise skip straight to the disk step.
+        let stack = stack.clone();
+        let state = state.clone();
+        let sc = survey_content.clone();
+        next.connect_clicked(move |_| {
+            let count = populate_survey(&sc, &state);
+            stack.set_visible_child_name(if count > 0 { "survey" } else { "disk" });
+        });
+    }
     buttons.append(&back);
     buttons.append(&next);
     stack.add_named(&root, Some("setup"));
+}
+
+/// The survey page — its questions are filled in by `populate_survey` when the
+/// user leaves the setup step, based on the manifest they chose.
+fn add_survey(stack: &Rc<gtk::Stack>, survey_content: &Rc<gtk::Box>) {
+    let (root, content, buttons) = page(
+        "A few questions",
+        "Your chosen setup asks for a couple of details.",
+    );
+    content.append(survey_content.as_ref());
+    let back = nav_button("Back", false);
+    back.connect_clicked(goto(stack, "setup"));
+    let next = nav_button("Continue", true);
+    next.connect_clicked(goto(stack, "disk"));
+    buttons.append(&back);
+    buttons.append(&next);
+    stack.add_named(&root, Some("survey"));
+}
+
+/// Render the chosen manifest's `survey` questions into `container`, wiring each
+/// answer into `state.answers`. Returns how many questions were shown (0 = skip
+/// the survey page). Questions the account/disk steps already cover are dropped.
+fn populate_survey(container: &gtk::Box, state: &Rc<RefCell<State>>) -> usize {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    let source = state.borrow().manifest.clone();
+    let questions: Vec<_> = probe::manifest_survey(&source)
+        .into_iter()
+        .filter(|q| !matches!(q.id.as_str(), "username" | "full_name" | "password" | "hostname"))
+        .collect();
+
+    for q in &questions {
+        let default = q.default.as_ref().map(json_value_to_string).unwrap_or_default();
+        state.borrow_mut().answers.insert(q.id.clone(), default.clone());
+
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let label = gtk::Label::new(Some(&q.label));
+        label.set_halign(gtk::Align::Start);
+        label.add_css_class("heading");
+        row.append(&label);
+
+        match q.qtype.as_str() {
+            "boolean" => {
+                let sw = gtk::Switch::new();
+                sw.set_halign(gtk::Align::Start);
+                sw.set_active(default == "true");
+                let st = state.clone();
+                let id = q.id.clone();
+                sw.connect_active_notify(move |s| {
+                    st.borrow_mut().answers.insert(id.clone(), s.is_active().to_string());
+                });
+                row.append(&sw);
+            }
+            "select" => {
+                let opts: Vec<&str> = q.options.iter().map(|s| s.as_str()).collect();
+                let dd = gtk::DropDown::from_strings(&opts);
+                if let Some(pos) = q.options.iter().position(|o| *o == default) {
+                    dd.set_selected(pos as u32);
+                }
+                let st = state.clone();
+                let id = q.id.clone();
+                let optv = q.options.clone();
+                dd.connect_selected_notify(move |d| {
+                    if let Some(o) = optv.get(d.selected() as usize) {
+                        st.borrow_mut().answers.insert(id.clone(), o.clone());
+                    }
+                });
+                row.append(&dd);
+            }
+            "secret" => {
+                let e = gtk::PasswordEntry::builder().show_peek_icon(true).build();
+                let st = state.clone();
+                let id = q.id.clone();
+                e.connect_changed(move |e| {
+                    st.borrow_mut().answers.insert(id.clone(), e.text().to_string());
+                });
+                row.append(&e);
+            }
+            // text / path / number / multiselect → free text entry
+            _ => {
+                let e = gtk::Entry::new();
+                e.set_text(&default);
+                let st = state.clone();
+                let id = q.id.clone();
+                e.connect_changed(move |e| {
+                    st.borrow_mut().answers.insert(id.clone(), e.text().to_string());
+                });
+                row.append(&e);
+            }
+        }
+        container.append(&row);
+    }
+    questions.len()
+}
+
+/// Render a manifest survey default (a JSON scalar) as the string to seed a field.
+fn json_value_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Array(a) => {
+            a.iter().map(json_value_to_string).collect::<Vec<_>>().join(" ")
+        }
+        _ => String::new(),
+    }
 }
 
 fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
@@ -610,6 +740,7 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
             swap: st.swap.clone(),
             swap_size_gib: st.swap_size_gib,
             manifest: st.manifest.clone(),
+            answers: st.answers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             account: if st.username.trim().is_empty() || st.password.is_empty() {
                 None
             } else {
@@ -637,6 +768,8 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                 stack2.set_visible_child_name("done");
             }
             Err(e) => {
+                // Preserve the install log (target + writable USB) for debugging.
+                installer::save_install_log(&Ctx::new(false));
                 show_error(&stack2, &e);
             }
         },

@@ -30,8 +30,11 @@ if [[ $(tty) == "/dev/tty1" && -z "${MANIFEST_NO_WELCOME:-}" ]]; then
             sleep 1
         fi
         export LIBSEAT_BACKEND=seatd
+        # cage/GTK render over Wayland, so their stdout/stderr is just text — send
+        # it to a log the installer copies onto the target + a writable USB, so a
+        # broken install leaves a trace (the boot ISO itself is read-only).
         if command -v cage >/dev/null && command -v manifest-gui >/dev/null \
-           && cage -- manifest-gui; then
+           && cage -- manifest-gui >/tmp/manifest-install.log 2>&1; then
             :
         else
             manifest tui || manifest-welcome
