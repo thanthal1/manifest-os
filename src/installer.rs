@@ -51,16 +51,25 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     );
 
     ensure_keyring(ctx)?;
-    // A dedicated swap partition (size in GiB) is the only choice that changes
-    // the disk layout; default to 2 GiB if "partition" was chosen without one.
-    let swap_part_gib: Option<u32> = if plan.swap == "partition" {
-        Some(plan.swap_size_gib.filter(|&g| g > 0).unwrap_or(2))
+    let alongside = plan.install_mode == "alongside";
+    let parts = if alongside {
+        // Dual boot: shrink Windows and install in the freed space, reusing its
+        // ESP. carve_alongside formats only the new root (never the ESP/Windows).
+        carve_alongside(plan, ctx)?
     } else {
-        None
+        // Erase: wipe and lay out the whole disk. A dedicated swap partition
+        // (size in GiB) is the only choice that changes the layout; default to
+        // 2 GiB if "partition" was chosen without one.
+        let swap_part_gib: Option<u32> = if plan.swap == "partition" {
+            Some(plan.swap_size_gib.filter(|&g| g > 0).unwrap_or(2))
+        } else {
+            None
+        };
+        partition(&plan.disk, uefi, swap_part_gib, ctx)?;
+        let parts = partition_names(&plan.disk, uefi, swap_part_gib.is_some());
+        format_disks(&parts, &plan.filesystem, ctx)?;
+        parts
     };
-    partition(&plan.disk, uefi, swap_part_gib, ctx)?;
-    let parts = partition_names(&plan.disk, uefi, swap_part_gib.is_some());
-    format_disks(&parts, &plan.filesystem, ctx)?;
     mount(&parts, ctx)?;
     setup_install_zram(ctx)?; // always-on: keeps low-memory machines off the OOM killer
 
@@ -77,6 +86,9 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     stage_binary(ctx)?;
     run_manifest(&manifest_in_root, answers.as_deref(), ctx)?;
     create_account(plan, ctx)?;
+    if alongside {
+        enable_dual_boot(ctx);
+    }
     finalize_boot(uefi, ctx);
     save_install_log(ctx);
 
@@ -318,6 +330,142 @@ fn partition_names(disk: &str, uefi: bool, has_swap: bool) -> Parts {
         (false, true) => Parts { esp: None, swap: Some(p(1)), root: p(2) },
         (false, false) => Parts { esp: None, swap: None, root: p(1) },
     }
+}
+
+/// Shrink the detected Windows partition and create a Manifest OS root in the
+/// freed space, **reusing** Windows' existing ESP — i.e. set up a dual boot
+/// instead of erasing the disk. Returns the partitions to install onto.
+///
+/// Order matters and is the safe one: shrink the NTFS *filesystem* first, then
+/// the *partition* to match (parted keeps the start sector + GUID so Windows'
+/// boot references stay valid), then carve our partition out of the freed tail.
+/// It refuses to touch a Windows volume that isn't cleanly resizable (a
+/// hibernated / Fast-Startup Windows leaves it "dirty").
+fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
+    let win = crate::probe::detect_windows()
+        .context("no Windows install was detected to install alongside")?;
+    step("Making room alongside Windows");
+    println!(
+        "  · Windows is on {} ({} GiB NTFS); reusing its ESP {}",
+        win.windows_part, win.windows_size_gib, win.esp
+    );
+
+    let gib = 1u64 << 30;
+    let give = (plan.alongside_gib.filter(|&g| g >= 15).unwrap_or(40) as u64) * gib;
+
+    if ctx.dry_run {
+        println!("  · would shrink {} and create a {} GiB Manifest OS partition", win.windows_part, give / gib);
+        return Ok(Parts { root: format!("{}-new", win.disk), esp: Some(win.esp), swap: None });
+    }
+
+    let part_bytes = disk_bytes(&win.windows_part, ctx);
+    if part_bytes < give + 20 * gib {
+        bail!(
+            "not enough room: the Windows partition is only {} GiB — free up space in Windows first",
+            part_bytes / gib
+        );
+    }
+    let new_ntfs = part_bytes - give;
+
+    // 1) Shrink the NTFS filesystem. The --no-action pass is the safety gate: it
+    //    fails on a dirty/hibernated volume, so we never resize one.
+    if ctx
+        .shell(&format!("ntfsresize -f --no-action --size {new_ntfs} {}", win.windows_part), true)
+        .is_err()
+    {
+        bail!(
+            "couldn't safely resize the Windows filesystem on {} — boot Windows, turn off Fast Startup, fully shut it down, then try again",
+            win.windows_part
+        );
+    }
+    ctx.shell(&format!("echo y | ntfsresize -f --size {new_ntfs} {}", win.windows_part), true)
+        .context("shrinking the Windows filesystem failed")?;
+
+    // 2) Shrink the partition to match (start sector + GUID preserved).
+    let num: String = win
+        .windows_part
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let base = win.windows_part.trim_start_matches("/dev/");
+    let start_sec = sysfs_u64(&format!("/sys/class/block/{base}/start"));
+    let new_end = start_sec * 512 + new_ntfs;
+    ctx.shell(&format!("parted -s {} resizepart {} {}B", win.disk, num, new_end), true)
+        .context("resizing the Windows partition failed")?;
+    let _ = ctx.shell(&format!("partprobe {}", win.disk), true);
+
+    // 3) Create our root in the freed (now largest free) space; identify the new
+    //    partition by diffing the table before/after so we never guess wrong.
+    let before = list_parts(&win.disk, ctx);
+    ctx.shell(&format!("sgdisk -n 0:0:0 -t 0:8300 {}", win.disk), true)
+        .context("creating the Manifest OS partition failed")?;
+    let _ = ctx.shell(&format!("partprobe {}", win.disk), true);
+    let after = list_parts(&win.disk, ctx);
+    let root = after
+        .into_iter()
+        .find(|p| !before.contains(p))
+        .context("could not locate the new Manifest OS partition after creating it")?;
+
+    // 4) Format ONLY our new root — never the ESP, never Windows.
+    match plan.filesystem.as_str() {
+        "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", &root])?,
+        _ => ctx.sudo("mkfs.ext4", &["-F", &root])?,
+    }
+    println!("  · created Manifest OS on {} ({} GiB) — Windows left intact", root, give / gib);
+    Ok(Parts { root, esp: Some(win.esp), swap: None })
+}
+
+/// After a dual-boot install, make Windows appear in the GRUB menu: install
+/// os-prober, enable it, and regenerate the config. Best-effort — a daily-driver
+/// that chose a non-GRUB loader simply won't get the extra entry.
+fn enable_dual_boot(ctx: &Ctx) {
+    step("Adding Windows to the boot menu");
+    let script = "arch-chroot /mnt bash -c '\
+        command -v grub-mkconfig >/dev/null 2>&1 || exit 0; \
+        pacman -S --needed --noconfirm os-prober || exit 0; \
+        if grep -q \"^#*GRUB_DISABLE_OS_PROBER\" /etc/default/grub; then \
+            sed -i \"s/^#*GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/\" /etc/default/grub; \
+        else echo GRUB_DISABLE_OS_PROBER=false >> /etc/default/grub; fi; \
+        grub-mkconfig -o /boot/grub/grub.cfg'";
+    let _ = ctx.shell(script, true);
+}
+
+/// Size of a block device in bytes (0 if it can't be read).
+fn disk_bytes(dev: &str, ctx: &Ctx) -> u64 {
+    ctx.output(false, "lsblk", &["-bno", "SIZE", dev])
+        .ok()
+        .and_then(|s| s.lines().next().map(str::trim).map(str::to_string))
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Read a small unsigned integer out of a sysfs file (0 on any error).
+fn sysfs_u64(path: &str) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// The partition device paths currently on a disk (e.g. `/dev/sda1`, `/dev/sda3`).
+fn list_parts(disk: &str, ctx: &Ctx) -> Vec<String> {
+    ctx.output(false, "lsblk", &["-lnpo", "NAME,TYPE", disk])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let name = it.next()?;
+            if it.next()? == "part" {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn format_disks(parts: &Parts, fs: &str, ctx: &Ctx) -> Result<()> {

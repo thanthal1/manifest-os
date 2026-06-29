@@ -39,6 +39,8 @@ struct State {
     manifest: String, // bundled name, local path, or URL
     answers: HashMap<String, String>, // answers to the manifest's survey questions
     disk: String,
+    install_mode: String,       // "erase" or "alongside" (dual boot with Windows)
+    alongside_gib: Option<u32>, // GiB to give Manifest OS when dual-booting
     filesystem: String,
     swap: String,
     swap_size_gib: Option<u32>,
@@ -51,6 +53,7 @@ struct State {
 impl State {
     fn new() -> Self {
         State {
+            install_mode: "erase".into(),
             filesystem: "ext4".into(),
             swap: "zram".into(),
             ..Default::default()
@@ -541,6 +544,12 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
 
     let disks = probe::list_disks();
     let disk_names: Vec<String> = disks.iter().map(|d| d.name.clone()).collect();
+
+    // If Windows is on a disk, offer to keep it (dual boot) instead of erasing.
+    let win = probe::detect_windows();
+
+    // The disk picker (the "erase" target). For dual boot the disk is fixed to
+    // the one Windows lives on, so we only steer state.disk here in erase mode.
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -551,7 +560,6 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
             .build();
         list.append(&row);
     }
-    content.append(&list);
     if !disks.is_empty() {
         list.select_row(list.row_at_index(0).as_ref());
         state.borrow_mut().disk = disks[0].name.clone();
@@ -563,15 +571,78 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
             if let Some(row) = row {
                 let i = row.index();
                 if i >= 0 {
-                    if let Some(name) = disk_names.get(i as usize) {
-                        state.borrow_mut().disk = name.clone();
+                    if state.borrow().install_mode == "erase" {
+                        if let Some(name) = disk_names.get(i as usize) {
+                            state.borrow_mut().disk = name.clone();
+                        }
                     }
                 }
             }
         });
     }
 
-    // Advanced: filesystem + swap.
+    if let Some(w) = &win {
+        // Dual-boot chooser. Default to keeping Windows — the friendly choice.
+        let intro = gtk::Label::new(Some(&format!(
+            "Windows was found on {} ({} GB). You can keep it and choose which to start, or erase everything.",
+            w.disk, w.windows_size_gib
+        )));
+        intro.set_wrap(true);
+        intro.set_xalign(0.0);
+        intro.add_css_class("dim-label");
+        content.append(&intro);
+
+        let modes = gtk::ListBox::new();
+        modes.add_css_class("boxed-list");
+        modes.set_selection_mode(gtk::SelectionMode::Single);
+        let along = adw::ActionRow::builder()
+            .title("Install alongside Windows")
+            .subtitle("Keep Windows — pick which to start each time (recommended)")
+            .build();
+        let erase = adw::ActionRow::builder()
+            .title("Erase the whole disk")
+            .subtitle("Remove Windows and everything else")
+            .build();
+        modes.append(&along);
+        modes.append(&erase);
+        content.append(&modes);
+
+        // Start in dual-boot mode, targeting Windows' disk.
+        modes.select_row(modes.row_at_index(0).as_ref());
+        {
+            let mut st = state.borrow_mut();
+            st.install_mode = "alongside".into();
+            st.disk = w.disk.clone();
+        }
+
+        let state_m = state.clone();
+        let win_disk = w.disk.clone();
+        let list_for_modes = list.clone();
+        modes.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return };
+            let mut st = state_m.borrow_mut();
+            if row.index() == 0 {
+                st.install_mode = "alongside".into();
+                st.disk = win_disk.clone();
+            } else {
+                st.install_mode = "erase".into();
+                drop(st);
+                // Re-apply the picked erase target.
+                if let Some(sel) = list_for_modes.selected_row() {
+                    let i = sel.index();
+                    if i >= 0 {
+                        if let Some(name) = disk_names.get(i as usize) {
+                            state_m.borrow_mut().disk = name.clone();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    content.append(&list);
+
+    // Advanced: filesystem + swap (+ dual-boot size when Windows is present).
     let fs = labeled_choice("Filesystem", &["ext4", "btrfs"], 0, {
         let state = state.clone();
         move |v| state.borrow_mut().filesystem = v
@@ -583,6 +654,13 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
     content.append(&sw);
     adv.borrow_mut().push(fs.upcast());
     adv.borrow_mut().push(sw.upcast());
+
+    if win.is_some() {
+        let size = alongside_size_row(state);
+        size.set_visible(false);
+        content.append(&size);
+        adv.borrow_mut().push(size.upcast());
+    }
 
     let back = nav_button("Back", false);
     back.connect_clicked(goto(stack, "setup"));
@@ -677,10 +755,15 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                 ("partition", g) => format!("partition ({g} GiB)"),
                 (s, _) => s.to_string(),
             };
+            let disk_str = if st.install_mode == "alongside" {
+                format!("{} — alongside Windows ({} GiB for Manifest OS)", st.disk, st.alongside_gib.unwrap_or(40))
+            } else {
+                format!("{} (will be erased)", st.disk)
+            };
             summary.set_markup(&format!(
-                "<b>Setup:</b> {}\n<b>Disk:</b> {} (will be erased)\n<b>Account:</b> {} ({})\n<b>Filesystem:</b> {}   <b>Swap:</b> {}",
+                "<b>Setup:</b> {}\n<b>Disk:</b> {}\n<b>Account:</b> {} ({})\n<b>Filesystem:</b> {}   <b>Swap:</b> {}",
                 glib::markup_escape_text(&setup),
-                glib::markup_escape_text(&st.disk),
+                glib::markup_escape_text(&disk_str),
                 glib::markup_escape_text(&st.full_name),
                 glib::markup_escape_text(&st.username),
                 glib::markup_escape_text(&st.filesystem),
@@ -736,6 +819,8 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
         let st = state.borrow();
         InstallPlan {
             disk: st.disk.clone(),
+            install_mode: st.install_mode.clone(),
+            alongside_gib: st.alongside_gib,
             filesystem: st.filesystem.clone(),
             swap: st.swap.clone(),
             swap_size_gib: st.swap_size_gib,
@@ -862,6 +947,29 @@ fn swap_row(state: &Rc<RefCell<State>>) -> gtk::Box {
         let state = state.clone();
         size.connect_changed(move |e| {
             state.borrow_mut().swap_size_gib = e.text().trim().parse::<u32>().ok();
+        });
+    }
+    row.append(&size);
+    row
+}
+
+/// "Space for Manifest OS" — how many GiB to carve from Windows when dual-booting.
+/// Shown only in Advanced; Easy mode uses the engine's sensible default.
+fn alongside_size_row(state: &Rc<RefCell<State>>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let label = gtk::Label::new(Some("Space for Manifest OS (GiB)"));
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    row.append(&label);
+
+    let size = gtk::Entry::builder()
+        .placeholder_text("40")
+        .max_width_chars(9)
+        .build();
+    {
+        let state = state.clone();
+        size.connect_changed(move |e| {
+            state.borrow_mut().alongside_gib = e.text().trim().parse::<u32>().ok();
         });
     }
     row.append(&size);

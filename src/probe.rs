@@ -26,6 +26,12 @@ pub struct Account {
 /// What a front-end collected — handed back to the caller to execute.
 pub struct InstallPlan {
     pub disk: String,
+    /// `"erase"` (wipe the whole disk) or `"alongside"` (shrink Windows and
+    /// dual-boot).
+    pub install_mode: String,
+    /// For `alongside`: how many GiB to carve out for Manifest OS (None = a
+    /// sensible default).
+    pub alongside_gib: Option<u32>,
     pub filesystem: String,
     /// Persistent swap for the *installed* system, one of:
     /// `"none"`, `"zram"` (compressed RAM swap via zram-generator),
@@ -243,6 +249,99 @@ fn scan_removable_manifests() -> Vec<String> {
     found
 }
 
+/// A Windows install found on a disk, with the pieces a dual-boot install needs.
+pub struct WindowsTarget {
+    /// The whole disk Windows lives on (e.g. `/dev/sda`).
+    pub disk: String,
+    /// The existing EFI System Partition to reuse (not reformat).
+    pub esp: String,
+    /// The Windows NTFS partition to shrink to make room.
+    pub windows_part: String,
+    /// That partition's current size, in GiB.
+    pub windows_size_gib: u32,
+}
+
+/// Detect a Windows install we could dual-boot alongside: a disk that has both a
+/// Windows-bearing ESP (`EFI/Microsoft/Boot/bootmgfw.efi`) and an NTFS partition.
+/// Returns the largest such disk's pieces. Read-only (mounts the ESP briefly).
+pub fn detect_windows() -> Option<WindowsTarget> {
+    let out = Command::new("lsblk")
+        .args(["-P", "-p", "-b", "-o", "NAME,TYPE,FSTYPE,SIZE,PKNAME"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let val = |line: &str, k: &str| -> String {
+        line.split(&format!("{k}=\""))
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string()
+    };
+    struct P {
+        name: String,
+        fstype: String,
+        size: u64,
+        disk: String,
+    }
+    let mut parts = Vec::new();
+    for line in text.lines() {
+        if val(line, "TYPE") != "part" {
+            continue;
+        }
+        let pk = val(line, "PKNAME");
+        let disk = if pk.starts_with("/dev/") { pk } else { format!("/dev/{pk}") };
+        parts.push(P {
+            name: val(line, "NAME"),
+            fstype: val(line, "FSTYPE"),
+            size: val(line, "SIZE").parse().unwrap_or(0),
+            disk,
+        });
+    }
+    // Disks that carry a Windows ESP + an NTFS partition.
+    let disks: Vec<String> = {
+        let mut d: Vec<String> = parts.iter().map(|p| p.disk.clone()).collect();
+        d.sort();
+        d.dedup();
+        d
+    };
+    for disk in disks {
+        let on = |p: &&P| p.disk == disk;
+        let esp = parts
+            .iter()
+            .filter(on)
+            .find(|p| p.fstype == "vfat" && esp_has_windows(&p.name));
+        let ntfs = parts.iter().filter(on).filter(|p| p.fstype == "ntfs").max_by_key(|p| p.size);
+        if let (Some(esp), Some(ntfs)) = (esp, ntfs) {
+            return Some(WindowsTarget {
+                disk: disk.clone(),
+                esp: esp.name.clone(),
+                windows_part: ntfs.name.clone(),
+                windows_size_gib: (ntfs.size / (1 << 30)) as u32,
+            });
+        }
+    }
+    None
+}
+
+/// Whether an ESP holds the Windows boot manager (mounts it read-only to peek).
+fn esp_has_windows(esp: &str) -> bool {
+    let dir = "/run/manifest-espcheck";
+    let _ = Command::new("mkdir").args(["-p", dir]).status();
+    let mounted = Command::new("mount")
+        .args(["-o", "ro", esp, dir])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !mounted {
+        return false;
+    }
+    let found = std::path::Path::new(dir)
+        .join("EFI/Microsoft/Boot/bootmgfw.efi")
+        .exists();
+    let _ = Command::new("umount").arg(dir).status();
+    found
+}
+
 /// The whole disk the live medium booted from (e.g. `/dev/sdb`), so we never
 /// try to write logs onto the read-only install media itself.
 fn boot_disk() -> Option<String> {
@@ -265,6 +364,19 @@ fn boot_disk() -> Option<String> {
 pub fn writable_removable_mounts() -> Vec<String> {
     let mut out = Vec::new();
     let boot = boot_disk();
+
+    // The boot medium itself is writable when the USB was written file-wise
+    // (Rufus "ISO" mode = a FAT partition) rather than dd'd (read-only ISO9660).
+    // Try to flip it read-write so the log can live right on the install USB;
+    // the remount simply fails on a read-only ISO9660 and we move on.
+    if Command::new("mount")
+        .args(["-o", "remount,rw", "/run/archiso/bootmnt"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        out.push("/run/archiso/bootmnt".to_string());
+    }
     let Ok(o) = Command::new("lsblk")
         .args(["-P", "-p", "-o", "NAME,TYPE,RM,FSTYPE,MOUNTPOINT"])
         .output()

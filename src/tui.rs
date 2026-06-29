@@ -288,6 +288,8 @@ fn build_plan(app: &App) -> InstallPlan {
     };
     InstallPlan {
         disk: app.disks.get(app.disk_sel).map(|d| d.name.clone()).unwrap_or_default(),
+        install_mode: "erase".to_string(),
+        alongside_gib: None,
         filesystem: ["ext4", "btrfs"][app.fs_idx].to_string(),
         swap: ["zram", "none"][app.swap_idx].to_string(),
         swap_size_gib: None,
