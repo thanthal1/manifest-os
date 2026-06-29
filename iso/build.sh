@@ -32,6 +32,18 @@ fi
 install -Dm755 "$bin" "$profile/airootfs/usr/local/bin/manifest"
 echo "baked in: $bin"
 
+# Bake the graphical installer too (built with: cargo build --release --features gui).
+# If it's missing, the live session falls back to the text installer.
+gui="$repo/target/release/manifest-gui"
+[[ -x "$gui" ]] || gui="$repo/dist/manifest-gui"
+if [[ -x "$gui" ]]; then
+    install -Dm755 "$gui" "$profile/airootfs/usr/local/bin/manifest-gui"
+    echo "baked in: $gui"
+else
+    echo "WARNING: manifest-gui not found — build it with 'cargo build --release --features gui';" >&2
+    echo "         the ISO will boot straight to the text installer." >&2
+fi
+
 # Ship the example manifests so the TUI can list and install them by name.
 for m in "$repo"/examples/*.json; do
     install -Dm644 "$m" "$profile/airootfs/usr/share/manifest-os/examples/$(basename "$m")"

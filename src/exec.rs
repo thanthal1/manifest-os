@@ -174,6 +174,32 @@ impl Ctx {
         }
     }
 
+    /// Set a user's password *inside a chroot* (`root`, e.g. `/mnt`), feeding
+    /// `chpasswd` over stdin so the password is never printed or written to disk.
+    /// Used by the installer to set the friendly account's password in the new
+    /// system.
+    pub fn set_password_chroot(&self, root: &str, user: &str, password: &str) -> Result<()> {
+        println!("  · setting password for {user}");
+        if self.dry_run {
+            return Ok(());
+        }
+        let mut child = Command::new("sudo")
+            .args(["arch-chroot", root, "chpasswd"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to launch chpasswd: {e}"))?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(format!("{user}:{password}\n").as_bytes())?;
+        match child.wait() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => bail!("chpasswd exited with status {s}"),
+            Err(e) => bail!("chpasswd failed: {e}"),
+        }
+    }
+
     /// Run a detection command quietly and report whether it succeeded.
     ///
     /// In dry-run this does NOT execute and returns `false`, so the pipeline

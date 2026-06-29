@@ -6,25 +6,11 @@
 //! parser fetched per `schema_version`. Phase 1 implements the install flow
 //! locally.
 
-mod boot;
-mod desktop;
-mod dotfiles;
-mod exec;
-mod files;
-mod install;
-mod installer;
-mod kernel;
-mod manifest;
-mod pacman;
-mod survey;
-mod system;
-mod tui;
-mod users;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use exec::Ctx;
-use manifest::Manifest;
+use manifest::exec::Ctx;
+use manifest::manifest::Manifest;
+use manifest::{desktop, install, installer, kernel, survey, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -60,13 +46,9 @@ enum Command {
     /// Export the current system as a manifest (Phase 5).
     Export,
     /// Re-apply a manifest to update packages/config (Phase 5).
-    Sync {
-        file: PathBuf,
-    },
+    Sync { file: PathBuf },
     /// Show what an install would change (Phase 5).
-    Diff {
-        file: PathBuf,
-    },
+    Diff { file: PathBuf },
     /// List the desktop environments / window managers the installer can set up.
     Desktops,
     /// List the kernels the installer can install.
@@ -86,28 +68,13 @@ fn main() {
     }
 }
 
-/// After a successful install, show a clear completion screen and reboot — so
-/// the installer ends gracefully instead of dumping the user at a shell.
-fn finish_and_reboot() {
-    use std::io::Write;
-    println!("\n  ╭───────────────────────────────────────────────╮");
-    println!("  │   ✓  Manifest OS installed successfully!       │");
-    println!("  ╰───────────────────────────────────────────────╯");
-    print!("\n  Remove the install USB, then press Enter to reboot");
-    print!("  (Ctrl-C for a shell). ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    println!("  Rebooting…");
-    // systemctl reboot on a booted system; reboot(8) as a fallback.
-    if std::process::Command::new("systemctl").arg("reboot").status().is_err() {
-        let _ = std::process::Command::new("reboot").status();
-    }
-}
-
 fn run() -> Result<()> {
     match Cli::parse().command {
-        Command::Install { file, dry_run, answers } => {
+        Command::Install {
+            file,
+            dry_run,
+            answers,
+        } => {
             let raw = std::fs::read_to_string(&file)?;
             // Run the survey, inject {{answers}}, then parse the final manifest.
             let answered = survey::collect(&raw, answers.as_deref())?;
@@ -123,7 +90,11 @@ fn run() -> Result<()> {
         Command::Verify { file } => {
             let manifest = Manifest::from_path(&file)?;
             let kernel = kernel::resolve(manifest.system.kernel.as_deref())?;
-            let default_note = if manifest.system.kernel.is_none() { " (default)" } else { "" };
+            let default_note = if manifest.system.kernel.is_none() {
+                " (default)"
+            } else {
+                ""
+            };
             println!(
                 "✓ valid — schema v{}, {} package(s), kernel: {}{}",
                 manifest.schema_version,
@@ -142,7 +113,10 @@ fn run() -> Result<()> {
                     desktop::Session::Both => "wayland/x11",
                 };
                 let dm = r.default_dm.unwrap_or("(tty)");
-                println!("  {:<14} {:<12} dm:{:<14} {}", r.key, kind, dm, r.display_name);
+                println!(
+                    "  {:<14} {:<12} dm:{:<14} {}",
+                    r.key, kind, dm, r.display_name
+                );
                 println!("                 {}", r.notes);
             }
             println!("\nOverride the login manager with the manifest's \"display_manager\" field.");
@@ -151,18 +125,25 @@ fn run() -> Result<()> {
         Command::Kernels => {
             println!("Supported kernels (use as system.kernel in a manifest):\n");
             for k in kernel::catalog() {
-                let def = if k.key == kernel::DEFAULT_KEY { "  [default]" } else { "" };
+                let def = if k.key == kernel::DEFAULT_KEY {
+                    "  [default]"
+                } else {
+                    ""
+                };
                 println!("  {:<16} {}{}", k.key, k.display, def);
                 println!("                   {}", k.notes);
             }
-            println!("\nUnset system.kernel installs `{}`. Headers are installed alongside.", kernel::DEFAULT_KEY);
+            println!(
+                "\nUnset system.kernel installs `{}`. Headers are installed alongside.",
+                kernel::DEFAULT_KEY
+            );
             Ok(())
         }
         Command::Tui { dry_run } => match tui::run()? {
             Some(plan) => {
                 installer::execute(&plan, &Ctx::new(dry_run))?;
                 if !dry_run {
-                    finish_and_reboot();
+                    installer::finish_and_reboot();
                 }
                 Ok(())
             }

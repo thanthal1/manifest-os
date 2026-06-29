@@ -65,8 +65,12 @@ fn detect_firmware(ctx: &Ctx) -> Firmware {
 // ---------------------------------------------------------------------------
 
 fn systemd_boot(boot: &Boot, kernel: &Kernel, fw: Firmware, ctx: &Ctx) -> Result<()> {
+    // systemd-boot is UEFI-only. Rather than abort an otherwise-finished install
+    // (leaving an unbootable disk), fall back to GRUB on BIOS — it boots the same
+    // kernel and works on both firmwares.
     if let Firmware::Bios = fw {
-        bail!("systemd-boot requires UEFI, but this system is BIOS — use `loader: \"grub\"`");
+        println!("  · note: systemd-boot needs UEFI but this is BIOS — installing GRUB instead");
+        return grub(boot, fw, ctx);
     }
     println!("  · bootloader: systemd-boot");
     ctx.sudo("bootctl", &["install"])?;
@@ -78,9 +82,8 @@ fn systemd_boot(boot: &Boot, kernel: &Kernel, fw: Firmware, ctx: &Ctx) -> Result
 
     let entry_id = format!("manifest-{}", kernel.package);
     let timeout = boot.timeout.unwrap_or(3);
-    let loader_conf = format!(
-        "default {entry_id}.conf\ntimeout {timeout}\nconsole-mode keep\neditor no\n"
-    );
+    let loader_conf =
+        format!("default {entry_id}.conf\ntimeout {timeout}\nconsole-mode keep\neditor no\n");
     ctx.write_root(&format!("{}/loader/loader.conf", boot.esp), &loader_conf)?;
 
     let root = root_param(ctx)?;
@@ -102,7 +105,10 @@ fn systemd_boot(boot: &Boot, kernel: &Kernel, fw: Firmware, ctx: &Ctx) -> Result
         "initrd  /initramfs-{}.img\noptions {options}\n",
         kernel.package
     ));
-    ctx.write_root(&format!("{}/loader/entries/{entry_id}.conf", boot.esp), &entry)?;
+    ctx.write_root(
+        &format!("{}/loader/entries/{entry_id}.conf", boot.esp),
+        &entry,
+    )?;
     println!("  · wrote loader entry `{entry_id}` (root={root})");
     Ok(())
 }
@@ -142,7 +148,11 @@ fn grub(boot: &Boot, fw: Firmware, ctx: &Ctx) -> Result<()> {
     if let Some(t) = boot.timeout {
         ctx.sudo(
             "sed",
-            &["-i", &format!("s|^GRUB_TIMEOUT=.*|GRUB_TIMEOUT={t}|"), "/etc/default/grub"],
+            &[
+                "-i",
+                &format!("s|^GRUB_TIMEOUT=.*|GRUB_TIMEOUT={t}|"),
+                "/etc/default/grub",
+            ],
         )?;
     }
     if !boot.cmdline.is_empty() {
@@ -182,7 +192,9 @@ fn root_disk(ctx: &Ctx) -> Result<String> {
         return Ok("/dev/<disk>".to_string());
     }
     let dev = ctx.output(false, "findmnt", &["-no", "SOURCE", "/"])?;
-    let pkname = ctx.output(true, "lsblk", &["-no", "PKNAME", &dev]).unwrap_or_default();
+    let pkname = ctx
+        .output(true, "lsblk", &["-no", "PKNAME", &dev])
+        .unwrap_or_default();
     let pkname = pkname.lines().next().unwrap_or("").trim();
     if pkname.is_empty() {
         bail!("could not determine the boot disk for BIOS grub-install");

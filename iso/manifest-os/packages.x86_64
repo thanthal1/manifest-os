@@ -131,3 +131,18 @@ zsh
 
 # Manifest OS additions
 git
+
+# Graphical installer session: a kiosk Wayland compositor (cage) running the
+# GTK4/libadwaita installer. mesa for GL when a GPU is present; it also software-
+# renders (WLR_RENDERER=pixman / GSK_RENDERER=cairo) on weak/VM GPUs. Fonts +
+# icon theme so the UI looks right.
+cage
+xorg-xwayland
+gtk4
+libadwaita
+mesa
+seatd
+cantarell-fonts
+noto-fonts
+ttf-dejavu
+adwaita-icon-theme

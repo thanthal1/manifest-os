@@ -71,8 +71,10 @@ fn add_cachyos_repo(ctx: &Ctx) -> Result<()> {
         curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz && \
         tar xf cachyos-repo.tar.xz && \
         cd cachyos-repo && \
-        ./cachyos-repo.sh";
-    // The script invokes sudo itself, so it runs at user level.
+        sudo ./cachyos-repo.sh";
+    // cachyos-repo.sh refuses to run unless EUID==0 (it does NOT self-escalate),
+    // so it must be invoked *with* sudo. The wrapping shell stays at user level
+    // because the surrounding curl/tar/mktemp do not need root.
     ctx.shell(script, false)
 }
 
@@ -87,14 +89,17 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     println!("  · installing build prerequisites (base-devel, git)");
-    ctx.sudo("pacman", &["-S", "--needed", "--noconfirm", "base-devel", "git"])?;
+    ctx.sudo(
+        "pacman",
+        &["-S", "--needed", "--noconfirm", "base-devel", "git"],
+    )?;
 
-    println!("  · building paru-bin from the AUR");
+    println!("  · building paru from the AUR (low-memory mode)");
     let build = format!(
         "cd \"$(mktemp -d)\" && \
          git clone --depth 1 {PARU_AUR} && \
          cd paru && \
-         makepkg -si --noconfirm"
+         MAKEFLAGS=-j1 CARGO_BUILD_JOBS=1 makepkg -si --noconfirm"
     );
     ctx.shell(&build, false)
 }
@@ -122,7 +127,18 @@ pub fn install_packages(
     }
     println!("  installing {} package(s)", pkgs.len());
 
-    let mut args = vec!["-S", "--needed", "--noconfirm"];
-    args.extend(pkgs);
-    ctx.run("paru", &args)
+    let mut args = vec![
+        "MAKEFLAGS=-j1".to_string(),
+        "CARGO_BUILD_JOBS=1".to_string(),
+        "paru".to_string(),
+        "-S".to_string(),
+        "--needed".to_string(),
+        "--noconfirm".to_string(),
+    ];
+    args.extend(pkgs.into_iter().map(shell_quote));
+    ctx.shell(&args.join(" "), false)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

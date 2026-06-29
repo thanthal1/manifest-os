@@ -13,8 +13,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
-use std::process::Command;
 use std::time::Duration;
+
+use crate::probe::{self, Disk, InstallPlan};
 
 // Catppuccin Mocha — friendly, high-contrast.
 const BASE: Color = Color::Rgb(30, 30, 46);
@@ -36,20 +37,6 @@ enum Screen {
 }
 
 const STEPS: [&str; 5] = ["Welcome", "Network", "Disk", "Manifest", "Install"];
-
-struct Disk {
-    name: String,
-    size: String,
-    model: String,
-}
-
-/// What the wizard collected — handed back to the caller to execute.
-pub struct InstallPlan {
-    pub disk: String,
-    pub filesystem: String,
-    pub swap: String,
-    pub manifest: String,
-}
 
 struct App {
     screen: Screen,
@@ -82,19 +69,19 @@ impl App {
             screen: Screen::Welcome,
             quit: false,
             plan: None,
-            online: is_online(),
-            wifi_dev: wifi_device(),
+            online: probe::is_online(),
+            wifi_dev: probe::wifi_device(),
             networks: Vec::new(),
             net_sel: 0,
             wifi_pass: String::new(),
             pass_focus: false,
             net_status: String::new(),
-            disks: list_disks(),
+            disks: probe::list_disks(),
             disk_sel: 0,
             disk_field: 0,
             fs_idx: 0,
             swap_idx: 0,
-            manifests: bundled_manifests(),
+            manifests: probe::bundled_manifests(),
             man_sel: 0,
             man_input: String::new(),
             man_typing: false,
@@ -153,7 +140,13 @@ fn handle_key(app: &mut App, key: KeyCode) {
     if app.pass_focus {
         match key {
             KeyCode::Enter => {
-                connect_wifi(app);
+                if let (Some(dev), Some(ssid)) =
+                    (app.wifi_dev.clone(), app.networks.get(app.net_sel).cloned())
+                {
+                    let (online, status) = probe::connect_wifi(&dev, &ssid, &app.wifi_pass);
+                    app.online = online;
+                    app.net_status = status;
+                }
                 app.pass_focus = false;
             }
             KeyCode::Esc => app.pass_focus = false,
@@ -222,7 +215,7 @@ fn network_keys(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('s') => {
             if let Some(dev) = &app.wifi_dev {
-                app.networks = scan_wifi(dev);
+                app.networks = probe::scan_wifi(dev);
                 app.net_sel = 0;
             }
         }
@@ -234,7 +227,7 @@ fn network_keys(app: &mut App, key: KeyCode) {
         }
         KeyCode::Enter => {
             // Online or chose to proceed -> next.
-            app.online = is_online();
+            app.online = probe::is_online();
             app.screen = Screen::Disk;
         }
         _ => {}
@@ -298,6 +291,8 @@ fn build_plan(app: &App) -> InstallPlan {
         filesystem: ["ext4", "btrfs"][app.fs_idx].to_string(),
         swap: ["zram", "none"][app.swap_idx].to_string(),
         manifest,
+        account: None,
+        hostname: None,
     }
 }
 
@@ -536,200 +531,4 @@ fn centered(area: Rect, pct_x: u16, pct_y: u16) -> Rect {
         Constraint::Percentage((100 - pct_x) / 2),
     ])
     .split(v[1])[1]
-}
-
-// ---------------------------------------------------------------------------
-// System detection (read-only)
-// ---------------------------------------------------------------------------
-
-fn is_online() -> bool {
-    Command::new("ping")
-        .args(["-c", "1", "-W", "2", "archlinux.org"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn wifi_device() -> Option<String> {
-    let entries = std::fs::read_dir("/sys/class/net").ok()?;
-    for e in entries.flatten() {
-        if e.path().join("wireless").exists() {
-            return Some(e.file_name().to_string_lossy().to_string());
-        }
-    }
-    None
-}
-
-/// Strip ANSI escape sequences (iwctl colorizes its table output).
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // consume up to and including the final letter of the CSI sequence
-            for n in chars.by_ref() {
-                if n.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn scan_wifi(dev: &str) -> Vec<String> {
-    let _ = Command::new("iwctl").args(["station", dev, "scan"]).output();
-    // iwd's scan takes a few seconds to populate all networks.
-    std::thread::sleep(Duration::from_secs(4));
-    let out = match Command::new("iwctl").args(["station", dev, "get-networks"]).output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut nets = Vec::new();
-    for raw in text.lines() {
-        let line = strip_ansi(raw);
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.contains("Available networks")
-            || trimmed.contains("Network name")
-            || trimmed.chars().all(|c| c == '-' || c.is_whitespace())
-        {
-            continue;
-        }
-        // Drop the leading "> " connected-marker column, then the SSID runs up
-        // to the 2+ space gap before the Security column (keeps SSIDs w/ spaces).
-        let body = line.trim_start();
-        let body = body.strip_prefix('>').unwrap_or(body).trim_start();
-        let ssid = body.split("  ").next().unwrap_or("").trim();
-        if !ssid.is_empty() && !nets.iter().any(|n| n == ssid) {
-            nets.push(ssid.to_string());
-        }
-    }
-    nets.truncate(20);
-    nets
-}
-
-/// Connect, then actually verify: poll for an IP/route until online or timeout,
-/// and report success or a likely cause (wrong password) back to the UI.
-fn connect_wifi(app: &mut App) {
-    let (Some(dev), Some(ssid)) = (app.wifi_dev.clone(), app.networks.get(app.net_sel).cloned())
-    else {
-        return;
-    };
-    let connected = Command::new("iwctl")
-        .args(["--passphrase", &app.wifi_pass, "station", &dev, "connect", &ssid])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    // Wait for association + DHCP (networkd), polling connectivity.
-    let mut online = false;
-    for _ in 0..6 {
-        std::thread::sleep(Duration::from_secs(2));
-        if is_online() {
-            online = true;
-            break;
-        }
-    }
-    app.online = online;
-    app.net_status = if online {
-        format!("✓ Connected to {ssid}")
-    } else if !connected {
-        format!("✗ Couldn't connect to {ssid} — wrong password?")
-    } else {
-        format!("✗ Joined {ssid} but no internet yet — wait a moment or retry")
-    };
-}
-
-fn list_disks() -> Vec<Disk> {
-    let out = Command::new("lsblk")
-        .args(["-dpno", "NAME,SIZE,TYPE,MODEL"])
-        .output();
-    let Ok(out) = out else { return Vec::new() };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let name = it.next()?.to_string();
-            let size = it.next()?.to_string();
-            let kind = it.next()?;
-            if kind != "disk" {
-                return None;
-            }
-            let model = it.collect::<Vec<_>>().join(" ");
-            Some(Disk { name, size, model: if model.is_empty() { "disk".into() } else { model } })
-        })
-        .collect()
-}
-
-/// Manifests offered in the picker: the ISO's bundled examples plus any found
-/// on removable media (a `manifests/` folder or loose `*.json`).
-fn bundled_manifests() -> Vec<String> {
-    let mut v = json_files_in("/usr/share/manifest-os/examples");
-    v.extend(scan_removable_manifests());
-    v.sort();
-    v.dedup();
-    if v.is_empty() {
-        v = vec!["niri-rice".into(), "hyprland-rice".into(), "gnome".into(), "minimal".into()];
-    }
-    v
-}
-
-fn json_files_in(dir: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            (p.extension().map(|x| x == "json").unwrap_or(false))
-                .then(|| p.to_string_lossy().to_string())
-        })
-        .collect()
-}
-
-/// Scan removable drives for manifests. Each removable partition is mounted
-/// read-only (the TUI runs as root on the ISO), then `manifests/*.json` and any
-/// loose `*.json` at its root are collected. Drop a JSON in a `manifests/`
-/// folder on a USB stick and it shows up here.
-fn scan_removable_manifests() -> Vec<String> {
-    let mut found = Vec::new();
-    let Ok(out) = Command::new("lsblk")
-        .args(["-P", "-p", "-o", "NAME,TYPE,RM,FSTYPE,MOUNTPOINT"])
-        .output()
-    else {
-        return found;
-    };
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let val = |k: &str| -> String {
-            line.split(&format!("{k}=\""))
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-                .unwrap_or("")
-                .to_string()
-        };
-        if val("TYPE") != "part" || val("RM") != "1" || val("FSTYPE").is_empty() {
-            continue;
-        }
-        let name = val("NAME");
-        let mut mp = val("MOUNTPOINT");
-        if mp.is_empty() {
-            let dir = format!("/run/manifest-usb/{}", name.replace('/', "_"));
-            let _ = Command::new("mkdir").args(["-p", &dir]).status();
-            let ok = Command::new("mount")
-                .args(["-o", "ro", &name, &dir])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok {
-                continue;
-            }
-            mp = dir;
-        }
-        found.extend(json_files_in(&format!("{mp}/manifests")));
-        found.extend(json_files_in(&mp));
-    }
-    found
 }
