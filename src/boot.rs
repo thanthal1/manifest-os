@@ -145,6 +145,16 @@ fn grub(boot: &Boot, fw: Firmware, ctx: &Ctx) -> Result<()> {
     }
     ctx.sudo("pacman", &pkgs)?;
 
+    // Brand the boot menu — the grub package ships GRUB_DISTRIBUTOR="Arch".
+    ctx.sudo(
+        "sed",
+        &[
+            "-i",
+            "s|^GRUB_DISTRIBUTOR=.*|GRUB_DISTRIBUTOR=\"Manifest OS\"|",
+            "/etc/default/grub",
+        ],
+    )?;
+
     if let Some(t) = boot.timeout {
         ctx.sudo(
             "sed",
