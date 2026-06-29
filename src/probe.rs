@@ -249,22 +249,30 @@ fn scan_removable_manifests() -> Vec<String> {
     found
 }
 
-/// A Windows install found on a disk, with the pieces a dual-boot install needs.
-pub struct WindowsTarget {
-    /// The whole disk Windows lives on (e.g. `/dev/sda`).
+/// An existing OS install we could dual-boot alongside — Windows, another Linux,
+/// anything. Carries the pieces a side-by-side install needs.
+pub struct ExistingOs {
+    /// The whole disk the OS lives on (e.g. `/dev/sda`).
     pub disk: String,
     /// The existing EFI System Partition to reuse (not reformat).
     pub esp: String,
-    /// The Windows NTFS partition to shrink to make room.
-    pub windows_part: String,
-    /// That partition's current size, in GiB.
-    pub windows_size_gib: u32,
+    /// The partition to shrink to make room (its largest resizable filesystem).
+    pub shrink_part: String,
+    /// That partition's filesystem (`ntfs`, `ext4`, `btrfs`, …) — picks the
+    /// shrink tool.
+    pub shrink_fstype: String,
+    /// Its current size, in GiB.
+    pub shrink_size_gib: u32,
+    /// A friendly name for the menus: `Windows`, `Ubuntu`, `an existing system`…
+    pub label: String,
 }
 
-/// Detect a Windows install we could dual-boot alongside: a disk that has both a
-/// Windows-bearing ESP (`EFI/Microsoft/Boot/bootmgfw.efi`) and an NTFS partition.
-/// Returns the largest such disk's pieces. Read-only (mounts the ESP briefly).
-pub fn detect_windows() -> Option<WindowsTarget> {
+/// Detect an existing OS we could install alongside: a disk that has an EFI
+/// System Partition (an OS already boots via UEFI) **and** a resizable
+/// filesystem we can shrink for room. Works for Windows or another Linux. A
+/// blank/unpartitioned disk returns `None`, so callers just offer a fresh
+/// whole-disk install. Read-only (mounts partitions briefly to peek).
+pub fn detect_existing_os() -> Option<ExistingOs> {
     let out = Command::new("lsblk")
         .args(["-P", "-p", "-b", "-o", "NAME,TYPE,FSTYPE,SIZE,PKNAME"])
         .output()
@@ -297,7 +305,6 @@ pub fn detect_windows() -> Option<WindowsTarget> {
             disk,
         });
     }
-    // Disks that carry a Windows ESP + an NTFS partition.
     let disks: Vec<String> = {
         let mut d: Vec<String> = parts.iter().map(|p| p.disk.clone()).collect();
         d.sort();
@@ -306,40 +313,82 @@ pub fn detect_windows() -> Option<WindowsTarget> {
     };
     for disk in disks {
         let on = |p: &&P| p.disk == disk;
-        let esp = parts
+        // An in-use ESP (a vfat partition that actually holds an /EFI tree).
+        let esp = parts.iter().filter(on).find(|p| p.fstype == "vfat" && is_esp(&p.name));
+        // The largest filesystem we know how to shrink.
+        let shrink = parts
             .iter()
             .filter(on)
-            .find(|p| p.fstype == "vfat" && esp_has_windows(&p.name));
-        let ntfs = parts.iter().filter(on).filter(|p| p.fstype == "ntfs").max_by_key(|p| p.size);
-        if let (Some(esp), Some(ntfs)) = (esp, ntfs) {
-            return Some(WindowsTarget {
+            .filter(|p| is_shrinkable(&p.fstype))
+            .max_by_key(|p| p.size);
+        if let (Some(esp), Some(shrink)) = (esp, shrink) {
+            return Some(ExistingOs {
                 disk: disk.clone(),
                 esp: esp.name.clone(),
-                windows_part: ntfs.name.clone(),
-                windows_size_gib: (ntfs.size / (1 << 30)) as u32,
+                shrink_part: shrink.name.clone(),
+                shrink_fstype: shrink.fstype.clone(),
+                shrink_size_gib: (shrink.size / (1 << 30)) as u32,
+                label: os_label(&esp.name, &shrink.name),
             });
         }
     }
     None
 }
 
-/// Whether an ESP holds the Windows boot manager (mounts it read-only to peek).
-fn esp_has_windows(esp: &str) -> bool {
-    let dir = "/run/manifest-espcheck";
+/// Filesystems the installer can shrink to make room for a side-by-side install.
+fn is_shrinkable(fs: &str) -> bool {
+    matches!(fs, "ntfs" | "ext2" | "ext3" | "ext4" | "btrfs")
+}
+
+/// Mount a partition read-only and run `peek` against the mountpoint, then
+/// unmount. Returns `peek`'s value (or its default on a failed mount).
+fn with_ro_mount<T: Default>(part: &str, peek: impl FnOnce(&std::path::Path) -> T) -> T {
+    let dir = "/run/manifest-osprobe";
     let _ = Command::new("mkdir").args(["-p", dir]).status();
     let mounted = Command::new("mount")
-        .args(["-o", "ro", esp, dir])
+        .args(["-o", "ro", part, dir])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !mounted {
-        return false;
+        return T::default();
     }
-    let found = std::path::Path::new(dir)
-        .join("EFI/Microsoft/Boot/bootmgfw.efi")
-        .exists();
+    let out = peek(std::path::Path::new(dir));
     let _ = Command::new("umount").arg(dir).status();
-    found
+    out
+}
+
+/// Whether a vfat partition is actually an EFI System Partition in use (has an
+/// `/EFI` directory), as opposed to a plain FAT data partition.
+fn is_esp(part: &str) -> bool {
+    with_ro_mount(part, |root| root.join("EFI").is_dir())
+}
+
+/// A friendly name for an existing install: `Windows` if its ESP holds the
+/// Windows boot manager, else the distro `NAME` from the shrink partition's
+/// os-release, else a generic fallback.
+fn os_label(esp: &str, shrink: &str) -> String {
+    let windows = with_ro_mount(esp, |root| root.join("EFI/Microsoft/Boot/bootmgfw.efi").exists());
+    if windows {
+        return "Windows".to_string();
+    }
+    let name = with_ro_mount(shrink, |root| {
+        for rel in ["etc/os-release", "usr/lib/os-release"] {
+            if let Ok(txt) = std::fs::read_to_string(root.join(rel)) {
+                for line in txt.lines() {
+                    if let Some(v) = line.strip_prefix("NAME=") {
+                        return v.trim().trim_matches('"').to_string();
+                    }
+                }
+            }
+        }
+        String::new()
+    });
+    if name.is_empty() {
+        "an existing system".to_string()
+    } else {
+        name
+    }
 }
 
 /// The whole disk the live medium booted from (e.g. `/dev/sdb`), so we never

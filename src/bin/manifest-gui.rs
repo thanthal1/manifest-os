@@ -545,11 +545,12 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
     let disks = probe::list_disks();
     let disk_names: Vec<String> = disks.iter().map(|d| d.name.clone()).collect();
 
-    // If Windows is on a disk, offer to keep it (dual boot) instead of erasing.
-    let win = probe::detect_windows();
+    // If an OS (Windows, another Linux, …) is on a disk, offer to keep it (dual
+    // boot) instead of erasing. A blank disk yields None → just the erase flow.
+    let win = probe::detect_existing_os();
 
     // The disk picker (the "erase" target). For dual boot the disk is fixed to
-    // the one Windows lives on, so we only steer state.disk here in erase mode.
+    // the one the existing OS lives on, so we only steer state.disk here in erase mode.
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -582,10 +583,10 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
     }
 
     if let Some(w) = &win {
-        // Dual-boot chooser. Default to keeping Windows — the friendly choice.
+        // Dual-boot chooser. Default to keeping the existing OS — the friendly choice.
         let intro = gtk::Label::new(Some(&format!(
-            "Windows was found on {} ({} GB). You can keep it and choose which to start, or erase everything.",
-            w.disk, w.windows_size_gib
+            "Found {} on {} ({} GB). You can keep it and choose which to start, or erase everything.",
+            w.label, w.disk, w.shrink_size_gib
         )));
         intro.set_wrap(true);
         intro.set_xalign(0.0);
@@ -595,18 +596,19 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         // Radio buttons (not a selectable list): a binary choice that must NOT
         // change just because focus moved through it — important for keyboard
         // users, who would otherwise flip "erase"/"alongside" by tabbing past.
-        let along = gtk::CheckButton::with_label(
-            "Install alongside Windows — keep Windows, pick which to start (recommended)",
-        );
+        let along = gtk::CheckButton::with_label(&format!(
+            "Install alongside it — keep {} and pick which to start (recommended)",
+            w.label
+        ));
         let erase = gtk::CheckButton::with_label(
-            "Erase the whole disk — remove Windows and everything else",
+            "Erase the whole disk — remove everything and start fresh",
         );
         erase.set_group(Some(&along));
-        along.set_active(true); // default to keeping Windows
+        along.set_active(true); // default to keeping the existing OS
         content.append(&along);
         content.append(&erase);
 
-        // Start in dual-boot mode, targeting Windows' disk.
+        // Start in dual-boot mode, targeting the existing OS's disk.
         {
             let mut st = state.borrow_mut();
             st.install_mode = "alongside".into();
@@ -762,7 +764,7 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                 (s, _) => s.to_string(),
             };
             let disk_str = if st.install_mode == "alongside" {
-                format!("{} — alongside Windows ({} GiB for Manifest OS)", st.disk, st.alongside_gib.unwrap_or(40))
+                format!("{} — alongside the existing OS ({} GiB for Manifest OS)", st.disk, st.alongside_gib.unwrap_or(40))
             } else {
                 format!("{} (will be erased)", st.disk)
             };

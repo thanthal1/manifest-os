@@ -332,58 +332,54 @@ fn partition_names(disk: &str, uefi: bool, has_swap: bool) -> Parts {
     }
 }
 
-/// Shrink the detected Windows partition and create a Manifest OS root in the
-/// freed space, **reusing** Windows' existing ESP — i.e. set up a dual boot
-/// instead of erasing the disk. Returns the partitions to install onto.
+/// Shrink the largest filesystem of an existing OS (Windows, another Linux, …)
+/// and create a Manifest OS root in the freed space, **reusing** that OS's
+/// existing ESP — i.e. set up a dual boot instead of erasing the disk. Returns
+/// the partitions to install onto.
 ///
-/// Order matters and is the safe one: shrink the NTFS *filesystem* first, then
-/// the *partition* to match (parted keeps the start sector + GUID so Windows'
-/// boot references stay valid), then carve our partition out of the freed tail.
-/// It refuses to touch a Windows volume that isn't cleanly resizable (a
-/// hibernated / Fast-Startup Windows leaves it "dirty").
+/// Order matters and is the safe one: shrink the *filesystem* first (with the
+/// right tool for its type), then the *partition* to match, then carve our
+/// partition out of the freed tail. The partition is recreated at the SAME start
+/// sector with its original type + unique GUID preserved, so the other OS's boot
+/// references stay valid. NTFS is also gated on a clean `--no-action` pass so we
+/// never resize a hibernated / Fast-Startup Windows.
 fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
-    let win = crate::probe::detect_windows()
-        .context("no Windows install was detected to install alongside")?;
-    step("Making room alongside Windows");
+    let os = crate::probe::detect_existing_os()
+        .context("no existing OS was detected to install alongside")?;
+    step("Making room alongside the existing system");
     println!(
-        "  · Windows is on {} ({} GiB NTFS); reusing its ESP {}",
-        win.windows_part, win.windows_size_gib, win.esp
+        "  · {} is on {} ({} GiB {}); reusing its ESP {}",
+        os.label, os.shrink_part, os.shrink_size_gib, os.shrink_fstype, os.esp
     );
 
     let gib = 1u64 << 30;
     let give = (plan.alongside_gib.filter(|&g| g >= 15).unwrap_or(40) as u64) * gib;
 
     if ctx.dry_run {
-        println!("  · would shrink {} and create a {} GiB Manifest OS partition", win.windows_part, give / gib);
-        return Ok(Parts { root: format!("{}-new", win.disk), esp: Some(win.esp), swap: None });
+        println!("  · would shrink {} and create a {} GiB Manifest OS partition", os.shrink_part, give / gib);
+        return Ok(Parts { root: format!("{}-new", os.disk), esp: Some(os.esp), swap: None });
     }
 
-    let part_bytes = disk_bytes(&win.windows_part, ctx);
+    let part_bytes = disk_bytes(&os.shrink_part, ctx);
     if part_bytes < give + 20 * gib {
         bail!(
-            "not enough room: the Windows partition is only {} GiB — free up space in Windows first",
+            "not enough room: {} is only {} GiB — free up space in it first",
+            os.shrink_part,
             part_bytes / gib
         );
     }
-    let new_ntfs = part_bytes - give;
+    let new_fs = part_bytes - give;
 
-    // 1) Shrink the NTFS filesystem. The --no-action pass is the safety gate: it
-    //    fails on a dirty/hibernated volume, so we never resize one.
-    if ctx
-        .shell(&format!("ntfsresize -f --no-action --size {new_ntfs} {}", win.windows_part), true)
-        .is_err()
-    {
-        bail!(
-            "couldn't safely resize the Windows filesystem on {} — boot Windows, turn off Fast Startup, fully shut it down, then try again",
-            win.windows_part
-        );
-    }
-    ctx.shell(&format!("echo y | ntfsresize -f --size {new_ntfs} {}", win.windows_part), true)
-        .context("shrinking the Windows filesystem failed")?;
+    // 1) Shrink the existing filesystem with the right tool for its type.
+    shrink_filesystem(&os.shrink_part, &os.shrink_fstype, new_fs, &os.label, ctx)?;
 
-    // 2) Shrink the partition to match (start sector + GUID preserved).
-    let num: String = win
-        .windows_part
+    // 2) Shrink the partition to match. Recreate it at the SAME start sector with
+    //    its original type + unique GUID preserved, so the other OS's bootloader
+    //    references stay valid. (parted's resizepart refuses to shrink
+    //    non-interactively; sgdisk never prompts.) End sector = shrunk filesystem
+    //    + 1 MiB slack, so the partition is never smaller than its filesystem.
+    let num: String = os
+        .shrink_part
         .chars()
         .rev()
         .take_while(|c| c.is_ascii_digit())
@@ -391,51 +387,93 @@ fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
         .chars()
         .rev()
         .collect();
-    let base = win.windows_part.trim_start_matches("/dev/");
+    let base = os.shrink_part.trim_start_matches("/dev/");
     let start_sec = sysfs_u64(&format!("/sys/class/block/{base}/start"));
-    // End sector: the shrunk filesystem plus 1 MiB of slack, so the partition is
-    // never smaller than its filesystem. We recreate the partition at the SAME
-    // start sector and preserve its type (0700, Microsoft basic data) and unique
-    // GUID, so Windows' boot references stay valid. (parted's resizepart refuses
-    // to shrink non-interactively; sgdisk never prompts.)
-    let new_end_sec = start_sec + new_ntfs / 512 + 2048;
+    let new_end_sec = start_sec + new_fs / 512 + 2048;
     let shrink = format!(
-        "guid=$(sgdisk -i {num} {disk} | sed -n 's/.*unique GUID: //p' | tr -d ' \\r'); \
-         sgdisk -d {num} -n {num}:{start}:{end} -t {num}:0700 ${{guid:+-u {num}:$guid}} {disk}",
+        "info=$(sgdisk -i {num} {disk}); \
+         tguid=$(echo \"$info\" | sed -n 's/.*GUID code: \\([0-9A-Fa-f-]*\\).*/\\1/p'); \
+         uguid=$(echo \"$info\" | sed -n 's/.*unique GUID: //p' | tr -d ' \\r'); \
+         sgdisk -d {num} -n {num}:{start}:{end} ${{tguid:+-t {num}:$tguid}} ${{uguid:+-u {num}:$uguid}} {disk}",
         num = num,
-        disk = win.disk,
+        disk = os.disk,
         start = start_sec,
         end = new_end_sec
     );
-    ctx.shell(&shrink, true).context("resizing the Windows partition failed")?;
-    let _ = ctx.shell(&format!("partprobe {}", win.disk), true);
+    ctx.shell(&shrink, true).context("resizing the existing partition failed")?;
+    let _ = ctx.shell(&format!("partprobe {}", os.disk), true);
 
     // 3) Create our root in the freed (now largest free) space; identify the new
     //    partition by diffing the table before/after so we never guess wrong.
-    let before = list_parts(&win.disk, ctx);
-    ctx.shell(&format!("sgdisk -n 0:0:0 -t 0:8300 {}", win.disk), true)
+    let before = list_parts(&os.disk, ctx);
+    ctx.shell(&format!("sgdisk -n 0:0:0 -t 0:8300 {}", os.disk), true)
         .context("creating the Manifest OS partition failed")?;
-    let _ = ctx.shell(&format!("partprobe {}", win.disk), true);
-    let after = list_parts(&win.disk, ctx);
+    let _ = ctx.shell(&format!("partprobe {}", os.disk), true);
+    let after = list_parts(&os.disk, ctx);
     let root = after
         .into_iter()
         .find(|p| !before.contains(p))
         .context("could not locate the new Manifest OS partition after creating it")?;
 
-    // 4) Format ONLY our new root — never the ESP, never Windows.
+    // 4) Format ONLY our new root — never the ESP, never the existing OS.
     match plan.filesystem.as_str() {
         "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", &root])?,
         _ => ctx.sudo("mkfs.ext4", &["-F", &root])?,
     }
-    println!("  · created Manifest OS on {} ({} GiB) — Windows left intact", root, give / gib);
-    Ok(Parts { root, esp: Some(win.esp), swap: None })
+    println!("  · created Manifest OS on {} ({} GiB) — {} left intact", root, give / gib, os.label);
+    Ok(Parts { root, esp: Some(os.esp), swap: None })
 }
 
-/// After a dual-boot install, make Windows appear in the GRUB menu: install
+/// Shrink an existing filesystem to `new_size` bytes, in place, picking the tool
+/// for its type. NTFS gets a `--no-action` safety pass first (fails on a dirty /
+/// hibernated volume). ext* are fsck'd then resized; btrfs resizes mounted.
+fn shrink_filesystem(part: &str, fstype: &str, new_size: u64, label: &str, ctx: &Ctx) -> Result<()> {
+    match fstype {
+        "ntfs" => {
+            if ctx
+                .shell(&format!("ntfsresize -f --no-action --size {new_size} {part}"), true)
+                .is_err()
+            {
+                bail!(
+                    "couldn't safely resize {label} on {part} — boot it, turn off Fast Startup, fully shut down, then try again"
+                );
+            }
+            ctx.shell(&format!("echo y | ntfsresize -f --size {new_size} {part}"), true)
+                .context("shrinking the NTFS filesystem failed")?;
+        }
+        "ext2" | "ext3" | "ext4" => {
+            // resize2fs needs a clean, unmounted fs; e2fsck exit ≤2 means OK/fixed.
+            let mib = new_size / (1 << 20);
+            ctx.shell(
+                &format!(
+                    "e2fsck -fy {part}; rc=$?; [ $rc -le 2 ] || exit $rc; resize2fs {part} {mib}M"
+                ),
+                true,
+            )
+            .with_context(|| format!("shrinking the {fstype} filesystem on {part} failed"))?;
+        }
+        "btrfs" => {
+            // btrfs resizes while mounted.
+            let mnt = "/run/manifest-shrink";
+            ctx.shell(
+                &format!(
+                    "mkdir -p {mnt} && mount {part} {mnt} && \
+                     btrfs filesystem resize {new_size} {mnt}; rc=$?; umount {mnt}; exit $rc"
+                ),
+                true,
+            )
+            .with_context(|| format!("shrinking the btrfs filesystem on {part} failed"))?;
+        }
+        other => bail!("can't shrink a {other} filesystem to make room — free up space manually first"),
+    }
+    Ok(())
+}
+
+/// After a dual-boot install, make the other OS appear in the GRUB menu: install
 /// os-prober, enable it, and regenerate the config. Best-effort — a daily-driver
 /// that chose a non-GRUB loader simply won't get the extra entry.
 fn enable_dual_boot(ctx: &Ctx) {
-    step("Adding Windows to the boot menu");
+    step("Adding the other system to the boot menu");
     let script = "arch-chroot /mnt bash -c '\
         command -v grub-mkconfig >/dev/null 2>&1 || exit 0; \
         pacman -S --needed --noconfirm os-prober || exit 0; \
