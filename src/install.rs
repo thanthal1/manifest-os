@@ -105,6 +105,10 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
 }
 
 /// Step 8 — enable systemd units, system and user scope.
+///
+/// Best-effort: a service whose package wasn't installed (or a user unit that
+/// can't be enabled without a session, common at install time) only warns — it
+/// must not abort an otherwise-complete install at the very last step.
 fn enable_services(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     let svc = &manifest.services;
     if svc.system.is_empty() && svc.user.is_empty() {
@@ -113,10 +117,14 @@ fn enable_services(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     step("Enabling services");
 
     for unit in &svc.system {
-        ctx.sudo("systemctl", &["enable", unit])?;
+        if ctx.sudo("systemctl", &["enable", unit]).is_err() {
+            println!("  · warning: couldn't enable {unit} — is its package in `packages`? Skipping.");
+        }
     }
     for unit in &svc.user {
-        ctx.run("systemctl", &["--user", "enable", unit])?;
+        if ctx.run("systemctl", &["--user", "enable", unit]).is_err() {
+            println!("  · warning: couldn't enable user unit {unit} (no session at install time?). Skipping.");
+        }
     }
     Ok(())
 }

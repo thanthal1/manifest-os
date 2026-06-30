@@ -23,11 +23,11 @@
     "neovim",
     "foot",
     "sway",
-    "waybar"
+    "waybar",
+    "networkmanager"
   ],
   "services": {
-    "system": ["NetworkManager"],
-    "user": ["pipewire", "wireplumber"]
+    "system": ["NetworkManager"]
   },
   "pre_install": [
     "mkdir -p ~/.config/sway"
