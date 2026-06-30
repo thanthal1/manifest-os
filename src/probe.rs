@@ -391,33 +391,20 @@ fn os_label(esp: &str, shrink: &str) -> String {
     }
 }
 
-/// The whole disk the live medium booted from (e.g. `/dev/sdb`), so we never
-/// try to write logs onto the read-only install media itself.
-fn boot_disk() -> Option<String> {
-    let src = Command::new("findmnt")
-        .args(["-no", "SOURCE", "/run/archiso/bootmnt"])
-        .output()
-        .ok()?;
-    let src = String::from_utf8_lossy(&src.stdout).trim().to_string();
-    if src.is_empty() {
-        return None;
-    }
-    let pk = Command::new("lsblk").args(["-no", "PKNAME", &src]).output().ok()?;
-    let pk = String::from_utf8_lossy(&pk.stdout).lines().next()?.trim().to_string();
-    (!pk.is_empty()).then(|| format!("/dev/{pk}"))
-}
-
-/// Mountpoints of *writable* removable partitions, excluding the boot medium —
-/// mounting any that aren't mounted yet. Used to drop the install log onto a USB
-/// the user can read after a failure (the boot ISO9660 is read-only).
+/// Mountpoints of *writable* removable partitions, mounting any that aren't
+/// mounted yet. Used to drop the install log onto a USB the user can read after
+/// a failure. We deliberately do NOT exclude the boot medium: its read-only
+/// ISO9660 partition is skipped by the filesystem filter below, while its FAT
+/// partition (an ISO-mode flash, or one freed by copytoram) is exactly where a
+/// single-USB user expects the log. We only ever *create* a `logs/` folder; the
+/// squashfs the live system reads lives in the ISO9660 part we never touch.
 pub fn writable_removable_mounts() -> Vec<String> {
     let mut out = Vec::new();
-    let boot = boot_disk();
 
-    // The boot medium itself is writable when the USB was written file-wise
-    // (Rufus "ISO" mode = a FAT partition) rather than dd'd (read-only ISO9660).
-    // Try to flip it read-write so the log can live right on the install USB;
-    // the remount simply fails on a read-only ISO9660 and we move on.
+    // If the boot medium is a writable FAT (Rufus "ISO" mode) still mounted
+    // read-only at bootmnt, flip it read-write so the log lands on the install
+    // USB. Harmlessly fails on a read-only ISO9660 or when copytoram already
+    // unmounted it (the scan below then mounts that partition fresh).
     if Command::new("mount")
         .args(["-o", "remount,rw", "/run/archiso/bootmnt"])
         .status()
@@ -444,13 +431,8 @@ pub fn writable_removable_mounts() -> Vec<String> {
             continue;
         }
         let name = val("NAME");
-        // Never touch the install media's own partitions.
-        if let Some(b) = &boot {
-            if name.starts_with(b.as_str()) {
-                continue;
-            }
-        }
-        // Only filesystems we can actually write a log onto.
+        // Only filesystems we can actually write a log onto (this skips the
+        // boot medium's read-only ISO9660 partition).
         if !matches!(
             val("FSTYPE").as_str(),
             "vfat" | "exfat" | "ext4" | "ext3" | "ext2" | "ntfs" | "f2fs"
@@ -459,10 +441,12 @@ pub fn writable_removable_mounts() -> Vec<String> {
         }
         let mp = val("MOUNTPOINT");
         if !mp.is_empty() {
+            // Already mounted somewhere usable (bootmnt is handled above).
             if !mp.starts_with("/run/archiso") {
                 out.push(mp);
             }
         } else {
+            // Not mounted (e.g. copytoram freed the boot USB) — mount it rw.
             let dir = format!("/run/manifest-logs/{}", name.replace('/', "_"));
             let _ = Command::new("mkdir").args(["-p", &dir]).status();
             let ok = Command::new("mount")
