@@ -67,6 +67,12 @@ pub struct Manifest {
     #[serde(default)]
     pub files: Vec<FileSpec>,
 
+    /// Desktop wallpaper, applied across whatever environment the manifest sets
+    /// up (GNOME, KDE, Xfce, a window manager, …). Either a bare string source
+    /// (`"wallpaper": "https://…/bg.jpg"`) or an object with a fit mode
+    /// (`{ "source": "/path/bg.png", "mode": "fill" }`).
+    pub wallpaper: Option<Wallpaper>,
+
     /// Shell commands run *before* package installation. Escape hatch only.
     #[serde(default)]
     pub pre_install: Vec<String>,
@@ -130,6 +136,38 @@ pub struct FileSpec {
     pub mode: Option<String>,
     /// chown target, e.g. "root:root" or "alice". Implies a root-owned write.
     pub owner: Option<String>,
+}
+
+/// A wallpaper source, accepted as either a bare string or an object with a
+/// fit `mode`. See [`crate::wallpaper`].
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Wallpaper {
+    /// `"wallpaper": "https://…/bg.jpg"`
+    Simple(String),
+    /// `"wallpaper": { "source": "/path/bg.png", "mode": "fill" }`
+    Detailed {
+        source: String,
+        mode: Option<String>,
+    },
+}
+
+impl Wallpaper {
+    /// The image source — an `http(s)://` URL or a local path.
+    pub fn source(&self) -> &str {
+        match self {
+            Wallpaper::Simple(s) => s,
+            Wallpaper::Detailed { source, .. } => source,
+        }
+    }
+
+    /// Fit mode: `fill` (default), `fit`, `stretch`, `center`, or `tile`.
+    pub fn mode(&self) -> &str {
+        match self {
+            Wallpaper::Detailed { mode: Some(m), .. } if !m.trim().is_empty() => m,
+            _ => "fill",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

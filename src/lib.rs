@@ -18,3 +18,4 @@ pub mod survey;
 pub mod system;
 pub mod tui;
 pub mod users;
+pub mod wallpaper;

@@ -20,6 +20,7 @@ use crate::manifest::Manifest;
 use crate::pacman;
 use crate::system;
 use crate::users;
+use crate::wallpaper;
 use anyhow::Result;
 
 pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
@@ -78,6 +79,11 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         if !d.aur.is_empty() {
             println!("  · note: AUR packages pulled — {}", d.aur.join(", "));
         }
+    }
+
+    if let Some(w) = &manifest.wallpaper {
+        step("Setting the wallpaper");
+        wallpaper::apply(w, manifest.desktop.as_deref(), ctx)?;
     }
 
     if let Some(df) = &manifest.dotfiles {
