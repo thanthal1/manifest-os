@@ -92,7 +92,7 @@ fn add_cachyos_repo(ctx: &Ctx) -> Result<()> {
           curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o c.tar.xz && \
           tar xf c.tar.xz && cd cachyos-repo && \
           { [ \"$imported\" = 1 ] && sed -i '/pacman-key --recv-keys/s/.*/true/; /pacman-key --lsign-key/s/.*/true/' cachyos-repo.sh; true; } && \
-          sudo ./cachyos-repo.sh && exit 0; \
+          yes | sudo ./cachyos-repo.sh && exit 0; \
           echo \"  · CachyOS repo attempt $attempt failed; retrying in 6s\"; sleep 6; \
         done; \
         echo 'CachyOS repo setup failed' >&2; exit 1";
