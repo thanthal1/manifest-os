@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
+use manifest::probe::{Account, InstallPlan};
 use manifest::{desktop, install, installer, kernel, survey, tui};
 use std::path::PathBuf;
 
@@ -58,6 +59,48 @@ enum Command {
         /// Preview the install steps without touching the disk.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Unattended full install to a disk (the TUI/GUI flow, headless). Drives
+    /// the same `installer::execute`, so it's scriptable for automation + CI.
+    Provision {
+        /// Path to a manifest.json.
+        file: PathBuf,
+        /// Target disk, e.g. /dev/sda.
+        #[arg(long)]
+        disk: String,
+        /// "erase" (wipe the disk) or "alongside" (dual-boot an existing OS).
+        #[arg(long, default_value = "erase")]
+        mode: String,
+        /// Root filesystem: "ext4" or "btrfs".
+        #[arg(long, default_value = "ext4")]
+        filesystem: String,
+        /// Swap: "zram", "none", "swapfile", or "partition".
+        #[arg(long, default_value = "zram")]
+        swap: String,
+        /// Swap size in GiB (swapfile/partition).
+        #[arg(long)]
+        swap_size_gib: Option<u32>,
+        /// GiB to give Manifest OS when mode=alongside.
+        #[arg(long)]
+        alongside_gib: Option<u32>,
+        /// Create this admin account (with --password).
+        #[arg(long)]
+        user: Option<String>,
+        /// Password for --user.
+        #[arg(long)]
+        password: Option<String>,
+        /// Override the hostname.
+        #[arg(long)]
+        hostname: Option<String>,
+        /// JSON object of survey answers for the manifest's questions.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+        /// Preview every step without touching the disk.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't reboot when done (so a harness can inspect the result).
+        #[arg(long)]
+        no_reboot: bool,
     },
 }
 
@@ -152,6 +195,68 @@ fn run() -> Result<()> {
                 Ok(())
             }
         },
+        Command::Provision {
+            file,
+            disk,
+            mode,
+            filesystem,
+            swap,
+            swap_size_gib,
+            alongside_gib,
+            user,
+            password,
+            hostname,
+            answers,
+            dry_run,
+            no_reboot,
+        } => {
+            // Survey answers (optional JSON object {"id": value}).
+            let answers_vec: Vec<(String, String)> = match &answers {
+                Some(p) => {
+                    let raw = std::fs::read_to_string(p)?;
+                    let v: serde_json::Value = serde_json::from_str(&raw)?;
+                    v.as_object()
+                        .map(|o| {
+                            o.iter()
+                                .map(|(k, val)| {
+                                    let s = val
+                                        .as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| val.to_string());
+                                    (k.clone(), s)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+                None => Vec::new(),
+            };
+            let account = match (user, password) {
+                (Some(u), Some(pw)) => Some(Account {
+                    full_name: u.clone(),
+                    username: u,
+                    password: pw,
+                }),
+                _ => None,
+            };
+            let plan = InstallPlan {
+                disk,
+                install_mode: mode,
+                alongside_gib,
+                filesystem,
+                swap,
+                swap_size_gib,
+                manifest: file.to_string_lossy().to_string(),
+                answers: answers_vec,
+                account,
+                hostname,
+            };
+            installer::execute(&plan, &Ctx::new(dry_run))?;
+            if !dry_run && !no_reboot {
+                installer::finish_and_reboot();
+            }
+            Ok(())
+        }
         Command::Export | Command::Sync { .. } | Command::Diff { .. } => {
             anyhow::bail!("not implemented yet — planned for Phase 5 (export/sync/diff)")
         }
