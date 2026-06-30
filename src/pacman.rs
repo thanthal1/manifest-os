@@ -72,7 +72,13 @@ fn add_cachyos_repo(ctx: &Ctx) -> Result<()> {
     // a few times before giving up. cachyos-repo.sh refuses to run unless
     // EUID==0 (no self-escalation), so it's invoked *with* sudo; the surrounding
     // curl/tar/mktemp stay at user level.
+    // cachyos-repo.sh imports its key with `pacman-key --recv-keys`, which fails
+    // ("Server indicated a failure") when the default keyserver is a dead SKS
+    // pool or its hkp port (11371) is firewalled. Point pacman's gpg at the
+    // reliable hkps keyserver (port 443, same as everything else) first, then
+    // retry the bootstrap a few times for good measure.
     let script = "\
+        sudo sh -c 'f=/etc/pacman.d/gnupg/gpg.conf; grep -q \"^keyserver \" \"$f\" 2>/dev/null || echo \"keyserver hkps://keyserver.ubuntu.com\" >> \"$f\"' 2>/dev/null || true; \
         for attempt in 1 2 3 4; do \
           d=$(mktemp -d) && cd \"$d\" && \
           curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz && \

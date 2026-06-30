@@ -90,12 +90,16 @@ run_scenario() {
   echo "[$name] manifest=$man mode=$mode  vm=$vm" | tee -a "$log"
 
   destroy "$vm"
+  # Dual-boot needs a disk big enough to shrink the existing OS by the carve's
+  # default (40 GiB) and still leave it 20+ GiB — give those scenarios more room.
+  local disk_mb="$DISK"; local along_gib=""
+  if [ "$mode" = "alongside" ]; then disk_mb=90000; along_gib="--alongside-gib 25"; fi
   local vdi_win; vdi_win="$(win "$out/$vm.vdi")"
   # Fresh UEFI VM with NAT internet (pacstrap needs it) + a blank disk + the ISO.
   vb createvm --name "$vm" --ostype ArchLinux_64 --register >>"$log" 2>&1
   vb modifyvm "$vm" --memory "$MEM" --cpus "$CPUS" --firmware efi \
      --nic1 nat --graphicscontroller vmsvga --vram 64 --boot1 dvd --boot2 disk >>"$log" 2>&1
-  vb createmedium disk --filename "$vdi_win" --size "$DISK" >>"$log" 2>&1
+  vb createmedium disk --filename "$vdi_win" --size "$disk_mb" >>"$log" 2>&1
   vb storagectl "$vm" --name SATA --add sata --controller IntelAhci >>"$log" 2>&1
   vb storageattach "$vm" --storagectl SATA --port 0 --device 0 --type hdd --medium "$vdi_win" >>"$log" 2>&1
   vb storageattach "$vm" --storagectl SATA --port 1 --device 0 --type dvddrive --medium "$ISO_WIN" >>"$log" 2>&1
@@ -128,9 +132,8 @@ run_scenario() {
   fi
 
   # Run the unattended install in the background on the guest; poll for its exit.
-  local mflag=""; [ "$mode" = "alongside" ] && mflag="--mode alongside"
-  local ans=""
-  gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag --user tester --password test1234 --no-reboot $ans >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
+  local mflag=""; [ "$mode" = "alongside" ] && mflag="--mode alongside $along_gib"
+  gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag --user tester --password test1234 --no-reboot >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
 
   # Poll for the install's exit code. Only accept a pure number — guestcontrol
   # itself times out under load, and that error text must not be mistaken for a
