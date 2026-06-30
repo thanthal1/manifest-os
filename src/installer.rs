@@ -845,4 +845,8 @@ pub fn save_install_log(ctx: &Ctx) {
 
 fn step(title: &str) {
     println!("\n[{title}]");
+    // stdout is block-buffered when redirected to the install log; flush so the
+    // GUI's live log shows each phase header as it starts, not in bursts.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 }

@@ -804,6 +804,23 @@ fn add_installing(stack: &Rc<gtk::Stack>) {
     spinner.start();
     spinner.set_halign(gtk::Align::Center);
     content.append(&spinner);
+
+    // A live log, so a long step (building paru, big package sets) doesn't look
+    // frozen. It tails the same output the installer writes to
+    // /tmp/manifest-install.log; see start_log_tail.
+    let view = gtk::TextView::new();
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_monospace(true);
+    view.set_widget_name("install-log");
+    view.add_css_class("card");
+    let scroller = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .min_content_height(280)
+        .child(&view)
+        .build();
+    content.append(&scroller);
+
     stack.add_named(&root, Some("installing"));
 }
 
@@ -855,6 +872,7 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
     };
 
     stack.set_visible_child_name("installing");
+    start_log_tail(stack);
 
     let stack2 = stack.clone();
     run_async(
@@ -871,6 +889,51 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
             }
         },
     );
+}
+
+/// Tail the install log into the Installing page's text view while the install
+/// runs. The installer (and the pacman/paru/etc. it spawns) writes to the GUI's
+/// stdout, which `.zlogin` redirects to /tmp/manifest-install.log. We poll the
+/// tail of that file and stop once we leave the installing page.
+fn start_log_tail(stack: &Rc<gtk::Stack>) {
+    const LOG: &str = "/tmp/manifest-install.log";
+    let Some(page) = stack.child_by_name("installing") else { return };
+    let Some(w) = find_named(&page, "install-log") else { return };
+    let Ok(view) = w.downcast::<gtk::TextView>() else { return };
+    let buffer = view.buffer();
+    // Skip whatever predates the install (GUI/cage startup chatter).
+    let start = std::fs::metadata(LOG).map(|m| m.len()).unwrap_or(0);
+    let stack = stack.clone();
+    glib::timeout_add_local(Duration::from_millis(600), move || {
+        if stack.visible_child_name().as_deref() != Some("installing") {
+            return glib::ControlFlow::Break;
+        }
+        let text = read_log_tail(LOG, start, 250);
+        let current = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        if current != text {
+            buffer.set_text(&text);
+            let mut end = buffer.end_iter();
+            view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Read `path` from byte `start` to EOF and return its last `max_lines` lines.
+fn read_log_tail(path: &str, start: u64, max_lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
+    let _ = f.seek(SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    let s = String::from_utf8_lossy(&buf);
+    let lines: Vec<&str> = s.lines().collect();
+    let tail = if lines.len() > max_lines {
+        &lines[lines.len() - max_lines..]
+    } else {
+        &lines[..]
+    };
+    tail.join("\n")
 }
 
 /// Fill the Done page with firmware-appropriate guidance.
