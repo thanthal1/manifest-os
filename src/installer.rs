@@ -99,8 +99,9 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
     install_fs_tools(&plan.filesystem, ctx)?;
     setup_persistent_swap(plan, &parts, ctx)?;
+    let luks_systemd = luks_part.is_some() && initramfs_uses_systemd(ctx);
     if let Some(lp) = &luks_part {
-        configure_encryption(lp, ctx)?;
+        configure_encryption(lp, luks_systemd, ctx)?;
     }
     brand_system(ctx)?;
     create_bootstrap_user(ctx)?;
@@ -109,7 +110,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     ensure_boot_block(ctx)?;
     apply_system_overrides(plan, ctx)?;
     if let Some(lp) = &luks_part {
-        inject_crypt_cmdline(lp, ctx)?;
+        inject_crypt_cmdline(lp, luks_systemd, ctx)?;
     }
     personalize_manifest(plan, ctx)?;
     let answers = write_answers(plan, ctx)?;
@@ -683,33 +684,48 @@ fn setup_luks(part: &str, passphrase: &str, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// After the base system exists, wire up unlocking at boot: a crypttab entry and
-/// the `encrypt` mkinitcpio hook (regenerating the initramfs).
-fn configure_encryption(luks_part: &str, ctx: &Ctx) -> Result<()> {
-    step("Configuring encryption (crypttab + initramfs)");
-    // cryptsetup isn't in `base`, but the `encrypt` initramfs hook needs it.
+/// Whether the target's initramfs is systemd-based (HOOKS includes `systemd`),
+/// which changes the encrypt hook (`sd-encrypt`) and cmdline (`rd.luks.name`).
+fn initramfs_uses_systemd(ctx: &Ctx) -> bool {
+    if ctx.dry_run {
+        return false;
+    }
+    std::fs::read_to_string("/mnt/etc/mkinitcpio.conf")
+        .map(|c| {
+            c.lines()
+                .any(|l| l.trim_start().starts_with("HOOKS=") && l.contains("systemd"))
+        })
+        .unwrap_or(false)
+}
+
+/// After the base system exists, add the right LUKS initramfs hook and
+/// regenerate. The root is unlocked from the kernel cmdline (see
+/// [`inject_crypt_cmdline`]) — NOT /etc/crypttab, which is only for secondary
+/// volumes and would make systemd try to re-unlock the root post-boot.
+fn configure_encryption(luks_part: &str, systemd: bool, ctx: &Ctx) -> Result<()> {
+    let _ = luks_part;
+    step("Configuring encryption (initramfs)");
+    // cryptsetup isn't in `base`, but the encrypt hooks need it.
     ctx.shell("arch-chroot /mnt pacman -S --needed --noconfirm cryptsetup", true)?;
-    ctx.shell(
-        &format!(
-            "uuid=$(blkid -s UUID -o value {luks_part}) && \
-             echo \"cryptroot UUID=$uuid none luks\" >> /mnt/etc/crypttab"
-        ),
-        true,
-    )?;
-    // Insert the `encrypt` hook just before `filesystems` (idempotent).
-    ctx.shell(
-        "sed -i '/^HOOKS=/{/encrypt/!s/filesystems/encrypt filesystems/}' /mnt/etc/mkinitcpio.conf",
-        true,
-    )?;
+    // Insert the correct hook just before `filesystems` (idempotent). A
+    // systemd-based initramfs uses `sd-encrypt`; the classic udev base, `encrypt`.
+    let sed = if systemd {
+        "sed -i '/^HOOKS=/{/sd-encrypt/!s/filesystems/sd-encrypt filesystems/}' /mnt/etc/mkinitcpio.conf"
+    } else {
+        "sed -i '/^HOOKS=/{/encrypt/!s/filesystems/encrypt filesystems/}' /mnt/etc/mkinitcpio.conf"
+    };
+    ctx.shell(sed, true)?;
     ctx.shell("arch-chroot /mnt mkinitcpio -P", true)?;
     Ok(())
 }
 
-/// Add `cryptdevice=UUID=<luks>:cryptroot` to the staged manifest's boot cmdline
-/// so the bootloader (whatever the manifest installs) unlocks the root at boot.
-fn inject_crypt_cmdline(luks_part: &str, ctx: &Ctx) -> Result<()> {
+/// Add the boot-cmdline parameter that unlocks the root in the initramfs:
+/// `rd.luks.name=<uuid>=cryptroot` for a systemd initramfs, else
+/// `cryptdevice=UUID=<uuid>:cryptroot`. (root=/dev/mapper/cryptroot is derived
+/// from fstab by grub-mkconfig.)
+fn inject_crypt_cmdline(luks_part: &str, systemd: bool, ctx: &Ctx) -> Result<()> {
     if ctx.dry_run {
-        println!("  · would add cryptdevice= to the boot cmdline");
+        println!("  · would add the LUKS unlock parameter to the boot cmdline");
         return Ok(());
     }
     let uuid = ctx.output(false, "blkid", &["-s", "UUID", "-o", "value", luks_part])?;
@@ -717,7 +733,11 @@ fn inject_crypt_cmdline(luks_part: &str, ctx: &Ctx) -> Result<()> {
     if uuid.is_empty() {
         return Ok(());
     }
-    let param = format!("cryptdevice=UUID={uuid}:cryptroot");
+    let param = if systemd {
+        format!("rd.luks.name={uuid}=cryptroot")
+    } else {
+        format!("cryptdevice=UUID={uuid}:cryptroot")
+    };
     let path = "/mnt/etc/manifest-install.json";
     let mut doc: serde_json::Value = match std::fs::read_to_string(path).ok().and_then(|r| serde_json::from_str(&r).ok()) {
         Some(d) => d,
