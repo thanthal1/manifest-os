@@ -131,7 +131,7 @@ fn build_ui(app: &adw::Application) {
     add_disk(&stack, &state, &advanced_widgets);
     add_account(&stack, &state, &advanced_widgets);
     add_review(&stack, &state);
-    add_installing(&stack);
+    add_installing(&stack, &advanced_widgets);
     add_done(&stack);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -797,7 +797,7 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
     stack.add_named(&root, Some("review"));
 }
 
-fn add_installing(stack: &Rc<gtk::Stack>) {
+fn add_installing(stack: &Rc<gtk::Stack>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
     let (root, content, _buttons) = page("Installing Manifest OS", "Sit back — this takes a few minutes. Don't turn off your computer.");
     let spinner = gtk::Spinner::new();
     spinner.set_size_request(48, 48);
@@ -807,7 +807,8 @@ fn add_installing(stack: &Rc<gtk::Stack>) {
 
     // A live log, so a long step (building paru, big package sets) doesn't look
     // frozen. It tails the same output the installer writes to
-    // /tmp/manifest-install.log; see start_log_tail.
+    // /tmp/manifest-install.log (see start_log_tail). Advanced-only — Easy mode
+    // stays calm and uncluttered.
     let view = gtk::TextView::new();
     view.set_editable(false);
     view.set_cursor_visible(false);
@@ -819,7 +820,9 @@ fn add_installing(stack: &Rc<gtk::Stack>) {
         .min_content_height(280)
         .child(&view)
         .build();
+    scroller.set_visible(false);
     content.append(&scroller);
+    adv.borrow_mut().push(scroller.upcast());
 
     stack.add_named(&root, Some("installing"));
 }

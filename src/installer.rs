@@ -50,6 +50,10 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
         if uefi { "UEFI" } else { "BIOS" }
     );
 
+    // Fail fast — before we touch (and would wipe/shrink) the disk — if we can't
+    // reach the package mirrors. pacstrap needs the network; this turns a cryptic
+    // "pacstrap exited 1" into a clear message, with the disk still untouched.
+    ensure_online(ctx)?;
     ensure_keyring(ctx)?;
     let alongside = plan.install_mode == "alongside";
     let parts = if alongside {
@@ -276,6 +280,27 @@ pub fn finish_and_reboot() {
     if Command::new("systemctl").arg("reboot").status().is_err() {
         let _ = Command::new("reboot").status();
     }
+}
+
+/// Confirm we can reach the package mirrors before pacstrap, and nudge the clock
+/// — a wrong RTC (common on real hardware with a dead CMOS battery) makes pacman
+/// reject signatures. Both are top causes of an otherwise-mysterious pacstrap
+/// failure that "works in a VM" (where NAT + host time hide them).
+fn ensure_online(ctx: &Ctx) -> Result<()> {
+    step("Checking internet connection");
+    if ctx.dry_run {
+        return Ok(());
+    }
+    // Best-effort time sync; harmless if timesyncd/NTP isn't reachable.
+    let _ = ctx.shell("timedatectl set-ntp true 2>/dev/null || true", true);
+    if !crate::probe::is_online() {
+        bail!(
+            "No internet connection. Connect to Wi-Fi or plug in an Ethernet cable, then try again — \
+             the base system is downloaded during install."
+        );
+    }
+    println!("  · online");
+    Ok(())
 }
 
 /// Make sure the live keyring is populated so pacstrap can verify signatures.
