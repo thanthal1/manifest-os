@@ -72,22 +72,30 @@ fn add_cachyos_repo(ctx: &Ctx) -> Result<()> {
     // a few times before giving up. cachyos-repo.sh refuses to run unless
     // EUID==0 (no self-escalation), so it's invoked *with* sudo; the surrounding
     // curl/tar/mktemp stay at user level.
-    // cachyos-repo.sh imports its key with `pacman-key --recv-keys`, which fails
-    // ("Server indicated a failure") when the default keyserver is a dead SKS
-    // pool or its hkp port (11371) is firewalled. Point pacman's gpg at the
-    // reliable hkps keyserver (port 443, same as everything else) first, then
-    // retry the bootstrap a few times for good measure.
+    // cachyos-repo.sh imports its signing key with `pacman-key --recv-keys` over
+    // hkp, which fails intermittently ("Server indicated a failure") — and since
+    // the script runs `set -e`, that aborts the whole install. Import the key
+    // ourselves over HTTPS (the keyserver's web lookup, port 443 — no flaky hkp),
+    // trying a few mirrors, then neuter the script's keyserver fetch so a
+    // keyserver hiccup can't break a CachyOS install. cachyos-repo.sh refuses to
+    // run unless EUID==0, so it's invoked with sudo; the wrapping shell stays at
+    // user level for curl/tar/mktemp.
     let script = "\
-        sudo sh -c 'f=/etc/pacman.d/gnupg/gpg.conf; grep -q \"^keyserver \" \"$f\" 2>/dev/null || echo \"keyserver hkps://keyserver.ubuntu.com\" >> \"$f\"' 2>/dev/null || true; \
-        for attempt in 1 2 3 4; do \
-          d=$(mktemp -d) && cd \"$d\" && \
-          curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz && \
-          tar xf cachyos-repo.tar.xz && cd cachyos-repo && \
-          sudo ./cachyos-repo.sh && exit 0; \
-          echo \"  · CachyOS repo attempt $attempt failed (keyserver?); retrying in 6s\"; \
-          sleep 6; \
+        KEY=F3B607488DB35A47; imported=0; \
+        for ks in keyserver.ubuntu.com keys.openpgp.org pgp.mit.edu; do \
+          if curl -fsSL \"https://$ks/pks/lookup?op=get&search=0x$KEY\" 2>/dev/null | sudo pacman-key --add - >/dev/null 2>&1; then \
+            sudo pacman-key --lsign-key $KEY >/dev/null 2>&1 && { imported=1; echo \"  · imported CachyOS key over HTTPS ($ks)\"; break; }; \
+          fi; \
         done; \
-        echo 'CachyOS repo setup failed after 4 attempts' >&2; exit 1";
+        for attempt in 1 2 3; do \
+          d=$(mktemp -d) && cd \"$d\" && \
+          curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o c.tar.xz && \
+          tar xf c.tar.xz && cd cachyos-repo && \
+          { [ \"$imported\" = 1 ] && sed -i '/pacman-key --recv-keys/s/.*/true/; /pacman-key --lsign-key/s/.*/true/' cachyos-repo.sh; true; } && \
+          sudo ./cachyos-repo.sh && exit 0; \
+          echo \"  · CachyOS repo attempt $attempt failed; retrying in 6s\"; sleep 6; \
+        done; \
+        echo 'CachyOS repo setup failed' >&2; exit 1";
     ctx.shell(script, false)
 }
 
