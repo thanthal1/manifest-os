@@ -321,12 +321,19 @@ fn fix_clock(ctx: &Ctx) {
         return;
     }
     step("Setting the clock");
+    // Set an accurate-enough time once from an HTTPS Date header, then DISABLE
+    // continuous NTP for the duration of the install. Leaving NTP on lets it
+    // *step the clock backward* between `pacman-key --init` (which dates a new
+    // local master key at "now") and `--populate` (which signs it) — making that
+    // key look "created N seconds in the future" and failing the keyring. A
+    // stable clock for the few install minutes avoids the whole race; the
+    // installed system does its own time sync on first boot.
     let _ = ctx.shell(
-        "for url in https://archlinux.org https://www.cloudflare.com https://www.google.com; do \
+        "timedatectl set-ntp false 2>/dev/null || true; \
+         for url in https://archlinux.org https://www.cloudflare.com https://www.google.com; do \
             d=$(curl -sI --max-time 8 \"$url\" 2>/dev/null | grep -i '^date:' | head -n1 | cut -d' ' -f2-); \
             if [ -n \"$d\" ]; then date -s \"$d\" >/dev/null 2>&1 && break; fi; \
          done; \
-         timedatectl set-ntp true 2>/dev/null || true; \
          hwclock --systohc 2>/dev/null || true",
         true,
     );

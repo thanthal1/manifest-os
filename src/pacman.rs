@@ -66,15 +66,22 @@ fn repo_present(ctx: &Ctx, repo: &str) -> bool {
 /// Run the official CachyOS repo bootstrap, which imports the signing key and
 /// appends the repos to pacman.conf.
 fn add_cachyos_repo(ctx: &Ctx) -> Result<()> {
+    // cachyos-repo.sh fetches the signing key from a public keyserver, which
+    // fails intermittently ("keyserver receive failed: Server indicated a
+    // failure") — a flaky-keyserver problem, not ours. Retry the whole bootstrap
+    // a few times before giving up. cachyos-repo.sh refuses to run unless
+    // EUID==0 (no self-escalation), so it's invoked *with* sudo; the surrounding
+    // curl/tar/mktemp stay at user level.
     let script = "\
-        cd \"$(mktemp -d)\" && \
-        curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz && \
-        tar xf cachyos-repo.tar.xz && \
-        cd cachyos-repo && \
-        sudo ./cachyos-repo.sh";
-    // cachyos-repo.sh refuses to run unless EUID==0 (it does NOT self-escalate),
-    // so it must be invoked *with* sudo. The wrapping shell stays at user level
-    // because the surrounding curl/tar/mktemp do not need root.
+        for attempt in 1 2 3 4; do \
+          d=$(mktemp -d) && cd \"$d\" && \
+          curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz && \
+          tar xf cachyos-repo.tar.xz && cd cachyos-repo && \
+          sudo ./cachyos-repo.sh && exit 0; \
+          echo \"  · CachyOS repo attempt $attempt failed (keyserver?); retrying in 6s\"; \
+          sleep 6; \
+        done; \
+        echo 'CachyOS repo setup failed after 4 attempts' >&2; exit 1";
     ctx.shell(script, false)
 }
 
