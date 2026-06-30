@@ -57,6 +57,11 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     fix_clock(ctx);
     ensure_keyring(ctx)?;
     let alongside = plan.install_mode == "alongside";
+    // Free the target disk before partitioning: a leftover /mnt mount, active
+    // swap, or auto-mounted partitions (often from a previous failed attempt in
+    // the same live session) keep the kernel from re-reading the partition table,
+    // so sfdisk/sgdisk fail with "Device or resource busy" / atomic-commit errors.
+    free_disk(&plan.disk, ctx);
     let parts = if alongside {
         // Dual boot: shrink Windows and install in the freed space, reusing its
         // ESP. carve_alongside formats only the new root (never the ESP/Windows).
@@ -328,6 +333,25 @@ fn fix_clock(ctx: &Ctx) {
     let _ = ctx.shell("printf '  · clock set to '; date -u '+%Y-%m-%d %H:%M:%S UTC'", true);
 }
 
+/// Release the target disk so the kernel can re-read its partition table.
+/// Unmounts a leftover `/mnt` (e.g. from a previous failed attempt in the same
+/// live session), turns off swap, and unmounts any auto-mounted partitions that
+/// live on this disk. Without this, partitioning fails with "Device or resource
+/// busy" / "atomic commit" errors. Best-effort; never fails the install.
+fn free_disk(disk: &str, ctx: &Ctx) {
+    step("Releasing the disk");
+    let script = format!(
+        "umount -R /mnt 2>/dev/null || true; \
+         swapoff -a 2>/dev/null || true; \
+         for p in $(lsblk -lnpo NAME {disk} 2>/dev/null | tail -n +2); do \
+            swapoff \"$p\" 2>/dev/null || true; \
+            umount -fR \"$p\" 2>/dev/null || true; \
+         done; \
+         udevadm settle 2>/dev/null || true"
+    );
+    let _ = ctx.shell(&script, true);
+}
+
 /// Make sure the live keyring is populated so pacstrap can verify signatures.
 /// On some boots `pacman-init` hasn't run (e.g. mangled enablement), leaving an
 /// empty keyring; init+populate is idempotent and cheap.
@@ -357,7 +381,20 @@ fn partition(disk: &str, uefi: bool, swap_gib: Option<u32>, ctx: &Ctx) -> Result
         (false, Some(g)) => format!("label: dos\n,{g}G,S\n,,L,*\n"),
         (false, None) => "label: dos\n,,L,*\n".to_string(),
     };
-    ctx.shell(&format!("printf '{layout}' | sfdisk --force {disk}"), true)
+    // wipefs clears stale FS/RAID/LVM signatures that would make the kernel hold
+    // references to old partitions; `--wipe always` does the same during the
+    // write; partprobe + udevadm settle make the new partitions appear before we
+    // format them. `set -e` so a real sfdisk failure still propagates.
+    ctx.shell(
+        &format!(
+            "set -e\n\
+             wipefs -af {disk} >/dev/null 2>&1 || true\n\
+             printf '{layout}' | sfdisk --force --wipe always {disk}\n\
+             partprobe {disk} >/dev/null 2>&1 || true\n\
+             udevadm settle >/dev/null 2>&1 || true"
+        ),
+        true,
+    )
 }
 
 /// Partition device paths, accounting for the `p` separator on nvme/mmc and the
