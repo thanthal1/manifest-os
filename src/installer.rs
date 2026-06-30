@@ -97,6 +97,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
 
     pacstrap(ctx)?;
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
+    install_fs_tools(&plan.filesystem, ctx)?;
     setup_persistent_swap(plan, &parts, ctx)?;
     if let Some(lp) = &luks_part {
         configure_encryption(lp, ctx)?;
@@ -630,6 +631,19 @@ fn list_parts(disk: &str, ctx: &Ctx) -> Vec<String> {
 
 /// The unlocked LUKS root device (a fixed name; only one encrypted root exists).
 const LUKS_MAPPER: &str = "/dev/mapper/cryptroot";
+
+/// Install the userspace tools a non-ext4 root needs in the *target* — without
+/// them, mkinitcpio's fsck hook can't find `fsck.xfs`/`btrfs` and boot-time
+/// fsck/mount fail. ext4's e2fsprogs is already in `base`.
+fn install_fs_tools(fs: &str, ctx: &Ctx) -> Result<()> {
+    let pkg = match fs {
+        "xfs" => "xfsprogs",
+        "btrfs" => "btrfs-progs",
+        _ => return Ok(()),
+    };
+    step("Installing filesystem tools");
+    ctx.shell(&format!("arch-chroot /mnt pacman -S --needed --noconfirm {pkg}"), true)
+}
 
 /// Format the ESP and swap. The root is formatted separately (after optional
 /// LUKS) by [`mkfs_root`].
