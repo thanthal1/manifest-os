@@ -32,7 +32,7 @@ set -u
 VBOX="${VBOX:-/c/Program Files/Oracle/VirtualBox/VBoxManage.exe}"
 export MSYS_NO_PATHCONV=1
 
-JOBS=3 ; MEM=8192 ; CPUS=4 ; DISK=30000 ; TIMEOUT=2400 ; KEEP=0 ; ISO=""
+JOBS=2 ; MEM=8192 ; CPUS=4 ; DISK=30000 ; TIMEOUT=2400 ; KEEP=0 ; ISO=""
 while getopts "i:j:m:c:d:t:k" o; do case "$o" in
   i) ISO="$OPTARG" ;; j) JOBS="$OPTARG" ;; m) MEM="$OPTARG" ;; c) CPUS="$OPTARG" ;;
   d) DISK="$OPTARG" ;; t) TIMEOUT="$OPTARG" ;; k) KEEP=1 ;;
@@ -43,6 +43,11 @@ shift $((OPTIND-1))
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 [ -z "$ISO" ] && ISO="$(ls -t "$repo"/dist/manifestos-*-gui-*.iso 2>/dev/null | head -1)"
 [ -z "$ISO" ] && { echo "no ISO found in dist/ — pass -i ISO"; exit 1; }
+
+# VBoxManage is a Windows .exe: it needs Windows-style paths, not MSYS /c/...
+# ones (which it mangles to C:\c\...). Convert every host path we hand it.
+win() { cygpath -m "$1" 2>/dev/null || echo "$1"; }
+ISO_WIN="$(win "$ISO")"
 
 # name:manifest:mode  (manifest = bundled example basename)
 SCENARIOS=( "$@" )
@@ -85,22 +90,24 @@ run_scenario() {
   echo "[$name] manifest=$man mode=$mode  vm=$vm" | tee -a "$log"
 
   destroy "$vm"
+  local vdi_win; vdi_win="$(win "$out/$vm.vdi")"
   # Fresh UEFI VM with NAT internet (pacstrap needs it) + a blank disk + the ISO.
   vb createvm --name "$vm" --ostype ArchLinux_64 --register >>"$log" 2>&1
   vb modifyvm "$vm" --memory "$MEM" --cpus "$CPUS" --firmware efi \
      --nic1 nat --graphicscontroller vmsvga --vram 64 --boot1 dvd --boot2 disk >>"$log" 2>&1
-  vb createmedium disk --filename "$repo/audit-results/$stamp/$vm.vdi" --size "$DISK" >>"$log" 2>&1
+  vb createmedium disk --filename "$vdi_win" --size "$DISK" >>"$log" 2>&1
   vb storagectl "$vm" --name SATA --add sata --controller IntelAhci >>"$log" 2>&1
-  vb storageattach "$vm" --storagectl SATA --port 0 --device 0 --type hdd --medium "$repo/audit-results/$stamp/$vm.vdi" >>"$log" 2>&1
-  vb storageattach "$vm" --storagectl SATA --port 1 --device 0 --type dvddrive --medium "$ISO" >>"$log" 2>&1
+  vb storageattach "$vm" --storagectl SATA --port 0 --device 0 --type hdd --medium "$vdi_win" >>"$log" 2>&1
+  vb storageattach "$vm" --storagectl SATA --port 1 --device 0 --type dvddrive --medium "$ISO_WIN" >>"$log" 2>&1
   vb startvm "$vm" --type headless >>"$log" 2>&1
 
-  # Wait for the live system's guest agent (reset once if it stalls at boot).
+  # Wait for the live system's guest agent. Boots are slow under parallel load,
+  # so be patient and only reset once, late, if it truly stalls.
   local up=0 reset=0 t0=$SECONDS
-  while [ $((SECONDS-t0)) -lt 220 ]; do
+  while [ $((SECONDS-t0)) -lt 360 ]; do
     if gx "$vm" "echo READY" 2>/dev/null | grep -q READY; then up=1; break; fi
-    sleep 6
-    if [ $((SECONDS-t0)) -gt 130 ] && [ "$reset" -eq 0 ]; then vb controlvm "$vm" reset >/dev/null 2>&1; reset=1; fi
+    sleep 8
+    if [ $((SECONDS-t0)) -gt 240 ] && [ "$reset" -eq 0 ]; then vb controlvm "$vm" reset >/dev/null 2>&1; reset=1; fi
   done
   if [ "$up" -ne 1 ]; then
     echo "[$name] FAIL: live system never came up" | tee -a "$log"
@@ -125,16 +132,22 @@ run_scenario() {
   local ans=""
   gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag --user tester --password test1234 --no-reboot $ans >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
 
-  local code="" t1=$SECONDS
+  # Poll for the install's exit code. Only accept a pure number — guestcontrol
+  # itself times out under load, and that error text must not be mistaken for a
+  # result (we just retry on the next tick).
+  local code="" raw t1=$SECONDS
   while [ $((SECONDS-t1)) -lt "$TIMEOUT" ]; do
-    code="$(gx "$vm" 'cat /tmp/prov.exit 2>/dev/null' | tr -d '[:space:]')"
-    [ -n "$code" ] && break
+    raw="$(gx "$vm" 'cat /tmp/prov.exit 2>/dev/null' | tr -d '[:space:]')"
+    case "$raw" in
+      ''|*[!0-9]*) : ;;            # empty or non-numeric (transient) — keep waiting
+      *) code="$raw"; break ;;
+    esac
     sleep 15
   done
 
   echo "----- /tmp/prov.log (tail) -----" >> "$log"
   gx "$vm" 'tail -n 40 /tmp/prov.log 2>/dev/null' >> "$log" 2>&1
-  vb controlvm "$vm" screenshotpng "$out/$name.png" >/dev/null 2>&1
+  vb controlvm "$vm" screenshotpng "$(win "$out/$name.png")" >/dev/null 2>&1
 
   if [ -z "$code" ]; then
     echo "[$name] FAIL: timed out after ${TIMEOUT}s" | tee -a "$log"
