@@ -62,7 +62,13 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     // the same live session) keep the kernel from re-reading the partition table,
     // so sfdisk/sgdisk fail with "Device or resource busy" / atomic-commit errors.
     free_disk(&plan.disk, ctx);
+    // When encrypting, the raw partition that holds the LUKS container — kept so
+    // we can write crypttab + the cryptdevice= kernel param by its UUID.
+    let mut luks_part: Option<String> = None;
     let parts = if alongside {
+        if plan.encrypt {
+            bail!("disk encryption is only available for a full-disk (erase) install, not alongside an existing OS");
+        }
         // Dual boot: shrink Windows and install in the freed space, reusing its
         // ESP. carve_alongside formats only the new root (never the ESP/Windows).
         carve_alongside(plan, ctx)?
@@ -76,8 +82,14 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
             None
         };
         partition(&plan.disk, uefi, swap_part_gib, ctx)?;
-        let parts = partition_names(&plan.disk, uefi, swap_part_gib.is_some());
-        format_disks(&parts, &plan.filesystem, ctx)?;
+        let mut parts = partition_names(&plan.disk, uefi, swap_part_gib.is_some());
+        format_aux(&parts, ctx)?; // ESP + swap (the root is handled below)
+        if plan.encrypt {
+            setup_luks(&parts.root, &plan.encrypt_passphrase, ctx)?;
+            luks_part = Some(parts.root.clone());
+            parts.root = LUKS_MAPPER.to_string(); // format + mount the unlocked mapper
+        }
+        mkfs_root(&parts.root, &plan.filesystem, ctx)?;
         parts
     };
     mount(&parts, ctx)?;
@@ -86,11 +98,18 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     pacstrap(ctx)?;
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
     setup_persistent_swap(plan, &parts, ctx)?;
+    if let Some(lp) = &luks_part {
+        configure_encryption(lp, ctx)?;
+    }
     brand_system(ctx)?;
     create_bootstrap_user(ctx)?;
 
     let manifest_in_root = stage_manifest(&plan.manifest, ctx)?;
     ensure_boot_block(ctx)?;
+    apply_system_overrides(plan, ctx)?;
+    if let Some(lp) = &luks_part {
+        inject_crypt_cmdline(lp, ctx)?;
+    }
     personalize_manifest(plan, ctx)?;
     let answers = write_answers(plan, ctx)?;
     stage_binary(ctx)?;
@@ -510,10 +529,7 @@ fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
         .context("could not locate the new Manifest OS partition after creating it")?;
 
     // 4) Format ONLY our new root — never the ESP, never the existing OS.
-    match plan.filesystem.as_str() {
-        "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", &root])?,
-        _ => ctx.sudo("mkfs.ext4", &["-F", &root])?,
-    }
+    mkfs_root(&root, &plan.filesystem, ctx)?;
     println!("  · created Manifest OS on {} ({} GiB) — {} left intact", root, give / gib, os.label);
     Ok(Parts { root, esp: Some(os.esp), swap: None })
 }
@@ -612,18 +628,139 @@ fn list_parts(disk: &str, ctx: &Ctx) -> Vec<String> {
         .collect()
 }
 
-fn format_disks(parts: &Parts, fs: &str, ctx: &Ctx) -> Result<()> {
+/// The unlocked LUKS root device (a fixed name; only one encrypted root exists).
+const LUKS_MAPPER: &str = "/dev/mapper/cryptroot";
+
+/// Format the ESP and swap. The root is formatted separately (after optional
+/// LUKS) by [`mkfs_root`].
+fn format_aux(parts: &Parts, ctx: &Ctx) -> Result<()> {
     step("Formatting");
     if let Some(esp) = &parts.esp {
         ctx.sudo("mkfs.fat", &["-F32", esp])?;
     }
-    match fs {
-        "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", &parts.root])?,
-        _ => ctx.sudo("mkfs.ext4", &["-F", &parts.root])?,
-    }
     if let Some(sw) = &parts.swap {
         ctx.sudo("mkswap", &[sw])?;
     }
+    Ok(())
+}
+
+/// Make the root filesystem on `dev` (a partition, or the LUKS mapper).
+fn mkfs_root(dev: &str, fs: &str, ctx: &Ctx) -> Result<()> {
+    match fs {
+        "btrfs" => ctx.sudo("mkfs.btrfs", &["-f", dev]),
+        "xfs" => ctx.sudo("mkfs.xfs", &["-f", dev]),
+        _ => ctx.sudo("mkfs.ext4", &["-F", dev]),
+    }
+}
+
+/// Create the LUKS2 container on `part` and open it as `cryptroot`. The
+/// passphrase is fed over stdin (never logged).
+fn setup_luks(part: &str, passphrase: &str, ctx: &Ctx) -> Result<()> {
+    step("Encrypting the disk (LUKS)");
+    if passphrase.trim().is_empty() {
+        bail!("encryption is on but no passphrase was provided");
+    }
+    ctx.cryptsetup(
+        &["luksFormat", "--type", "luks2", "--batch-mode", "--key-file=-", part],
+        passphrase,
+    )?;
+    ctx.cryptsetup(&["open", "--key-file=-", part, "cryptroot"], passphrase)?;
+    println!("  · root encrypted with LUKS2 (unlocked as cryptroot)");
+    Ok(())
+}
+
+/// After the base system exists, wire up unlocking at boot: a crypttab entry and
+/// the `encrypt` mkinitcpio hook (regenerating the initramfs).
+fn configure_encryption(luks_part: &str, ctx: &Ctx) -> Result<()> {
+    step("Configuring encryption (crypttab + initramfs)");
+    // cryptsetup isn't in `base`, but the `encrypt` initramfs hook needs it.
+    ctx.shell("arch-chroot /mnt pacman -S --needed --noconfirm cryptsetup", true)?;
+    ctx.shell(
+        &format!(
+            "uuid=$(blkid -s UUID -o value {luks_part}) && \
+             echo \"cryptroot UUID=$uuid none luks\" >> /mnt/etc/crypttab"
+        ),
+        true,
+    )?;
+    // Insert the `encrypt` hook just before `filesystems` (idempotent).
+    ctx.shell(
+        "sed -i '/^HOOKS=/{/encrypt/!s/filesystems/encrypt filesystems/}' /mnt/etc/mkinitcpio.conf",
+        true,
+    )?;
+    ctx.shell("arch-chroot /mnt mkinitcpio -P", true)?;
+    Ok(())
+}
+
+/// Add `cryptdevice=UUID=<luks>:cryptroot` to the staged manifest's boot cmdline
+/// so the bootloader (whatever the manifest installs) unlocks the root at boot.
+fn inject_crypt_cmdline(luks_part: &str, ctx: &Ctx) -> Result<()> {
+    if ctx.dry_run {
+        println!("  · would add cryptdevice= to the boot cmdline");
+        return Ok(());
+    }
+    let uuid = ctx.output(false, "blkid", &["-s", "UUID", "-o", "value", luks_part])?;
+    let uuid = uuid.trim();
+    if uuid.is_empty() {
+        return Ok(());
+    }
+    let param = format!("cryptdevice=UUID={uuid}:cryptroot");
+    let path = "/mnt/etc/manifest-install.json";
+    let mut doc: serde_json::Value = match std::fs::read_to_string(path).ok().and_then(|r| serde_json::from_str(&r).ok()) {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    if let Some(boot) = doc.get_mut("boot").and_then(|b| b.as_object_mut()) {
+        let present = boot
+            .get("cmdline")
+            .and_then(|c| c.as_array())
+            .map(|a| a.iter().any(|v| v.as_str() == Some(param.as_str())))
+            .unwrap_or(false);
+        if !present {
+            match boot.get_mut("cmdline").and_then(|c| c.as_array_mut()) {
+                Some(arr) => arr.push(serde_json::Value::String(param.clone())),
+                None => {
+                    boot.insert("cmdline".into(), serde_json::json!([param]));
+                }
+            }
+        }
+    }
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&doc).unwrap_or_default());
+    println!("  · boot cmdline: {param}");
+    Ok(())
+}
+
+/// Override the staged manifest's `system` block (timezone/locale/keymap/
+/// hostname) with values the front-end collected, so an Advanced install can set
+/// them without editing the manifest. Best-effort.
+fn apply_system_overrides(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    let tz = plan.timezone.as_deref().filter(|s| !s.trim().is_empty());
+    let locale = plan.locale.as_deref().filter(|s| !s.trim().is_empty());
+    let keymap = plan.keymap.as_deref().filter(|s| !s.trim().is_empty());
+    let hostname = plan.hostname.as_deref().filter(|s| !s.trim().is_empty());
+    if tz.is_none() && locale.is_none() && keymap.is_none() && hostname.is_none() {
+        return Ok(());
+    }
+    step("Applying system settings");
+    if ctx.dry_run {
+        println!("  · would set timezone/locale/keymap/hostname from the installer");
+        return Ok(());
+    }
+    let path = "/mnt/etc/manifest-install.json";
+    let Some(mut doc) = std::fs::read_to_string(path).ok().and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok()) else {
+        return Ok(());
+    };
+    let Some(obj) = doc.as_object_mut() else { return Ok(()) };
+    let system = obj.entry("system").or_insert_with(|| serde_json::json!({}));
+    if !system.is_object() {
+        *system = serde_json::json!({});
+    }
+    let sys = system.as_object_mut().unwrap();
+    if let Some(v) = tz { sys.insert("timezone".into(), serde_json::json!(v)); }
+    if let Some(v) = locale { sys.insert("locale".into(), serde_json::json!(v)); }
+    if let Some(v) = keymap { sys.insert("keymap".into(), serde_json::json!(v)); }
+    if let Some(v) = hostname { sys.insert("hostname".into(), serde_json::json!(v)); }
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&doc).unwrap_or_default());
+    println!("  · system settings applied from the installer");
     Ok(())
 }
 

@@ -44,6 +44,11 @@ struct State {
     filesystem: String,
     swap: String,
     swap_size_gib: Option<u32>,
+    encrypt: bool,
+    encrypt_passphrase: String,
+    timezone: String,
+    locale: String,
+    keymap: String,
     full_name: String,
     username: String,
     password: String,
@@ -654,18 +659,30 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
 
     content.append(&list);
 
-    // Advanced: filesystem + swap (+ dual-boot size when Windows is present).
-    let fs = labeled_choice("Filesystem", &["ext4", "btrfs"], 0, {
+    // Advanced: filesystem + swap + encryption + locale (+ dual-boot size).
+    let fs = labeled_choice("Filesystem", &["ext4", "btrfs", "xfs"], 0, {
         let state = state.clone();
         move |v| state.borrow_mut().filesystem = v
     });
     let sw = swap_row(state);
-    fs.set_visible(false);
-    sw.set_visible(false);
-    content.append(&fs);
-    content.append(&sw);
-    adv.borrow_mut().push(fs.upcast());
-    adv.borrow_mut().push(sw.upcast());
+    let enc = encrypt_row(state);
+    let tz = text_field_row("Timezone", "Region/City (e.g. America/New_York)", {
+        let state = state.clone();
+        move |v| state.borrow_mut().timezone = v
+    });
+    let loc = text_field_row("Locale", "e.g. en_US.UTF-8", {
+        let state = state.clone();
+        move |v| state.borrow_mut().locale = v
+    });
+    let km = text_field_row("Keymap", "console keymap, e.g. us", {
+        let state = state.clone();
+        move |v| state.borrow_mut().keymap = v
+    });
+    for w in [&fs, &sw, &enc, &tz, &loc, &km] {
+        w.set_visible(false);
+        content.append(w);
+        adv.borrow_mut().push(w.clone().upcast());
+    }
 
     if win.is_some() {
         let size = alongside_size_row(state);
@@ -752,9 +769,20 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
     summary.set_wrap(true);
     content.append(&summary);
 
+    // The equivalent headless command (power-user transparency) — selectable so
+    // it can be copied. Secrets (passphrase, password) are never shown.
+    let cli = gtk::Label::new(None);
+    cli.set_halign(gtk::Align::Start);
+    cli.set_wrap(true);
+    cli.set_selectable(true);
+    cli.add_css_class("dim-label");
+    cli.set_widget_name("cli-equivalent");
+    content.append(&cli);
+
     // Refresh the summary each time we land here.
     {
         let summary = summary.clone();
+        let cli = cli.clone();
         let state = state.clone();
         stack.connect_visible_child_name_notify(move |s| {
             if s.visible_child_name().as_deref() != Some("review") {
@@ -772,14 +800,22 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
             } else {
                 format!("{} (will be erased)", st.disk)
             };
+            let mut fs_line = st.filesystem.clone();
+            if st.encrypt {
+                fs_line.push_str(" + LUKS encryption");
+            }
             summary.set_markup(&format!(
                 "<b>Setup:</b> {}\n<b>Disk:</b> {}\n<b>Account:</b> {} ({})\n<b>Filesystem:</b> {}   <b>Swap:</b> {}",
                 glib::markup_escape_text(&setup),
                 glib::markup_escape_text(&disk_str),
                 glib::markup_escape_text(&st.full_name),
                 glib::markup_escape_text(&st.username),
-                glib::markup_escape_text(&st.filesystem),
+                glib::markup_escape_text(&fs_line),
                 glib::markup_escape_text(&swap_str),
+            ));
+            cli.set_markup(&format!(
+                "<small>Equivalent command:\n<tt>{}</tt></small>",
+                glib::markup_escape_text(&cli_command(&st))
             ));
         });
     }
@@ -845,6 +881,52 @@ fn add_done(stack: &Rc<gtk::Stack>) {
 // Install
 // ---------------------------------------------------------------------------
 
+/// Trim a field; empty becomes None (so the manifest's value is kept).
+fn opt(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+/// The `manifest provision …` command equivalent to the current selections, for
+/// the review page. Secrets are shown as `******`, never the real values.
+fn cli_command(st: &State) -> String {
+    let manifest = if st.manifest.is_empty() { "<manifest>" } else { &st.manifest };
+    let disk = if st.disk.is_empty() { "<disk>" } else { &st.disk };
+    let mut c = format!("manifest provision {manifest} --disk {disk}");
+    if st.install_mode == "alongside" {
+        c.push_str(" --mode alongside");
+        if let Some(g) = st.alongside_gib {
+            c.push_str(&format!(" --alongside-gib {g}"));
+        }
+    }
+    if st.filesystem != "ext4" {
+        c.push_str(&format!(" --filesystem {}", st.filesystem));
+    }
+    if st.swap != "zram" {
+        c.push_str(&format!(" --swap {}", st.swap));
+    }
+    if let Some(g) = st.swap_size_gib {
+        c.push_str(&format!(" --swap-size-gib {g}"));
+    }
+    if st.encrypt {
+        c.push_str(" --encrypt --passphrase ******");
+    }
+    for (flag, val) in [
+        ("--timezone", &st.timezone),
+        ("--locale", &st.locale),
+        ("--keymap", &st.keymap),
+        ("--hostname", &st.hostname),
+    ] {
+        if !val.trim().is_empty() {
+            c.push_str(&format!(" {flag} {}", val.trim()));
+        }
+    }
+    if !st.username.trim().is_empty() {
+        c.push_str(&format!(" --user {} --password ******", st.username.trim()));
+    }
+    c
+}
+
 fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
     // Build the plan from collected state.
     let plan = {
@@ -867,10 +949,12 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                     password: st.password.clone(),
                 })
             },
-            hostname: {
-                let h = st.hostname.trim();
-                if h.is_empty() { None } else { Some(h.to_string()) }
-            },
+            hostname: opt(&st.hostname),
+            encrypt: st.encrypt,
+            encrypt_passphrase: st.encrypt_passphrase.clone(),
+            timezone: opt(&st.timezone),
+            locale: opt(&st.locale),
+            keymap: opt(&st.keymap),
         }
     };
 
@@ -1051,6 +1135,55 @@ fn alongside_size_row(state: &Rc<RefCell<State>>) -> gtk::Box {
         });
     }
     row.append(&size);
+    row
+}
+
+/// A "Label: [entry]" row that reports the entry text on every change.
+fn text_field_row(
+    label: &str,
+    placeholder: &str,
+    on_change: impl Fn(String) + 'static,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let l = gtk::Label::new(Some(label));
+    l.set_halign(gtk::Align::Start);
+    l.set_hexpand(true);
+    row.append(&l);
+    let e = gtk::Entry::builder().placeholder_text(placeholder).build();
+    e.connect_changed(move |e| on_change(e.text().to_string()));
+    row.append(&e);
+    row
+}
+
+/// "Encrypt disk (LUKS)": a switch plus a passphrase entry that appears when on.
+fn encrypt_row(state: &Rc<RefCell<State>>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let l = gtk::Label::new(Some("Encrypt disk (LUKS)"));
+    l.set_halign(gtk::Align::Start);
+    l.set_hexpand(true);
+    row.append(&l);
+
+    let pass = gtk::PasswordEntry::builder().show_peek_icon(true).build();
+    pass.set_property("placeholder-text", "Encryption passphrase");
+    pass.set_visible(false);
+
+    let sw = gtk::Switch::new();
+    sw.set_valign(gtk::Align::Center);
+    {
+        let state = state.clone();
+        let pass = pass.clone();
+        sw.connect_active_notify(move |s| {
+            let on = s.is_active();
+            state.borrow_mut().encrypt = on;
+            pass.set_visible(on);
+        });
+    }
+    {
+        let state = state.clone();
+        pass.connect_changed(move |e| state.borrow_mut().encrypt_passphrase = e.text().to_string());
+    }
+    row.append(&sw);
+    row.append(&pass);
     row
 }
 

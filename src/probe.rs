@@ -50,6 +50,14 @@ pub struct InstallPlan {
     pub account: Option<Account>,
     /// Hostname override (None = use the manifest's, or the default).
     pub hostname: Option<String>,
+    /// Encrypt the root partition with LUKS2 (erase installs only).
+    pub encrypt: bool,
+    /// LUKS passphrase (sensitive — fed to cryptsetup over stdin, never logged).
+    pub encrypt_passphrase: String,
+    /// Timezone / locale / console keymap overrides (None = the manifest's).
+    pub timezone: Option<String>,
+    pub locale: Option<String>,
+    pub keymap: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

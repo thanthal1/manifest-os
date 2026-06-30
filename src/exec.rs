@@ -200,6 +200,32 @@ impl Ctx {
         }
     }
 
+    /// Run `cryptsetup <args>` as root, feeding the passphrase on stdin so it is
+    /// NEVER printed to the log or visible in the process list. Used for LUKS
+    /// format/open during an encrypted install.
+    pub fn cryptsetup(&self, args: &[&str], passphrase: &str) -> Result<()> {
+        println!("  $ sudo cryptsetup {} (passphrase on stdin)", args.join(" "));
+        if self.dry_run {
+            return Ok(());
+        }
+        let mut child = Command::new("sudo")
+            .arg("cryptsetup")
+            .args(args)
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to launch cryptsetup: {e}"))?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(passphrase.as_bytes())?;
+        match child.wait() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => bail!("cryptsetup {} exited with status {s}", args.join(" ")),
+            Err(e) => bail!("cryptsetup failed: {e}"),
+        }
+    }
+
     /// Run a detection command quietly and report whether it succeeded.
     ///
     /// In dry-run this does NOT execute and returns `false`, so the pipeline

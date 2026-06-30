@@ -92,6 +92,19 @@ enum Command {
         /// Override the hostname.
         #[arg(long)]
         hostname: Option<String>,
+        /// Encrypt the root with LUKS2 (erase installs only); needs --passphrase.
+        #[arg(long)]
+        encrypt: bool,
+        /// LUKS passphrase for --encrypt.
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Timezone (e.g. America/New_York), locale (e.g. en_US.UTF-8), keymap.
+        #[arg(long)]
+        timezone: Option<String>,
+        #[arg(long)]
+        locale: Option<String>,
+        #[arg(long)]
+        keymap: Option<String>,
         /// JSON object of survey answers for the manifest's questions.
         #[arg(long)]
         answers: Option<PathBuf>,
@@ -206,6 +219,11 @@ fn run() -> Result<()> {
             user,
             password,
             hostname,
+            encrypt,
+            passphrase,
+            timezone,
+            locale,
+            keymap,
             answers,
             dry_run,
             no_reboot,
@@ -250,6 +268,11 @@ fn run() -> Result<()> {
                 answers: answers_vec,
                 account,
                 hostname,
+                encrypt,
+                encrypt_passphrase: passphrase.unwrap_or_default(),
+                timezone,
+                locale,
+                keymap,
             };
             installer::execute(&plan, &Ctx::new(dry_run))?;
             if !dry_run && !no_reboot {

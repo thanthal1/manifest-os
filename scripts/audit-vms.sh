@@ -60,6 +60,7 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
     niri:niri-rice:erase
     hyprland:hyprland-rice:erase
     dualboot:minimal:alongside
+    "luks:minimal:erase:--encrypt --passphrase test1234 --filesystem xfs"
   )
 fi
 
@@ -84,6 +85,7 @@ destroy() {
 run_scenario() {
   local spec="$1" name man mode vm log result
   name="${spec%%:*}"; man="$(echo "$spec" | cut -d: -f2)"; mode="$(echo "$spec" | cut -d: -f3)"
+  local extra; extra="$(echo "$spec" | cut -d: -f4-)"   # optional extra provision flags
   vm="audit-$name-$stamp"
   log="$out/$name.log"
   : > "$log"
@@ -133,7 +135,7 @@ run_scenario() {
 
   # Run the unattended install in the background on the guest; poll for its exit.
   local mflag=""; [ "$mode" = "alongside" ] && mflag="--mode alongside $along_gib"
-  gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag --user tester --password test1234 --no-reboot >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
+  gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag $extra --user tester --password test1234 --no-reboot >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
 
   # Poll for the install's exit code. Only accept a pure number — guestcontrol
   # itself times out under load, and that error text must not be mistaken for a

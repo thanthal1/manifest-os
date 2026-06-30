@@ -297,6 +297,11 @@ fn build_plan(app: &App) -> InstallPlan {
         answers: Vec::new(),
         account: None,
         hostname: None,
+        encrypt: false,
+        encrypt_passphrase: String::new(),
+        timezone: None,
+        locale: None,
+        keymap: None,
     }
 }
 
