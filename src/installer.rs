@@ -54,6 +54,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     // reach the package mirrors. pacstrap needs the network; this turns a cryptic
     // "pacstrap exited 1" into a clear message, with the disk still untouched.
     ensure_online(ctx)?;
+    fix_clock(ctx);
     ensure_keyring(ctx)?;
     let alongside = plan.install_mode == "alongside";
     let parts = if alongside {
@@ -291,8 +292,6 @@ fn ensure_online(ctx: &Ctx) -> Result<()> {
     if ctx.dry_run {
         return Ok(());
     }
-    // Best-effort time sync; harmless if timesyncd/NTP isn't reachable.
-    let _ = ctx.shell("timedatectl set-ntp true 2>/dev/null || true", true);
     if !crate::probe::is_online() {
         bail!(
             "No internet connection. Connect to Wi-Fi or plug in an Ethernet cable, then try again — \
@@ -301,6 +300,32 @@ fn ensure_online(ctx: &Ctx) -> Result<()> {
     }
     println!("  · online");
     Ok(())
+}
+
+/// Correct the system clock before pacstrap. A machine with a dead CMOS battery
+/// boots with a wildly wrong date, and pacman then rejects every package
+/// signature as not-yet-valid — the classic pacstrap failure that "works in a VM
+/// but not on hardware". `timedatectl set-ntp` alone isn't enough: it may not
+/// converge before pacstrap, or NTP may be blocked. So we set a correct-enough
+/// time *immediately* from an HTTPS `Date:` header (accurate to ~1s, which is far
+/// more than signatures need), then enable NTP for ongoing accuracy and write it
+/// back to the RTC. Requires network, so it runs after `ensure_online`.
+/// Best-effort — never fails the install.
+fn fix_clock(ctx: &Ctx) {
+    if ctx.dry_run {
+        return;
+    }
+    step("Setting the clock");
+    let _ = ctx.shell(
+        "for url in https://archlinux.org https://www.cloudflare.com https://www.google.com; do \
+            d=$(curl -sI --max-time 8 \"$url\" 2>/dev/null | grep -i '^date:' | head -n1 | cut -d' ' -f2-); \
+            if [ -n \"$d\" ]; then date -s \"$d\" >/dev/null 2>&1 && break; fi; \
+         done; \
+         timedatectl set-ntp true 2>/dev/null || true; \
+         hwclock --systohc 2>/dev/null || true",
+        true,
+    );
+    let _ = ctx.shell("printf '  · clock set to '; date -u '+%Y-%m-%d %H:%M:%S UTC'", true);
 }
 
 /// Make sure the live keyring is populated so pacstrap can verify signatures.
