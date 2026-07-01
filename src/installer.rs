@@ -380,9 +380,34 @@ fn install_nvidia_driver(ctx: &Ctx) -> Result<()> {
         "sed -i '/^MODULES=/{/nvidia_drm/!s/MODULES=(/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm /}' /mnt/etc/mkinitcpio.conf",
         true,
     )?;
-    ctx.shell("arch-chroot /mnt mkinitcpio -P", true)?;
+    // Rebuild only the manifest's chosen kernel's initramfs — NOT `-P` (every
+    // installed kernel). pacstrap always installs plain `linux` as a base
+    // dependency (see pacstrap()), regardless of the manifest's kernel choice;
+    // that fallback kernel has no matching headers, so dkms never builds an
+    // nvidia module for it, and `-P` failed there and killed the whole step.
+    let preset = staged_kernel_package(ctx);
+    ctx.shell(&format!("arch-chroot /mnt mkinitcpio -p {preset}"), true)?;
     println!("  · NVIDIA proprietary driver installed (nvidia-dkms)");
     Ok(())
+}
+
+/// The mkinitcpio preset name for the manifest's chosen kernel (its package
+/// name doubles as the preset filename, e.g. `linux-zen` -> `linux-zen.preset`).
+/// Falls back to the default kernel if the staged manifest can't be read.
+fn staged_kernel_package(ctx: &Ctx) -> &'static str {
+    if ctx.dry_run {
+        return crate::kernel::DEFAULT_KEY;
+    }
+    let key = std::fs::read_to_string("/mnt/etc/manifest-install.json")
+        .ok()
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+        .and_then(|d| {
+            d.get("system")
+                .and_then(|s| s.get("kernel"))
+                .and_then(|k| k.as_str())
+                .map(str::to_string)
+        });
+    crate::kernel::resolve(key.as_deref()).map(|k| k.package).unwrap_or(crate::kernel::DEFAULT_KEY)
 }
 
 /// Sync, unmount the target, and reboot — no prompt. For the GUI, which shows
