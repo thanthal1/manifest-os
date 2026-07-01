@@ -61,6 +61,7 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
     hyprland:hyprland-rice:erase
     dualboot:minimal:alongside
     "luks:minimal:erase:--encrypt --passphrase test1234 --filesystem xfs"
+    "poweruser:minimal:erase:--root-password rootpw123 --autologin --install-nvidia"
   )
 fi
 
