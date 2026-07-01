@@ -117,6 +117,11 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     stage_binary(ctx)?;
     run_manifest(&manifest_in_root, answers.as_deref(), ctx)?;
     create_account(plan, ctx)?;
+    configure_root_password(plan, ctx)?;
+    if plan.install_nvidia {
+        install_nvidia_driver(ctx)?;
+    }
+    configure_autologin(plan, ctx)?;
     if alongside {
         enable_dual_boot(ctx);
     }
@@ -239,6 +244,145 @@ fn sanitize_username(raw: &str) -> String {
         .chars()
         .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-')
         .collect()
+}
+
+/// Set root's password when explicitly requested. Root is locked by default —
+/// the created account's wheel/sudo membership is the intended way in — so this
+/// is strictly opt-in for people who want direct root login. Fed to chpasswd
+/// over stdin; never logged or written to disk.
+fn configure_root_password(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    let Some(pw) = plan.root_password.as_ref().filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    step("Setting the root password");
+    ctx.set_password_chroot("/mnt", "root", pw)?;
+    println!("  · root password set");
+    Ok(())
+}
+
+/// The username to auto-login: the account the front-end created, or (for a
+/// CLI/TUI install with no account) the manifest's own primary user.
+fn autologin_user(plan: &InstallPlan) -> Option<String> {
+    if let Some(acct) = &plan.account {
+        let u = sanitize_username(&acct.username);
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    let raw = std::fs::read_to_string("/mnt/etc/manifest-install.json").ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    doc.get("users")?.as_array()?.first()?.get("name")?.as_str().map(str::to_string)
+}
+
+/// Skip the login screen for the created account. Detects whichever display
+/// manager the manifest set up — via the `display-manager.service` symlink
+/// `systemctl enable` creates — and writes its native autologin config; a bare
+/// window manager (no DM) falls back to a getty autologin on tty1. Best-effort;
+/// never fails the install.
+fn configure_autologin(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    if !plan.autologin {
+        return Ok(());
+    }
+    if ctx.dry_run {
+        println!("\n[Configuring auto-login]\n  · would configure auto-login for the created account");
+        return Ok(());
+    }
+    let Some(user) = autologin_user(plan) else {
+        println!("\n[Configuring auto-login]\n  · no account found to log in — skipped");
+        return Ok(());
+    };
+    step("Configuring auto-login");
+    let dm = ctx
+        .output(
+            false,
+            "sh",
+            &["-c", "basename \"$(readlink -f /mnt/etc/systemd/system/display-manager.service)\" 2>/dev/null"],
+        )
+        .unwrap_or_default();
+    match dm.trim() {
+        "gdm.service" => ctx.write_root(
+            "/mnt/etc/gdm/custom.conf",
+            &format!("[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin={user}\n"),
+        )?,
+        "sddm.service" => ctx.write_root(
+            "/mnt/etc/sddm.conf.d/10-manifest-autologin.conf",
+            &format!("[Autologin]\nUser={user}\nSession=\n"),
+        )?,
+        "lightdm.service" => ctx.write_root(
+            "/mnt/etc/lightdm/lightdm.conf.d/60-manifest-autologin.conf",
+            &format!("[Seat:*]\nautologin-user={user}\nautologin-user-timeout=0\n"),
+        )?,
+        "greetd.service" => {
+            // greetd has no separate "autologin" flag — an `[initial_session]`
+            // block runs the session directly on the first VT, no greeter at
+            // all. Re-use the desktop catalog to know what to run.
+            let desktop_key = std::fs::read_to_string("/mnt/etc/manifest-install.json")
+                .ok()
+                .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+                .and_then(|d| d.get("desktop").and_then(|v| v.as_str()).map(str::to_string));
+            let session_exec = desktop_key
+                .as_deref()
+                .and_then(crate::desktop::recipe)
+                .map(|r| r.session_exec)
+                .filter(|s| !s.is_empty());
+            match session_exec {
+                Some(cmd) => {
+                    let toml = format!(
+                        "[terminal]\nvt = 1\n\n[default_session]\ncommand = \"tuigreet --time --remember --cmd {cmd}\"\nuser = \"greeter\"\n\n[initial_session]\ncommand = \"{cmd}\"\nuser = \"{user}\"\n"
+                    );
+                    ctx.write_root("/mnt/etc/greetd/config.toml", &toml)?;
+                }
+                None => println!("  · couldn't determine the session command for greetd — skipped"),
+            }
+        }
+        _ => {
+            // No known DM (or a bare WM launched from .bash_profile): autologin
+            // the tty itself, which is what a WM session normally starts from.
+            let unit_dir = "/mnt/etc/systemd/system/getty@tty1.service.d";
+            ctx.sudo("mkdir", &["-p", unit_dir])?;
+            ctx.write_root(
+                &format!("{unit_dir}/autologin.conf"),
+                &format!(
+                    "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin {user} --noclear %I $TERM\n"
+                ),
+            )?;
+        }
+    }
+    println!("  · {user} will log in automatically");
+    Ok(())
+}
+
+/// Install the proprietary NVIDIA driver: nvidia-dkms (rebuilds against future
+/// kernel updates automatically, unlike the kernel-version-pinned `nvidia`
+/// package) + nvidia-utils, plus the early-KMS + modeset setup NVIDIA's own
+/// docs recommend for a flicker-free boot on Wayland/Xorg. Runs after the
+/// manifest so the target kernel/headers already match. Best-effort — a failed
+/// driver build shouldn't sink an otherwise-complete install.
+fn install_nvidia_driver(ctx: &Ctx) -> Result<()> {
+    step("Installing the NVIDIA driver");
+    if ctx
+        .shell(
+            "arch-chroot /mnt pacman -S --needed --noconfirm nvidia-dkms nvidia-utils nvidia-settings libva-nvidia-driver",
+            true,
+        )
+        .is_err()
+    {
+        println!("  · warning: NVIDIA driver install failed — you can install nvidia-dkms manually later");
+        return Ok(());
+    }
+    ctx.write_root(
+        "/mnt/etc/modprobe.d/nvidia.conf",
+        "# Managed by Manifest OS\noptions nvidia_drm modeset=1\noptions nvidia_drm fbdev=1\n",
+    )?;
+    // Early KMS: load the NVIDIA modules from the initramfs, before any display
+    // server starts.
+    ctx.shell(
+        "sed -i '/^MODULES=/{/nvidia_drm/!s/MODULES=(/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm /}' /mnt/etc/mkinitcpio.conf",
+        true,
+    )?;
+    ctx.shell("arch-chroot /mnt mkinitcpio -P", true)?;
+    println!("  · NVIDIA proprietary driver installed (nvidia-dkms)");
+    Ok(())
 }
 
 /// Sync, unmount the target, and reboot — no prompt. For the GUI, which shows

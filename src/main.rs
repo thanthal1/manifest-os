@@ -105,6 +105,16 @@ enum Command {
         locale: Option<String>,
         #[arg(long)]
         keymap: Option<String>,
+        /// Set a root password (root is locked by default — login is via
+        /// --user's wheel/sudo membership).
+        #[arg(long)]
+        root_password: Option<String>,
+        /// Log the created (or manifest's primary) account in automatically.
+        #[arg(long)]
+        autologin: bool,
+        /// Install the proprietary NVIDIA driver (nvidia-dkms).
+        #[arg(long)]
+        install_nvidia: bool,
         /// JSON object of survey answers for the manifest's questions.
         #[arg(long)]
         answers: Option<PathBuf>,
@@ -224,6 +234,9 @@ fn run() -> Result<()> {
             timezone,
             locale,
             keymap,
+            root_password,
+            autologin,
+            install_nvidia,
             answers,
             dry_run,
             no_reboot,
@@ -273,6 +286,9 @@ fn run() -> Result<()> {
                 timezone,
                 locale,
                 keymap,
+                root_password,
+                autologin,
+                install_nvidia,
             };
             installer::execute(&plan, &Ctx::new(dry_run))?;
             if !dry_run && !no_reboot {

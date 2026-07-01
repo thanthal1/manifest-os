@@ -1,5 +1,8 @@
 /target
 /dist
+# scripts/audit-vms.sh output: throwaway VM disks + per-run logs/screenshots,
+# fully reproducible — never commit (the .vdi files are multi-GB each).
+/audit-results/
 **/*.rs.bk
 *.pdb
 Cargo.lock.bak

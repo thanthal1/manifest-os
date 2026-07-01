@@ -53,6 +53,9 @@ struct State {
     username: String,
     password: String,
     hostname: String,
+    root_password: String,
+    autologin: bool,
+    install_nvidia: bool,
 }
 
 impl State {
@@ -691,6 +694,17 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         adv.borrow_mut().push(size.upcast());
     }
 
+    // NVIDIA proprietary driver — offered only when an NVIDIA GPU is present.
+    if probe::has_nvidia_gpu() {
+        let nvidia = switch_row("Install NVIDIA driver (proprietary)", {
+            let state = state.clone();
+            move |on| state.borrow_mut().install_nvidia = on
+        });
+        nvidia.set_visible(false);
+        content.append(&nvidia);
+        adv.borrow_mut().push(nvidia.upcast());
+    }
+
     let back = nav_button("Back", false);
     back.connect_clicked(goto(stack, "setup"));
     let next = nav_button("Continue", true);
@@ -718,6 +732,22 @@ fn add_account(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefC
     content.append(&host);
     adv.borrow_mut().push(user.clone().upcast());
     adv.borrow_mut().push(host.clone().upcast());
+
+    // Advanced: an optional root password (root stays locked — login via this
+    // account's wheel/sudo — unless explicitly set) and auto-login.
+    let root_pw = password_field_row("Root password (optional)", "Leave blank to keep root locked", {
+        let state = state.clone();
+        move |v| state.borrow_mut().root_password = v
+    });
+    let autologin = switch_row("Log in automatically", {
+        let state = state.clone();
+        move |on| state.borrow_mut().autologin = on
+    });
+    for w in [&root_pw, &autologin] {
+        w.set_visible(false);
+        content.append(w);
+        adv.borrow_mut().push(w.clone().upcast());
+    }
 
     {
         let state = state.clone();
@@ -924,6 +954,15 @@ fn cli_command(st: &State) -> String {
     if !st.username.trim().is_empty() {
         c.push_str(&format!(" --user {} --password ******", st.username.trim()));
     }
+    if !st.root_password.trim().is_empty() {
+        c.push_str(" --root-password ******");
+    }
+    if st.autologin {
+        c.push_str(" --autologin");
+    }
+    if st.install_nvidia {
+        c.push_str(" --install-nvidia");
+    }
     c
 }
 
@@ -955,6 +994,9 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
             timezone: opt(&st.timezone),
             locale: opt(&st.locale),
             keymap: opt(&st.keymap),
+            root_password: opt(&st.root_password),
+            autologin: st.autologin,
+            install_nvidia: st.install_nvidia,
         }
     };
 
@@ -1152,6 +1194,38 @@ fn text_field_row(
     let e = gtk::Entry::builder().placeholder_text(placeholder).build();
     e.connect_changed(move |e| on_change(e.text().to_string()));
     row.append(&e);
+    row
+}
+
+/// A "Label: [password entry]" row for an optional secret, reporting changes.
+fn password_field_row(
+    label: &str,
+    placeholder: &str,
+    on_change: impl Fn(String) + 'static,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let l = gtk::Label::new(Some(label));
+    l.set_halign(gtk::Align::Start);
+    l.set_hexpand(true);
+    row.append(&l);
+    let e = gtk::PasswordEntry::builder().show_peek_icon(true).build();
+    e.set_property("placeholder-text", placeholder);
+    e.connect_changed(move |e| on_change(e.text().to_string()));
+    row.append(&e);
+    row
+}
+
+/// A "Label: [switch]" row for a plain boolean toggle.
+fn switch_row(label: &str, on_change: impl Fn(bool) + 'static) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let l = gtk::Label::new(Some(label));
+    l.set_halign(gtk::Align::Start);
+    l.set_hexpand(true);
+    row.append(&l);
+    let sw = gtk::Switch::new();
+    sw.set_valign(gtk::Align::Center);
+    sw.connect_active_notify(move |s| on_change(s.is_active()));
+    row.append(&sw);
     row
 }
 

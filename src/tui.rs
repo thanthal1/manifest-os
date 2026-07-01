@@ -302,6 +302,9 @@ fn build_plan(app: &App) -> InstallPlan {
         timezone: None,
         locale: None,
         keymap: None,
+        root_password: None,
+        autologin: false,
+        install_nvidia: false,
     }
 }
 

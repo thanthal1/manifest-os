@@ -88,6 +88,7 @@ openvpn
 partclone
 parted
 partimage
+pciutils
 pcsclite
 ppp
 pptpclient

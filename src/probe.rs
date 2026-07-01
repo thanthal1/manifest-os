@@ -58,6 +58,13 @@ pub struct InstallPlan {
     pub timezone: Option<String>,
     pub locale: Option<String>,
     pub keymap: Option<String>,
+    /// Set a root password (sensitive, stdin-only). None = leave root locked
+    /// (the wheel/sudo account is the way in — the safer default).
+    pub root_password: Option<String>,
+    /// Log the created account in automatically (skip the login screen).
+    pub autologin: bool,
+    /// Install the proprietary NVIDIA driver (offered when an NVIDIA GPU is seen).
+    pub install_nvidia: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +190,23 @@ pub fn list_disks() -> Vec<Disk> {
             Some(Disk { name, size, model: if model.is_empty() { "disk".into() } else { model } })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Hardware
+// ---------------------------------------------------------------------------
+
+/// Whether an NVIDIA GPU is present (`lspci`'s VGA/3D controller class, vendor
+/// "NVIDIA"). Used to offer the proprietary driver only when it's relevant.
+pub fn has_nvidia_gpu() -> bool {
+    let Ok(out) = Command::new("lspci").arg("-mm").output() else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+        let lower = l.to_ascii_lowercase();
+        (lower.contains("vga compatible controller") || lower.contains("3d controller"))
+            && lower.contains("nvidia")
+    })
 }
 
 // ---------------------------------------------------------------------------
