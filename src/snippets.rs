@@ -103,9 +103,63 @@ fn markers(path: &str, id: &str) -> (String, String) {
     )
 }
 
+/// Every managed block in `content`, as `(id, inner content)` pairs — used by
+/// the Designer to rebuild snippet nodes from what's really on disk. Matching
+/// is comment-style agnostic (it looks for the `>>> manifest:<id> >>>` core,
+/// whatever comment characters surround it).
+pub fn extract_blocks(content: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for id in block_ids(content) {
+        if let Some((a, b)) = block_bounds(content, &id) {
+            let lines: Vec<&str> = content.lines().collect();
+            let inner = lines[a + 1..b].join("\n");
+            out.push((id, inner));
+        }
+    }
+    out
+}
+
+/// `content` with the managed block `id` (markers included) removed. Returns
+/// the input unchanged when the block isn't present.
+pub fn remove_block(content: &str, id: &str) -> String {
+    let Some((a, b)) = block_bounds(content, id) else {
+        return content.to_string();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = lines[..a].iter().map(|l| l.to_string()).collect();
+    out.extend(lines[b + 1..].iter().map(|l| l.to_string()));
+    // Collapse a doubled blank line the removal may leave behind.
+    join(out)
+}
+
+/// The ids of every managed block in `content`, in order of appearance.
+fn block_ids(content: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in content.lines() {
+        if let Some(rest) = line.split(">>> manifest:").nth(1) {
+            if let Some(id) = rest.split(" >>>").next() {
+                if !id.is_empty() && !ids.iter().any(|x| x == id) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Start/end line indexes of block `id`'s markers, comment-style agnostic.
+fn block_bounds(content: &str, id: &str) -> Option<(usize, usize)> {
+    let start_tag = format!(">>> manifest:{id} >>>");
+    let end_tag = format!("<<< manifest:{id} <<<");
+    let lines: Vec<&str> = content.lines().collect();
+    let a = lines.iter().position(|l| l.contains(&start_tag))?;
+    let b = lines.iter().position(|l| l.contains(&end_tag))?;
+    (a <= b).then_some((a, b))
+}
+
 /// Insert or replace snippet `s` in `current`, returning the new file content.
-/// Public within the crate for tests.
-pub(crate) fn upsert(current: &str, s: &Snippet) -> String {
+/// Public so the Designer (node-graph editor) can apply edits directly.
+pub fn upsert(current: &str, s: &Snippet) -> String {
     let (start, end) = markers(&s.path, &s.id);
     let block = format!("{start}\n{}\n{end}", s.content.trim_end());
 
@@ -305,5 +359,38 @@ mod tests {
         let close = brace_section_close(kdl, "binds").unwrap();
         // Closing brace of binds is line 3 (0-indexed), not one of the inline pairs.
         assert_eq!(close, 3);
+    }
+
+    #[test]
+    fn extract_blocks_round_trips_what_upsert_wrote() {
+        let s = snip("waybar", "config.kdl", Some("binds"), "Mod+W { spawn \"waybar\"; }");
+        let content = upsert(NIRI, &s);
+        let blocks = extract_blocks(&content);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "waybar");
+        assert!(blocks[0].1.contains("Mod+W"));
+    }
+
+    #[test]
+    fn extract_handles_all_comment_styles() {
+        let css = "/* >>> manifest:bar-style >>> */\n.bar { color: red; }\n/* <<< manifest:bar-style <<< */\n";
+        let blocks = extract_blocks(css);
+        assert_eq!(blocks[0].0, "bar-style");
+        assert!(blocks[0].1.contains("color: red"));
+    }
+
+    #[test]
+    fn remove_block_deletes_only_the_named_block() {
+        let s1 = snip("a", "x.conf", None, "one");
+        let s2 = snip("b", "x.conf", None, "two");
+        let content = upsert(&upsert("base\n", &s1), &s2);
+        let out = remove_block(&content, "a");
+        assert!(!out.contains("manifest:a"));
+        assert!(!out.contains("one"));
+        assert!(out.contains("manifest:b"));
+        assert!(out.contains("two"));
+        assert!(out.contains("base"));
+        // Removing a missing id is a no-op.
+        assert_eq!(remove_block(&out, "zzz"), out);
     }
 }
