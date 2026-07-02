@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Keybindings Demo",
+    "author": "you",
+    "description": "Proves out the universal `keybindings` field on niri: one declared list, applied through niri's own config instead of hand-written KDL.",
+    "tags": ["niri", "wayland", "keybindings"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "niri-keys",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us"
+  },
+  "users": [
+    {
+      "name": "niri",
+      "groups": ["wheel", "video", "input"],
+      "shell": "/bin/bash",
+      "sudo": true,
+      "password": "niri"
+    }
+  ],
+  "desktop": "niri",
+  "display_manager": "greetd",
+  "packages": [
+    "firefox",
+    "brightnessctl"
+  ],
+  "keybindings": [
+    { "keys": "SUPER+Enter", "action": "terminal" },
+    { "keys": "SUPER+D", "action": "launcher" },
+    { "keys": "SUPER+B", "command": "firefox" },
+    { "keys": "SUPER+L", "action": "lock" },
+    { "keys": "SUPER+Q", "action": "close_window" },
+    { "keys": "SUPER+F", "action": "fullscreen" },
+    { "keys": "Print", "action": "screenshot" },
+    { "keys": "XF86AudioRaiseVolume", "action": "volume_up" },
+    { "keys": "XF86AudioLowerVolume", "action": "volume_down" },
+    { "keys": "XF86AudioMute", "action": "volume_mute" },
+    { "keys": "XF86MonBrightnessUp", "action": "brightness_up" },
+    { "keys": "XF86MonBrightnessDown", "action": "brightness_down" }
+  ]
+}

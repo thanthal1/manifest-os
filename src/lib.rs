@@ -10,6 +10,7 @@ pub mod exec;
 pub mod files;
 pub mod install;
 pub mod installer;
+pub mod keybindings;
 pub mod kernel;
 pub mod manifest;
 pub mod pacman;

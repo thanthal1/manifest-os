@@ -73,6 +73,14 @@ pub struct Manifest {
     /// (`{ "source": "/path/bg.png", "mode": "fill" }`).
     pub wallpaper: Option<Wallpaper>,
 
+    /// Custom keyboard shortcuts, applied across whatever environment the
+    /// manifest sets up via that environment's own first-party mechanism
+    /// (niri/Hyprland/Sway/i3 config, KDE's Custom Shortcuts, LXQt's global
+    /// shortcuts daemon, or GNOME/Cinnamon/MATE/Xfce's custom-keybinding
+    /// settings). See [`crate::keybindings`].
+    #[serde(default)]
+    pub keybindings: Vec<Keybinding>,
+
     /// Shell commands run *before* package installation. Escape hatch only.
     #[serde(default)]
     pub pre_install: Vec<String>,
@@ -150,6 +158,28 @@ pub enum Wallpaper {
         source: String,
         mode: Option<String>,
     },
+}
+
+/// A single custom keyboard shortcut, in Manifest OS's universal
+/// representation:
+/// ```json
+/// { "keys": "SUPER+Enter", "action": "terminal" }
+/// { "keys": "SUPER+B", "command": "firefox" }
+/// ```
+/// `keys` is `+`-joined modifiers (SUPER/CTRL/ALT/SHIFT, case-insensitive,
+/// with common aliases like WIN/META for SUPER) followed by a key name (a
+/// single letter/digit, a common name like `Enter`/`Left`/`F5`, or a raw XF86
+/// media-key name such as `XF86AudioRaiseVolume`).
+///
+/// Exactly one of `action` (a small built-in vocabulary resolved per
+/// environment — see [`crate::keybindings`]) or `command` (a literal shell
+/// command, used verbatim everywhere) should be set; `command` wins if both
+/// are given.
+#[derive(Debug, Deserialize)]
+pub struct Keybinding {
+    pub keys: String,
+    pub action: Option<String>,
+    pub command: Option<String>,
 }
 
 impl Wallpaper {

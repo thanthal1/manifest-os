@@ -15,6 +15,7 @@ use crate::desktop;
 use crate::dotfiles;
 use crate::exec::Ctx;
 use crate::files;
+use crate::keybindings;
 use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
@@ -84,6 +85,12 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     if let Some(w) = &manifest.wallpaper {
         step("Setting the wallpaper");
         wallpaper::apply(w, manifest.desktop.as_deref(), ctx)?;
+    }
+
+    if !manifest.keybindings.is_empty() {
+        step("Setting up keybindings");
+        let primary_user = manifest.users.first().map(|u| u.name.as_str());
+        keybindings::apply(&manifest.keybindings, manifest.desktop.as_deref(), primary_user, ctx)?;
     }
 
     if let Some(df) = &manifest.dotfiles {

@@ -78,6 +78,7 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
     "multiuser:minimal:erase:--extra-user alice:alicepw:sudo --extra-user bob:bobpw"
     "preseed:minimal:erase:--config /root/preseed.json:printf '{\"disk\":\"/dev/sda\",\"manifest\":\"/usr/share/manifest-os/examples/minimal.json\",\"account\":{\"full_name\":\"Preseed\",\"username\":\"preseed\",\"password\":\"pw123\"}}' > /root/preseed.json"
     "poweruser2:minimal:erase:--install-printing --post-script /root/post.sh:printf '#!/bin/sh\necho hello from post-install script\n' > /root/post.sh; chmod +x /root/post.sh"
+    keybindings:keybindings-demo:erase
   )
 fi
 
