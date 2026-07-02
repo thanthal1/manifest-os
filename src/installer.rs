@@ -1183,6 +1183,9 @@ fn configure_storage_boot(plan: &InstallPlan, storage: &StorageInfo, ctx: &Ctx) 
     let mut hooks_changed = false;
     if plan.raid1_disk.is_some() {
         step("Configuring RAID (mdadm.conf + initramfs)");
+        // mdadm isn't in `base` — the mdadm_udev hook needs `mdmon` from it,
+        // present on the live ISO but not yet in the target.
+        ctx.shell("arch-chroot /mnt pacman -S --needed --noconfirm mdadm", true)?;
         ctx.shell("mdadm --detail --scan >> /mnt/etc/mdadm.conf", true)?;
         insert_mkinitcpio_hook("mdadm_udev", ctx)?;
         hooks_changed = true;
