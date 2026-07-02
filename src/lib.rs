@@ -8,6 +8,7 @@ pub mod desktop;
 pub mod diff;
 pub mod dotfiles;
 pub mod exec;
+pub mod export;
 pub mod files;
 pub mod history;
 pub mod install;

@@ -95,6 +95,30 @@ pub fn catalog() -> &'static [Recipe] {
     CATALOG
 }
 
+/// Detect which catalog desktop is installed, given a predicate that answers
+/// "is this package installed?". Matches on each recipe's signature package
+/// (the first entry of its `core`, the defining one — `gnome-shell`,
+/// `plasma-meta`, `hyprland`, `niri`, …). Returns the first catalog match, or
+/// `None` if no known environment is present. Used by `manifest export`.
+pub fn detect_installed(is_installed: impl Fn(&str) -> bool) -> Option<&'static str> {
+    CATALOG
+        .iter()
+        .find(|r| r.core.first().is_some_and(|sig| is_installed(sig)))
+        .map(|r| r.key)
+}
+
+/// The full package set a `desktop` recipe pulls in (base + core + portals +
+/// polkit + extras + its display manager) — everything `resolve` would install.
+/// Used by export to subtract desktop-implied packages from the user's list.
+pub fn implied_packages(key: &str) -> Vec<String> {
+    let json = format!(r#"{{"schema_version":"1.0.0","desktop":"{key}"}}"#);
+    Manifest::from_str(&json)
+        .ok()
+        .and_then(|m| resolve(&m).ok().flatten())
+        .map(|r| r.packages)
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Display managers
 // ---------------------------------------------------------------------------

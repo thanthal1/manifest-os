@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
-use manifest::{desktop, diff, history, install, installer, kernel, survey, tui};
+use manifest::{desktop, diff, export, history, install, installer, kernel, survey, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -44,8 +44,18 @@ enum Command {
         /// Path to a manifest.json.
         file: PathBuf,
     },
-    /// Export the current system as a manifest (Phase 5).
-    Export,
+    /// Capture the running system into a manifest.json: explicitly-installed
+    /// packages, desktop, system settings, repos, users and services. Prints to
+    /// stdout by default.
+    Export {
+        /// Write the manifest to this file instead of stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Also install a pacman hook that regenerates the system manifest
+        /// (/etc/manifest-os/system.json) after every package change.
+        #[arg(long)]
+        install_hook: bool,
+    },
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
     /// default desktop if `desktop` changed. Idempotent; safe to re-run.
@@ -439,9 +449,10 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Export => {
-            anyhow::bail!("not implemented yet — planned for Phase 5 (export)")
-        }
+        Command::Export {
+            output,
+            install_hook,
+        } => export::run(output.as_deref(), install_hook, &Ctx::new(false)),
     }
 }
 
