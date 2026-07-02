@@ -21,8 +21,18 @@
 #   -t  per-VM timeout sec (default: 2400 = 40 min)
 #   -k  keep failed VMs    (don't delete, for inspection)
 #
-#   SCENARIO = name:manifest:mode   (mode = erase | alongside)
-#   Default scenarios: every bundled manifest (erase) + minimal alongside.
+#   SCENARIO = name:manifest:mode[:extra-flags[:setup-cmd]]
+#     mode        = erase | alongside
+#     extra-flags = extra `manifest provision` flags, e.g. "--lvm" or
+#                   "--config /root/preseed.json" (config-based scenarios skip
+#                   the normal <manifest>/--disk/--user/--password args)
+#     setup-cmd   = a guest shell command run before provision (e.g. to write
+#                   a preseed JSON or post-install script the flags reference)
+#     A scenario whose extra-flags mention --raid1-disk gets a second virtual
+#     disk (/dev/sdb) attached automatically.
+#   Default scenarios: every bundled manifest (erase) + minimal alongside +
+#   the advanced-control batch (luks, poweruser, lvm, raid1, home-encryption,
+#   multi-user, preseed config, printing+post-script).
 #
 # Results land in ./audit-results/<timestamp>/: one <scenario>.log each, plus
 # summary.txt.  Requires VirtualBox; the live ISO must support guestcontrol
@@ -60,8 +70,14 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
     niri:niri-rice:erase
     hyprland:hyprland-rice:erase
     dualboot:minimal:alongside
-    "luks:minimal:erase:--encrypt --passphrase test1234 --filesystem xfs"
+    "luks:minimal:erase:--encrypt-mode full --passphrase test1234 --filesystem xfs"
     "poweruser:minimal:erase:--root-password rootpw123 --autologin --install-nvidia"
+    "lvm:minimal:erase:--lvm"
+    "raid1:minimal:erase:--raid1-disk /dev/sdb"
+    "homeenc:minimal:erase:--encrypt-mode home --passphrase test1234 --root-gib 20"
+    "multiuser:minimal:erase:--extra-user alice:alicepw:sudo --extra-user bob:bobpw"
+    "preseed:minimal:erase:--config /root/preseed.json:printf '{\"disk\":\"/dev/sda\",\"manifest\":\"/usr/share/manifest-os/examples/minimal.json\",\"account\":{\"full_name\":\"Preseed\",\"username\":\"preseed\",\"password\":\"pw123\"}}' > /root/preseed.json"
+    "poweruser2:minimal:erase:--install-printing --post-script /root/post.sh:printf '#!/bin/sh\necho hello from post-install script\n' > /root/post.sh; chmod +x /root/post.sh"
   )
 fi
 
@@ -86,7 +102,8 @@ destroy() {
 run_scenario() {
   local spec="$1" name man mode vm log result
   name="${spec%%:*}"; man="$(echo "$spec" | cut -d: -f2)"; mode="$(echo "$spec" | cut -d: -f3)"
-  local extra; extra="$(echo "$spec" | cut -d: -f4-)"   # optional extra provision flags
+  local extra; extra="$(echo "$spec" | cut -d: -f4)"     # optional extra provision flags
+  local setup; setup="$(echo "$spec" | cut -d: -f5-)"    # optional guest setup command
   vm="audit-$name-$stamp"
   log="$out/$name.log"
   : > "$log"
@@ -106,6 +123,12 @@ run_scenario() {
   vb storagectl "$vm" --name SATA --add sata --controller IntelAhci >>"$log" 2>&1
   vb storageattach "$vm" --storagectl SATA --port 0 --device 0 --type hdd --medium "$vdi_win" >>"$log" 2>&1
   vb storageattach "$vm" --storagectl SATA --port 1 --device 0 --type dvddrive --medium "$ISO_WIN" >>"$log" 2>&1
+  # RAID1 scenarios need a second disk to mirror onto.
+  if echo "$extra" | grep -q -- '--raid1-disk'; then
+    local vdi2_win; vdi2_win="$(win "$out/$vm-2.vdi")"
+    vb createmedium disk --filename "$vdi2_win" --size "$disk_mb" >>"$log" 2>&1
+    vb storageattach "$vm" --storagectl SATA --port 2 --device 0 --type hdd --medium "$vdi2_win" >>"$log" 2>&1
+  fi
   vb startvm "$vm" --type headless >>"$log" 2>&1
 
   # Wait for the live system's guest agent. Boots are slow under parallel load,
@@ -134,9 +157,24 @@ run_scenario() {
       printf MZ > /run/e/EFI/Microsoft/Boot/bootmgfw.efi && umount /run/e' >>"$log" 2>&1
   fi
 
+  # Optional guest setup command (write a preseed file, a post-install script, etc.)
+  # before provisioning — runs synchronously so it's on disk before manifest reads it.
+  if [ -n "$setup" ]; then
+    echo "----- setup-cmd -----" >> "$log"
+    gx "$vm" "$setup" >>"$log" 2>&1
+  fi
+
   # Run the unattended install in the background on the guest; poll for its exit.
-  local mflag=""; [ "$mode" = "alongside" ] && mflag="--mode alongside $along_gib"
-  gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag $extra --user tester --password test1234 --no-reboot >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
+  # A --config scenario is fully self-describing — skip the normal
+  # manifest/--disk/--user/--password args, which --config bypasses anyway.
+  local provcmd
+  if echo "$extra" | grep -q -- '--config'; then
+    provcmd="manifest provision $extra --no-reboot"
+  else
+    local mflag=""; [ "$mode" = "alongside" ] && mflag="--mode alongside $along_gib"
+    provcmd="manifest provision /usr/share/manifest-os/examples/$man.json --disk /dev/sda $mflag $extra --user tester --password test1234 --no-reboot"
+  fi
+  gx "$vm" "rm -f /tmp/prov.exit; setsid bash -c '$provcmd >/tmp/prov.log 2>&1; echo \$? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched" >>"$log" 2>&1
 
   # Poll for the install's exit code. Only accept a pure number — guestcontrol
   # itself times out under load, and that error text must not be mistaken for a
