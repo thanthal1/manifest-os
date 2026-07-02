@@ -337,6 +337,21 @@ fn user_groups(user: &str) -> Vec<String> {
 // pacman hook (auto-update)
 // ---------------------------------------------------------------------------
 
+/// Turn on automatic package tracking: install the pacman hook and seed the
+/// system manifest. Called at the end of an install so a fresh system keeps
+/// `/etc/manifest-os/system.json` current from first boot. Idempotent.
+pub fn enable_tracking(ctx: &Ctx) -> Result<()> {
+    if ctx.dry_run {
+        println!("  · would install a pacman hook keeping {SYSTEM_MANIFEST} in sync with packages");
+        return Ok(());
+    }
+    install_the_hook(ctx)?;
+    let json = serde_json::to_string_pretty(&capture())? + "\n";
+    ctx.write_root(SYSTEM_MANIFEST, &json)?;
+    println!("  · package tracking on — {SYSTEM_MANIFEST} refreshes on every pacman change");
+    Ok(())
+}
+
 fn install_the_hook(ctx: &Ctx) -> Result<()> {
     // Point the hook at *this* binary, wherever it lives, so it works even if
     // `manifest` isn't on the standard path.

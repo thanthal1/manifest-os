@@ -14,6 +14,7 @@ use crate::boot;
 use crate::desktop;
 use crate::dotfiles;
 use crate::exec::Ctx;
+use crate::export;
 use crate::files;
 use crate::keybindings;
 use crate::kernel;
@@ -150,6 +151,14 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
 
     enable_services(manifest, ctx)?;
     run_hooks("post_install", &manifest.post_install, ctx)?;
+
+    // Keep the system's declared state in sync with future package changes.
+    // Last, so nothing in this run self-triggers the hook. Best-effort — a
+    // failure here shouldn't fail an otherwise-complete install.
+    step("Enabling package tracking");
+    if let Err(e) = export::enable_tracking(ctx) {
+        println!("  · note: couldn't enable package tracking ({e:#})");
+    }
 
     let done = if mode == Mode::Sync { "Synced" } else { "Done" };
     println!("\n✓ {done}.{}", if ctx.dry_run { " (dry-run — no changes made)" } else { "" });
