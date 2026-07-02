@@ -5,6 +5,7 @@
 
 pub mod boot;
 pub mod desktop;
+pub mod diff;
 pub mod dotfiles;
 pub mod exec;
 pub mod files;

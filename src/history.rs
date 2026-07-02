@@ -38,6 +38,14 @@ pub fn record(manifest_json: &str, name: &str, ctx: &Ctx) {
     }
 }
 
+/// The last-applied manifest (the committed `HEAD` of the history), if any.
+/// Used by `diff` to show what a re-apply would change. Returns `None` when
+/// there's no history yet (fresh system) or it can't be read/parsed.
+pub fn current() -> Option<Manifest> {
+    let json = capture_git(&["show", &format!("HEAD:{FILE}")]).ok()?;
+    Manifest::from_str(&json).ok()
+}
+
 /// Print the applied-manifest history, newest first.
 pub fn show() -> Result<()> {
     match capture_git(&["log", "--format=%h  %ci  %s"]) {

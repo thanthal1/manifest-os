@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
-use manifest::{desktop, history, install, installer, kernel, survey, tui};
+use manifest::{desktop, diff, history, install, installer, kernel, survey, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -59,8 +59,15 @@ enum Command {
         #[arg(long)]
         answers: Option<PathBuf>,
     },
-    /// Show what an install would change (Phase 5).
-    Diff { file: PathBuf },
+    /// Preview what applying a manifest would change, compared to the
+    /// last-applied one. Read-only — makes no changes.
+    Diff {
+        /// Path to a manifest.json.
+        file: PathBuf,
+        /// JSON object of survey answers ({"id": value}) for unattended diffs.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+    },
     /// List the manifests applied to this system (the rollback history).
     History,
     /// Undo a manifest change: re-apply a previously-recorded manifest.
@@ -225,6 +232,11 @@ fn run() -> Result<()> {
             let ctx = Ctx::new(dry_run);
             install::sync(&manifest, &ctx)?;
             history::record(&json, &manifest.meta.name, &ctx);
+            Ok(())
+        }
+        Command::Diff { file, answers } => {
+            let (manifest, _) = load_manifest(&file, answers.as_deref())?;
+            diff::run(&manifest, history::current().as_ref());
             Ok(())
         }
         Command::History => history::show(),
@@ -427,8 +439,8 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Export | Command::Diff { .. } => {
-            anyhow::bail!("not implemented yet — planned for Phase 5 (export/diff)")
+        Command::Export => {
+            anyhow::bail!("not implemented yet — planned for Phase 5 (export)")
         }
     }
 }
