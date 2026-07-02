@@ -221,13 +221,44 @@ pub fn apply(d: &Resolved, ctx: &Ctx) -> Result<()> {
     if let Some(dm) = &d.dm {
         println!("  · display manager: {}", dm.key);
         configure_display_manager(dm, d.session_exec, ctx)?;
-        ctx.sudo("systemctl", &["enable", dm.service])?;
+        // `--force` so re-applying (or switching from another DE) overwrites
+        // the existing `display-manager.service` alias instead of erroring on
+        // the conflicting symlink. `switch_default` disables the old DM first
+        // on sync, but --force also covers the case where that DM's package is
+        // already gone.
+        ctx.sudo("systemctl", &["enable", "--force", dm.service])?;
     }
 
     if !d.env.is_empty() {
         write_env(&d.env, ctx)?;
     }
     Ok(())
+}
+
+/// The display-manager unit currently set to start at boot — the target of the
+/// `/etc/systemd/system/display-manager.service` alias symlink, e.g.
+/// `"gdm.service"`. `None` if no DM is configured (fresh WM-less system) or the
+/// link is missing. Read-only (`read_link`), so it also works under `--dry-run`.
+pub fn active_dm_unit() -> Option<String> {
+    let target = std::fs::read_link("/etc/systemd/system/display-manager.service").ok()?;
+    let unit = target.file_name()?.to_string_lossy().to_string();
+    (!unit.is_empty()).then_some(unit)
+}
+
+/// On a sync, if the manifest's desktop uses a different login manager than the
+/// one currently active, disable the old one so the subsequent [`apply`] (which
+/// force-enables the target) makes the new desktop the boot default. Returns
+/// `true` when it switched. Best-effort: a failed disable never aborts the sync
+/// (`apply`'s `enable --force` still repoints the alias).
+pub fn switch_default(d: &Resolved, ctx: &Ctx) -> bool {
+    let Some(target) = &d.dm else { return false };
+    let Some(current) = active_dm_unit() else { return false };
+    if current == target.service {
+        return false;
+    }
+    println!("  · switching login manager: {current} → {}", target.service);
+    let _ = ctx.sudo("systemctl", &["disable", &current]);
+    true
 }
 
 /// Write whatever config a display manager needs to actually launch the chosen
@@ -651,3 +682,41 @@ const CATALOG: &[Recipe] = &[
         notes: "Very low-resource WM with a built-in taskbar and menu.",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+
+    fn manifest_with_desktop(desktop: &str) -> Manifest {
+        let json = format!(r#"{{"schema_version":"1.0.0","desktop":"{desktop}"}}"#);
+        Manifest::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn resolve_maps_desktop_to_its_default_dm() {
+        let gnome = resolve(&manifest_with_desktop("gnome")).unwrap().unwrap();
+        assert_eq!(gnome.dm.as_ref().unwrap().service, "gdm.service");
+        let plasma = resolve(&manifest_with_desktop("plasma")).unwrap().unwrap();
+        assert_eq!(plasma.dm.as_ref().unwrap().service, "sddm.service");
+        let niri = resolve(&manifest_with_desktop("niri")).unwrap().unwrap();
+        assert_eq!(niri.dm.as_ref().unwrap().service, "gdm.service");
+    }
+
+    #[test]
+    fn switch_default_no_ops_when_dm_matches_or_absent() {
+        // Dry-run ctx never executes; switch_default reads the live symlink,
+        // which won't exist on a dev box, so active_dm_unit() is None → false.
+        let ctx = Ctx::new(true);
+        let gnome = resolve(&manifest_with_desktop("gnome")).unwrap().unwrap();
+        assert!(!switch_default(&gnome, &ctx));
+    }
+
+    #[test]
+    fn display_manager_override_wins_over_recipe_default() {
+        let json = r#"{"schema_version":"1.0.0","desktop":"niri","display_manager":"greetd"}"#;
+        let m = Manifest::from_str(json).unwrap();
+        let r = resolve(&m).unwrap().unwrap();
+        assert_eq!(r.dm.as_ref().unwrap().service, "greetd.service");
+    }
+}

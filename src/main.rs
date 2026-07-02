@@ -46,8 +46,19 @@ enum Command {
     },
     /// Export the current system as a manifest (Phase 5).
     Export,
-    /// Re-apply a manifest to update packages/config (Phase 5).
-    Sync { file: PathBuf },
+    /// Re-apply an edited manifest to the running system. Installs whatever the
+    /// edit added — packages, a desktop, a theme, keybindings — and switches the
+    /// default desktop if `desktop` changed. Idempotent; safe to re-run.
+    Sync {
+        /// Path to a manifest.json.
+        file: PathBuf,
+        /// Print every step without executing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// JSON object of survey answers ({"id": value}) for unattended syncs.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+    },
     /// Show what an install would change (Phase 5).
     Diff { file: PathBuf },
     /// List the desktop environments / window managers the installer can set up.
@@ -187,17 +198,16 @@ fn run() -> Result<()> {
             dry_run,
             answers,
         } => {
-            let raw = std::fs::read_to_string(&file)?;
-            // Run the survey, inject {{answers}}, then parse the final manifest.
-            let answered = survey::collect(&raw, answers.as_deref())?;
-            let substituted = survey::substitute(&raw, &answered);
-            let mut manifest = Manifest::from_str(&substituted)?;
-            let extra = survey::conditional_packages(&manifest.conditional_packages, &answered);
-            if !extra.is_empty() {
-                println!("survey: +{} conditional package(s)", extra.len());
-                manifest.packages.extend(extra);
-            }
+            let manifest = load_manifest(&file, answers.as_deref())?;
             install::run(&manifest, &Ctx::new(dry_run))
+        }
+        Command::Sync {
+            file,
+            dry_run,
+            answers,
+        } => {
+            let manifest = load_manifest(&file, answers.as_deref())?;
+            install::sync(&manifest, &Ctx::new(dry_run))
         }
         Command::Verify { file } => {
             let manifest = Manifest::from_path(&file)?;
@@ -395,8 +405,25 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Export | Command::Sync { .. } | Command::Diff { .. } => {
-            anyhow::bail!("not implemented yet — planned for Phase 5 (export/sync/diff)")
+        Command::Export | Command::Diff { .. } => {
+            anyhow::bail!("not implemented yet — planned for Phase 5 (export/diff)")
         }
     }
+}
+
+/// Read a manifest, run its survey (using `answers` when unattended), inject the
+/// answers, and fold in any conditional packages. Shared by `install` and
+/// `sync`, which differ only in what they do with the resulting manifest.
+fn load_manifest(file: &std::path::Path, answers: Option<&std::path::Path>) -> Result<Manifest> {
+    let raw = std::fs::read_to_string(file)
+        .with_context(|| format!("reading manifest at {}", file.display()))?;
+    let answered = survey::collect(&raw, answers)?;
+    let substituted = survey::substitute(&raw, &answered);
+    let mut manifest = Manifest::from_str(&substituted)?;
+    let extra = survey::conditional_packages(&manifest.conditional_packages, &answered);
+    if !extra.is_empty() {
+        println!("survey: +{} conditional package(s)", extra.len());
+        manifest.packages.extend(extra);
+    }
+    Ok(manifest)
 }

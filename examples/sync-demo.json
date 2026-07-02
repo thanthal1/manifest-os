@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Sync Demo (edited)",
+    "author": "you",
+    "description": "The keybindings-demo manifest after an edit: same niri desktop, but the login manager switched to `ly`. Running `manifest sync` on it swaps the default login manager in place — proving edit-json-then-sync applies changes to a running system.",
+    "tags": ["niri", "wayland", "sync"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "niri-keys",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us"
+  },
+  "users": [
+    {
+      "name": "niri",
+      "groups": ["wheel", "video", "input"],
+      "shell": "/bin/bash",
+      "sudo": true,
+      "password": "niri"
+    }
+  ],
+  "desktop": "niri",
+  "display_manager": "ly",
+  "packages": [
+    "firefox",
+    "brightnessctl"
+  ],
+  "keybindings": [
+    { "keys": "SUPER+Enter", "action": "terminal" },
+    { "keys": "SUPER+D", "action": "launcher" },
+    { "keys": "SUPER+B", "command": "firefox" },
+    { "keys": "SUPER+Q", "action": "close_window" }
+  ]
+}

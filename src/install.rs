@@ -25,10 +25,38 @@ use crate::users;
 use crate::wallpaper;
 use anyhow::Result;
 
+/// Whether we're doing a first-time install or re-applying an edited manifest
+/// to an already-running system.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Install,
+    Sync,
+}
+
+/// Apply a manifest to the current system for the first time.
 pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
+    apply(manifest, ctx, Mode::Install)
+}
+
+/// Re-apply an edited manifest to the already-running system: install whatever
+/// the edit added (packages, a desktop, a theme, keybindings, …) and switch the
+/// default desktop if it changed.
+///
+/// The whole pipeline is idempotent — packages install with `--needed`, repos
+/// and paru check before acting, and every generated config file is overwritten
+/// with the manifest's current content — so syncing is just running it again.
+/// The one sync-specific step is retargeting the login manager (see
+/// [`desktop::switch_default`]): re-running install alone would enable the new
+/// DE's display manager but leave the old one also enabled.
+pub fn sync(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
+    apply(manifest, ctx, Mode::Sync)
+}
+
+fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     let m = &manifest.meta;
+    let verb = if mode == Mode::Sync { "Syncing" } else { "Installing" };
     println!(
-        "\n→ Installing \"{}\"{}\n",
+        "\n→ {verb} \"{}\"{}\n",
         if m.name.is_empty() { "(unnamed manifest)" } else { &m.name },
         if ctx.dry_run { "  [dry-run: nothing will be executed]" } else { "" }
     );
@@ -75,8 +103,14 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         boot::apply(boot_cfg, kernel, ctx)?;
     }
 
+    let mut switched_desktop = false;
     if let Some(d) = &desktop {
         step("Configuring desktop");
+        // On a sync, retarget the login manager first if the desktop changed,
+        // so the freshly-enabled DM below becomes the boot default.
+        if mode == Mode::Sync {
+            switched_desktop = desktop::switch_default(d, ctx);
+        }
         desktop::apply(d, ctx)?;
         if !d.aur.is_empty() {
             println!("  · note: AUR packages pulled — {}", d.aur.join(", "));
@@ -117,7 +151,11 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     enable_services(manifest, ctx)?;
     run_hooks("post_install", &manifest.post_install, ctx)?;
 
-    println!("\n✓ Done.{}", if ctx.dry_run { " (dry-run — no changes made)" } else { "" });
+    let done = if mode == Mode::Sync { "Synced" } else { "Done" };
+    println!("\n✓ {done}.{}", if ctx.dry_run { " (dry-run — no changes made)" } else { "" });
+    if switched_desktop && !ctx.dry_run {
+        println!("  · log out (or reboot) to enter your new desktop.");
+    }
     Ok(())
 }
 
