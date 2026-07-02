@@ -113,7 +113,14 @@ pub fn display_manager(key: &str) -> Option<DisplayManager> {
         "sddm" => ("sddm", "sddm", "sddm.service"),
         "lightdm" => ("lightdm", "lightdm", "lightdm.service"),
         "greetd" => ("greetd", "greetd", "greetd.service"),
-        "ly" => ("ly", "ly", "ly.service"),
+        // ly ships a per-tty template unit (`ly@.service`), enabled on tty2 by
+        // Arch convention — there is no plain `ly.service`, and it does NOT
+        // provide the `display-manager.service` alias the graphical DMs do
+        // (it's a TUI greeter bound to a VT). So `switch_default` can't detect
+        // a running ly by the alias symlink: switching *to* ly works (the old
+        // alias DM is disabled, ly@tty2 enabled), but switching *away from* ly
+        // to a graphical DM won't auto-disable ly — a documented edge case.
+        "ly" => ("ly", "ly", "ly@tty2.service"),
         "cosmic-greeter" => ("cosmic-greeter", "cosmic-greeter", "cosmic-greeter.service"),
         _ => return None,
     };
@@ -718,5 +725,13 @@ mod tests {
         let m = Manifest::from_str(json).unwrap();
         let r = resolve(&m).unwrap().unwrap();
         assert_eq!(r.dm.as_ref().unwrap().service, "greetd.service");
+    }
+
+    #[test]
+    fn ly_maps_to_its_per_tty_template_unit() {
+        // Modern ly ships `ly@.service` (enabled on tty2), not `ly.service` —
+        // the wrong name would fail at `systemctl enable`.
+        let dm = display_manager("ly").unwrap();
+        assert_eq!(dm.service, "ly@tty2.service");
     }
 }

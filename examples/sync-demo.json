@@ -3,7 +3,7 @@
   "meta": {
     "name": "Sync Demo (edited)",
     "author": "you",
-    "description": "The keybindings-demo manifest after an edit: same niri desktop, but the login manager switched to `ly`. Running `manifest sync` on it swaps the default login manager in place — proving edit-json-then-sync applies changes to a running system.",
+    "description": "The keybindings-demo manifest after an edit: same niri desktop, but the login manager switched from greetd to gdm. Running `manifest sync` on it disables greetd and makes gdm the default in place — proving edit-json-then-sync applies changes to a running system.",
     "tags": ["niri", "wayland", "sync"],
     "version": "1.0.0",
     "license": "free"
@@ -24,7 +24,7 @@
     }
   ],
   "desktop": "niri",
-  "display_manager": "ly",
+  "display_manager": "gdm",
   "packages": [
     "firefox",
     "brightnessctl"
