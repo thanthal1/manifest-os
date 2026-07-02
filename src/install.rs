@@ -20,6 +20,7 @@ use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
 use crate::system;
+use crate::theming;
 use crate::users;
 use crate::wallpaper;
 use anyhow::Result;
@@ -82,14 +83,23 @@ pub fn run(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
         }
     }
 
+    // The manifest's primary account — user-level config files (theme,
+    // keybindings) are written into *its* home, since the install itself runs
+    // as a throwaway bootstrap user.
+    let primary_user = manifest.users.first().map(|u| u.name.as_str());
+
     if let Some(w) = &manifest.wallpaper {
         step("Setting the wallpaper");
         wallpaper::apply(w, manifest.desktop.as_deref(), ctx)?;
     }
 
+    if let Some(th) = &manifest.theme {
+        step("Applying the theme");
+        theming::apply(th, manifest.desktop.as_deref(), primary_user, ctx)?;
+    }
+
     if !manifest.keybindings.is_empty() {
         step("Setting up keybindings");
-        let primary_user = manifest.users.first().map(|u| u.name.as_str());
         keybindings::apply(&manifest.keybindings, manifest.desktop.as_deref(), primary_user, ctx)?;
     }
 

@@ -10,6 +10,20 @@ use crate::manifest::FileSpec;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+/// A [`FileSpec`] for a file under a home directory (`rel_path` like
+/// `.config/gtk-3.0/settings.ini`). With a declared primary user this becomes
+/// an absolute `/home/<user>/...` path owned by that user — required during a
+/// disk install, where the installer runs as a throwaway bootstrap account,
+/// so `~` would be the *wrong* home. Without one it falls back to `~/...`
+/// (correct when `manifest install` is run directly on an existing system).
+pub fn home_spec(primary_user: Option<&str>, rel_path: &str, content: String) -> FileSpec {
+    let (path, owner) = match primary_user {
+        Some(user) => (format!("/home/{user}/{rel_path}"), Some(format!("{user}:{user}"))),
+        None => (format!("~/{rel_path}"), None),
+    };
+    FileSpec { path, content, mode: None, owner }
+}
+
 pub fn apply(files: &[FileSpec], ctx: &Ctx) -> Result<()> {
     for f in files {
         let (path, user_level) = resolve(&f.path, ctx);

@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Theme Demo",
+    "author": "you",
+    "description": "Proves out the universal `theme` field: one declared block sets the GTK theme, icons, cursor, fonts and dark preference across whatever desktop the manifest installs.",
+    "tags": ["niri", "wayland", "theme"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "theme-demo",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us"
+  },
+  "users": [
+    {
+      "name": "demo",
+      "groups": ["wheel", "video", "input"],
+      "shell": "/bin/bash",
+      "sudo": true,
+      "password": "demo"
+    }
+  ],
+  "desktop": "niri",
+  "display_manager": "greetd",
+  "packages": [
+    "materia-gtk-theme",
+    "papirus-icon-theme",
+    "ttf-jetbrains-mono"
+  ],
+  "theme": {
+    "gtk": "Materia-dark",
+    "icons": "Papirus-Dark",
+    "cursor": "Adwaita",
+    "cursor_size": 24,
+    "font": "Noto Sans 11",
+    "monospace_font": "JetBrains Mono 11",
+    "dark": true
+  },
+  "keybindings": [
+    { "keys": "SUPER+Enter", "action": "terminal" },
+    { "keys": "SUPER+Q", "action": "close_window" }
+  ]
+}

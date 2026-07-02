@@ -81,6 +81,12 @@ pub struct Manifest {
     #[serde(default)]
     pub keybindings: Vec<Keybinding>,
 
+    /// Visual theme — GTK/widget theme, icons, cursor, fonts, dark preference —
+    /// applied across whatever environment the manifest sets up. The theme
+    /// packages themselves go in `packages`; this block only *selects* them.
+    /// See [`crate::theming`].
+    pub theme: Option<Theme>,
+
     /// Shell commands run *before* package installation. Escape hatch only.
     #[serde(default)]
     pub pre_install: Vec<String>,
@@ -158,6 +164,53 @@ pub enum Wallpaper {
         source: String,
         mode: Option<String>,
     },
+}
+
+/// The visual theme block:
+/// ```json
+/// "theme": {
+///   "gtk": "Materia-dark",
+///   "icons": "Papirus-Dark",
+///   "cursor": "Adwaita",
+///   "cursor_size": 24,
+///   "font": "Noto Sans 11",
+///   "monospace_font": "JetBrains Mono 11",
+///   "dark": true
+/// }
+/// ```
+/// Every field is optional — set only what the manifest cares about. Names are
+/// the theme's installed directory name (what `ls /usr/share/themes`,
+/// `/usr/share/icons` show); fonts are "Family Size" in GTK font syntax.
+#[derive(Debug, Deserialize)]
+pub struct Theme {
+    /// GTK / widget theme name, e.g. "Adwaita-dark", "Materia".
+    pub gtk: Option<String>,
+    /// Icon theme name, e.g. "Papirus-Dark".
+    pub icons: Option<String>,
+    /// Cursor theme name, e.g. "Adwaita", "Bibata-Modern-Classic".
+    pub cursor: Option<String>,
+    /// Cursor size in pixels (commonly 24, 32, 48).
+    pub cursor_size: Option<u32>,
+    /// Interface font, e.g. "Noto Sans 11".
+    pub font: Option<String>,
+    /// Monospace font, e.g. "JetBrains Mono 11".
+    pub monospace_font: Option<String>,
+    /// Prefer dark variants app-wide (GNOME color-scheme, GTK prefer-dark,
+    /// KDE BreezeDark color scheme).
+    pub dark: Option<bool>,
+}
+
+impl Theme {
+    /// Whether the block sets anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.gtk.is_none()
+            && self.icons.is_none()
+            && self.cursor.is_none()
+            && self.cursor_size.is_none()
+            && self.font.is_none()
+            && self.monospace_font.is_none()
+            && self.dark.is_none()
+    }
 }
 
 /// A single custom keyboard shortcut, in Manifest OS's universal

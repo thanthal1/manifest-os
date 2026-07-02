@@ -17,6 +17,7 @@ pub mod pacman;
 pub mod probe;
 pub mod survey;
 pub mod system;
+pub mod theming;
 pub mod tui;
 pub mod users;
 pub mod wallpaper;

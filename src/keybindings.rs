@@ -38,7 +38,7 @@
 
 use crate::exec::Ctx;
 use crate::files;
-use crate::manifest::{FileSpec, Keybinding};
+use crate::manifest::Keybinding;
 use anyhow::Result;
 
 /// `primary_user` is the manifest's first declared account (`users[0].name`),
@@ -105,18 +105,10 @@ pub fn apply(bindings: &[Keybinding], desktop: Option<&str>, primary_user: Optio
 }
 
 /// `rel_path` is relative to a home directory, e.g. `.config/niri/config.kdl`.
-fn write_config(ctx: &Ctx, primary_user: Option<&str>, rel_path: &str, content: String) -> Result<()> {
-    let (path, owner) = home_path(primary_user, rel_path);
-    files::apply(&[FileSpec { path, content, mode: None, owner }], ctx)
-}
-
-/// See `apply`'s doc comment for why a declared user gets an absolute,
+/// See [`files::home_spec`] for why a declared user gets an absolute,
 /// explicitly-owned path instead of `~/...`.
-fn home_path(primary_user: Option<&str>, rel_path: &str) -> (String, Option<String>) {
-    match primary_user {
-        Some(user) => (format!("/home/{user}/{rel_path}"), Some(format!("{user}:{user}"))),
-        None => (format!("~/{rel_path}"), None),
-    }
+fn write_config(ctx: &Ctx, primary_user: Option<&str>, rel_path: &str, content: String) -> Result<()> {
+    files::apply(&[files::home_spec(primary_user, rel_path, content)], ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -803,16 +795,16 @@ mod tests {
 
     #[test]
     fn declared_user_gets_an_absolute_owned_path_not_bootstrap_home() {
-        let (path, owner) = home_path(Some("alice"), ".config/niri/config.kdl");
-        assert_eq!(path, "/home/alice/.config/niri/config.kdl");
-        assert_eq!(owner.as_deref(), Some("alice:alice"));
+        let spec = files::home_spec(Some("alice"), ".config/niri/config.kdl", String::new());
+        assert_eq!(spec.path, "/home/alice/.config/niri/config.kdl");
+        assert_eq!(spec.owner.as_deref(), Some("alice:alice"));
     }
 
     #[test]
     fn no_declared_user_falls_back_to_tilde() {
-        let (path, owner) = home_path(None, ".config/niri/config.kdl");
-        assert_eq!(path, "~/.config/niri/config.kdl");
-        assert!(owner.is_none());
+        let spec = files::home_spec(None, ".config/niri/config.kdl", String::new());
+        assert_eq!(spec.path, "~/.config/niri/config.kdl");
+        assert!(spec.owner.is_none());
     }
 
     #[test]
