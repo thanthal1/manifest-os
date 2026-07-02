@@ -1,111 +1,122 @@
-//! `manifest diff` — preview what applying a manifest would change.
+//! Diffing two manifests — the engine behind `manifest diff` and the desktop
+//! app's change previews.
 //!
-//! Compares a new manifest against the **last-applied** one (recorded in the
-//! git history by [`crate::history`]). Because the manifest is the system's
-//! declared state, that comparison is exactly "what `sync` would do": which
-//! packages get added, whether the desktop / login manager / kernel / theme
-//! changes, and so on. With no history yet (a fresh system), every field is
-//! shown as new.
-//!
-//! This is a *declared-state* diff, not a live-system scan — it answers "how
-//! does this manifest differ from the one I last applied", which is the
-//! question you ask before an edit-then-sync.
+//! [`compute`] returns a structured list of [`Change`]s between a `new`
+//! manifest and the `current` one; the CLI [`run`] prints them, and the GUI
+//! renders them as coloured rows. Because a manifest is the system's declared
+//! state, this is exactly "what `sync` would change": packages added, whether
+//! the desktop / login manager / theme changes, and so on.
 
 use crate::manifest::{Manifest, Theme, Wallpaper};
 
-/// Print the diff of `new` against `current` (the last-applied manifest, or
-/// `None` on a fresh system). Returns nothing — it's a report.
+/// Whether a change adds something, removes it, or alters a value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChangeKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+/// One difference between two manifests, in plain language.
+#[derive(Clone, Debug)]
+pub struct Change {
+    pub kind: ChangeKind,
+    /// e.g. "Desktop", "Apps", "Theme".
+    pub category: String,
+    /// e.g. "niri → GNOME", "firefox", "Dark mode: off → on".
+    pub detail: String,
+}
+
+/// The structured difference of `new` against `current` (or `None` for a fresh
+/// system, where everything reads as added). An empty result means the system
+/// already matches `new`.
+pub fn compute(new: &Manifest, current: Option<&Manifest>) -> Vec<Change> {
+    let empty = Manifest::from_str(r#"{"schema_version":"1.0.0"}"#).expect("valid empty manifest");
+    let old = current.unwrap_or(&empty);
+    let mut out = Vec::new();
+
+    list_changes(&mut out, "Apps", &old.packages, &new.packages);
+    value_change(&mut out, "Desktop", old.desktop.as_deref(), new.desktop.as_deref());
+    value_change(&mut out, "Login screen", old.display_manager.as_deref(), new.display_manager.as_deref());
+    value_change(&mut out, "Kernel", old.system.kernel.as_deref(), new.system.kernel.as_deref());
+    value_change(&mut out, "Computer name", old.system.hostname.as_deref(), new.system.hostname.as_deref());
+    value_change(&mut out, "Language", old.system.locale.as_deref(), new.system.locale.as_deref());
+    value_change(&mut out, "Time zone", old.system.timezone.as_deref(), new.system.timezone.as_deref());
+    value_change(&mut out, "Keyboard", old.system.keymap.as_deref(), new.system.keymap.as_deref());
+
+    if let (Some(o), Some(n)) = wall_pair(old, new) {
+        if o != n {
+            out.push(changed("Wallpaper", &format!("{o} → {n}")));
+        }
+    }
+
+    theme_changes(&mut out, old.theme.as_ref(), new.theme.as_ref());
+
+    if old.keybindings.len() != new.keybindings.len() {
+        out.push(changed(
+            "Shortcuts",
+            &format!("{} → {} custom shortcut(s)", old.keybindings.len(), new.keybindings.len()),
+        ));
+    }
+
+    list_changes(&mut out, "Services", &old.services.system, &new.services.system);
+    let old_users: Vec<String> = old.users.iter().map(|u| u.name.clone()).collect();
+    let new_users: Vec<String> = new.users.iter().map(|u| u.name.clone()).collect();
+    list_changes(&mut out, "Users", &old_users, &new_users);
+
+    out
+}
+
+/// Print the diff (CLI `manifest diff`).
 pub fn run(new: &Manifest, current: Option<&Manifest>) {
     match current {
         Some(_) => println!("Changes this manifest would apply (vs. the last-applied one):\n"),
         None => println!("No manifest on record yet — showing everything as new:\n"),
     }
-    // An empty stand-in so "no history" naturally renders as all-additions.
-    let empty = Manifest::from_str(r#"{"schema_version":"1.0.0"}"#).expect("valid empty manifest");
-    let old = current.unwrap_or(&empty);
-
-    let mut any = false;
-
-    // Packages — the most common edit. sync never uninstalls, so removed
-    // entries are informational (they just stop being declared).
-    any |= list_diff("Packages", &old.packages, &new.packages);
-
-    // Single-value fields: old → new, only when they differ.
-    any |= field("Desktop", old.desktop.as_deref(), new.desktop.as_deref());
-    any |= field("Login manager", old.display_manager.as_deref(), new.display_manager.as_deref());
-    any |= field("Kernel", old.system.kernel.as_deref(), new.system.kernel.as_deref());
-    any |= field("Hostname", old.system.hostname.as_deref(), new.system.hostname.as_deref());
-    any |= field("Locale", old.system.locale.as_deref(), new.system.locale.as_deref());
-    any |= field("Timezone", old.system.timezone.as_deref(), new.system.timezone.as_deref());
-    any |= field("Keymap", old.system.keymap.as_deref(), new.system.keymap.as_deref());
-
-    // Repos.
-    any |= field("multilib", Some(yesno(old.repos.multilib)), Some(yesno(new.repos.multilib)));
-    any |= field("cachyos repo", Some(yesno(old.repos.cachyos)), Some(yesno(new.repos.cachyos)));
-
-    // Wallpaper (compare the source).
-    any |= field(
-        "Wallpaper",
-        old.wallpaper.as_ref().map(wallpaper_src),
-        new.wallpaper.as_ref().map(wallpaper_src),
-    );
-
-    // Theme — one line per changed sub-field.
-    any |= theme_diff(old.theme.as_ref(), new.theme.as_ref());
-
-    // Keybindings / services / users — by count and membership.
-    any |= field(
-        "Keybindings",
-        Some(old.keybindings.len().to_string()),
-        Some(new.keybindings.len().to_string()),
-    );
-    let old_svc: Vec<String> = old.services.system.clone();
-    let new_svc: Vec<String> = new.services.system.clone();
-    any |= list_diff("Services", &old_svc, &new_svc);
-    let old_users: Vec<String> = old.users.iter().map(|u| u.name.clone()).collect();
-    let new_users: Vec<String> = new.users.iter().map(|u| u.name.clone()).collect();
-    any |= list_diff("Users", &old_users, &new_users);
-
-    if !any {
+    let changes = compute(new, current);
+    if changes.is_empty() {
         println!("  (no differences — the system already matches this manifest)");
-    } else {
-        println!("\nRun `manifest sync <file>` to apply. Packages are never uninstalled;");
-        println!("removed (-) entries just stop being declared.");
+        return;
+    }
+    for c in &changes {
+        let sign = match c.kind {
+            ChangeKind::Added => "+",
+            ChangeKind::Removed => "-",
+            ChangeKind::Changed => "~",
+        };
+        println!("  {sign} {}: {}", c.category, c.detail);
+    }
+    println!("\nRun `manifest sync <file>` to apply. Apps are never uninstalled;");
+    println!("removed (-) entries just stop being declared.");
+}
+
+// ---------------------------------------------------------------------------
+
+fn changed(category: &str, detail: &str) -> Change {
+    Change { kind: ChangeKind::Changed, category: category.into(), detail: detail.into() }
+}
+
+/// A single-value field: emit a `Changed` when old and new differ (`(none)`
+/// stands in for an unset value).
+fn value_change(out: &mut Vec<Change>, category: &str, old: Option<&str>, new: Option<&str>) {
+    let o = old.unwrap_or("(none)");
+    let n = new.unwrap_or("(none)");
+    if o != n {
+        out.push(changed(category, &format!("{o} → {n}")));
     }
 }
 
-/// A "Label: old → new" line, printed only when the values differ. `None`
-/// renders as `(none)`. Returns whether it printed (i.e. whether it changed).
-fn field(label: &str, old: Option<impl AsRef<str>>, new: Option<impl AsRef<str>>) -> bool {
-    let o = old.as_ref().map(|s| s.as_ref()).unwrap_or("(none)");
-    let n = new.as_ref().map(|s| s.as_ref()).unwrap_or("(none)");
-    if o == n {
-        return false;
+/// Added/removed entries between two lists.
+fn list_changes(out: &mut Vec<Change>, category: &str, old: &[String], new: &[String]) {
+    for a in new.iter().filter(|p| !old.contains(p)) {
+        out.push(Change { kind: ChangeKind::Added, category: category.into(), detail: a.clone() });
     }
-    println!("  {label}:  {o} → {n}");
-    true
+    for r in old.iter().filter(|p| !new.contains(p)) {
+        out.push(Change { kind: ChangeKind::Removed, category: category.into(), detail: r.clone() });
+    }
 }
 
-/// Added (`+`) / removed (`-`) entries between two lists. Returns whether any
-/// difference was printed.
-fn list_diff(label: &str, old: &[String], new: &[String]) -> bool {
-    let added: Vec<&String> = new.iter().filter(|p| !old.contains(p)).collect();
-    let removed: Vec<&String> = old.iter().filter(|p| !new.contains(p)).collect();
-    if added.is_empty() && removed.is_empty() {
-        return false;
-    }
-    println!("  {label}:");
-    for a in &added {
-        println!("    + {a}");
-    }
-    for r in &removed {
-        println!("    - {r}");
-    }
-    true
-}
-
-/// One line per changed theme sub-field.
-fn theme_diff(old: Option<&Theme>, new: Option<&Theme>) -> bool {
+fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>) {
     let none = Theme {
         gtk: None,
         icons: None,
@@ -117,29 +128,25 @@ fn theme_diff(old: Option<&Theme>, new: Option<&Theme>) -> bool {
     };
     let o = old.unwrap_or(&none);
     let n = new.unwrap_or(&none);
-    let mut changed = false;
-    changed |= field("Theme (gtk)", o.gtk.as_deref(), n.gtk.as_deref());
-    changed |= field("Theme (icons)", o.icons.as_deref(), n.icons.as_deref());
-    changed |= field("Theme (cursor)", o.cursor.as_deref(), n.cursor.as_deref());
-    changed |= field(
-        "Theme (font)",
-        o.font.as_deref(),
-        n.font.as_deref(),
-    );
-    changed |= field(
-        "Theme (dark)",
-        o.dark.map(yesno),
-        n.dark.map(yesno),
-    );
-    changed
+    value_change(out, "App theme", o.gtk.as_deref(), n.gtk.as_deref());
+    value_change(out, "Icons", o.icons.as_deref(), n.icons.as_deref());
+    value_change(out, "Cursor", o.cursor.as_deref(), n.cursor.as_deref());
+    value_change(out, "Font", o.font.as_deref(), n.font.as_deref());
+    let od = o.dark.map(yesno);
+    let nd = n.dark.map(yesno);
+    value_change(out, "Dark mode", od.as_deref(), nd.as_deref());
+}
+
+fn wall_pair(old: &Manifest, new: &Manifest) -> (Option<String>, Option<String>) {
+    (old.wallpaper.as_ref().map(wallpaper_src), new.wallpaper.as_ref().map(wallpaper_src))
 }
 
 fn wallpaper_src(w: &Wallpaper) -> String {
     w.source().to_string()
 }
 
-fn yesno(b: bool) -> String {
-    if b { "yes".to_string() } else { "no".to_string() }
+fn yesno(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
 }
 
 #[cfg(test)]
@@ -151,49 +158,43 @@ mod tests {
     }
 
     #[test]
-    fn list_diff_reports_added_and_removed() {
-        assert!(list_diff("P", &["a".into(), "b".into()], &["b".into(), "c".into()]));
-        // identical lists → no diff
-        assert!(!list_diff("P", &["a".into()], &["a".into()]));
+    fn packages_added_and_removed() {
+        let old = parse(r#"{"schema_version":"1.0.0","packages":["vim","git"]}"#);
+        let new = parse(r#"{"schema_version":"1.0.0","packages":["git","firefox"]}"#);
+        let changes = compute(&new, Some(&old));
+        assert!(changes.iter().any(|c| c.kind == ChangeKind::Added && c.detail == "firefox"));
+        assert!(changes.iter().any(|c| c.kind == ChangeKind::Removed && c.detail == "vim"));
+        assert!(!changes.iter().any(|c| c.detail == "git")); // unchanged
     }
 
     #[test]
-    fn field_prints_only_on_change() {
-        assert!(field("D", Some("niri"), Some("gnome")));
-        assert!(!field("D", Some("niri"), Some("niri")));
-        assert!(field("D", None::<&str>, Some("gnome")));
-        assert!(!field("D", None::<&str>, None::<&str>));
+    fn desktop_and_theme_changes() {
+        let old = parse(r#"{"schema_version":"1.0.0","desktop":"niri","theme":{"dark":false}}"#);
+        let new = parse(r#"{"schema_version":"1.0.0","desktop":"gnome","theme":{"dark":true}}"#);
+        let changes = compute(&new, Some(&old));
+        assert!(changes.iter().any(|c| c.category == "Desktop" && c.detail == "niri → gnome"));
+        assert!(changes.iter().any(|c| c.category == "Dark mode" && c.detail == "off → on"));
     }
 
     #[test]
-    fn theme_diff_detects_subfield_change() {
-        let a = parse(r#"{"schema_version":"1.0.0","theme":{"gtk":"Adwaita"}}"#);
-        let b = parse(r#"{"schema_version":"1.0.0","theme":{"gtk":"Materia-dark","dark":true}}"#);
-        assert!(theme_diff(a.theme.as_ref(), b.theme.as_ref()));
-        assert!(!theme_diff(a.theme.as_ref(), a.theme.as_ref()));
+    fn identical_manifests_yield_no_changes() {
+        let m = parse(r#"{"schema_version":"1.0.0","desktop":"niri","packages":["git"]}"#);
+        assert!(compute(&m, Some(&m)).is_empty());
     }
 
     #[test]
-    fn run_against_none_does_not_panic_and_shows_new() {
-        // Smoke: a fresh-system diff (no history) just prints additions.
+    fn no_current_shows_everything_as_added() {
+        let new = parse(r#"{"schema_version":"1.0.0","desktop":"gnome","packages":["firefox"]}"#);
+        let changes = compute(&new, None);
+        assert!(changes.iter().any(|c| c.category == "Desktop" && c.detail == "(none) → gnome"));
+        assert!(changes.iter().any(|c| c.kind == ChangeKind::Added && c.detail == "firefox"));
+    }
+
+    #[test]
+    fn run_smoke_both_paths() {
         let new = parse(r#"{"schema_version":"1.0.0","desktop":"gnome","packages":["firefox"]}"#);
         run(&new, None);
-    }
-
-    #[test]
-    fn run_against_current_exercises_the_changed_path() {
-        // Smoke: a DM switch + package swap against a prior manifest.
-        let old = parse(r#"{"schema_version":"1.0.0","desktop":"niri","display_manager":"greetd","packages":["vim"]}"#);
-        let new = parse(r#"{"schema_version":"1.0.0","desktop":"niri","display_manager":"gdm","packages":["neovim"]}"#);
+        let old = parse(r#"{"schema_version":"1.0.0","desktop":"niri"}"#);
         run(&new, Some(&old));
-    }
-
-    #[test]
-    fn identical_manifests_report_no_differences() {
-        // Every field-level comparator must return false for identical inputs.
-        let m = parse(r#"{"schema_version":"1.0.0","desktop":"niri","packages":["git","vim"]}"#);
-        assert!(!list_diff("P", &m.packages, &m.packages));
-        assert!(!field("D", m.desktop.as_deref(), m.desktop.as_deref()));
-        assert!(!theme_diff(m.theme.as_ref(), m.theme.as_ref()));
     }
 }

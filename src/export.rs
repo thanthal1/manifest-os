@@ -50,6 +50,19 @@ pub fn run(output: Option<&Path>, install_hook: bool, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// The current system captured as pretty-printed manifest JSON. Read-only (no
+/// root needed) — used by the desktop app to snapshot and diff.
+pub fn capture_json() -> String {
+    serde_json::to_string_pretty(&capture()).unwrap_or_default() + "\n"
+}
+
+/// The current system captured as a parsed [`Manifest`], for diffing against
+/// another manifest.
+pub fn capture_manifest() -> crate::manifest::Manifest {
+    crate::manifest::Manifest::from_str(&capture_json())
+        .expect("captured manifest is always schema-valid")
+}
+
 /// Build the manifest describing the current system.
 fn capture() -> Value {
     let mut m = Map::new();
