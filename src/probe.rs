@@ -4,6 +4,7 @@
 //! both front-ends share the same disk/network/manifest discovery and the same
 //! plan type, so the engine has exactly one input shape.
 
+use serde::Deserialize;
 use std::process::Command;
 use std::time::Duration;
 
@@ -17,54 +18,141 @@ pub struct Disk {
 /// The daily-driver account a friendly install creates. Collected by the GUI
 /// ("What's your name?" + a password); the password is only ever fed to
 /// `chpasswd` over stdin, never written to disk or logged.
+#[derive(Default, Deserialize)]
 pub struct Account {
+    #[serde(default)]
     pub full_name: String,
     pub username: String,
     pub password: String,
 }
 
-/// What a front-end collected — handed back to the caller to execute.
+/// An additional (non-primary) user account. Kept separate from [`Account`] —
+/// no `full_name`, and sudo is opt-in per user rather than assumed.
+#[derive(Deserialize)]
+pub struct ExtraUser {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub sudo: bool,
+}
+
+/// A static IPv4 configuration for the install (and, if requested, the
+/// installed system). All install-time networking otherwise assumes DHCP.
+#[derive(Default, Deserialize)]
+pub struct StaticIp {
+    /// CIDR, e.g. "192.168.1.50/24".
+    pub address: String,
+    pub gateway: String,
+    /// Comma-separated resolver IPs, e.g. "1.1.1.1,8.8.8.8".
+    #[serde(default)]
+    pub dns: String,
+}
+
+/// What a front-end collected — handed back to the caller to execute. Also the
+/// shape of a `manifest provision --config file.json` preseed file, so an
+/// unattended install can skip the wizard/flags entirely; every field short of
+/// `disk`/`manifest` has a sane empty/off default so a partial preseed file
+/// still parses.
+#[derive(Default, Deserialize)]
 pub struct InstallPlan {
     pub disk: String,
-    /// `"erase"` (wipe the whole disk) or `"alongside"` (shrink Windows and
-    /// dual-boot).
+    /// `"erase"` (wipe the whole disk) or `"alongside"` (shrink an existing OS
+    /// and dual-boot).
+    #[serde(default)]
     pub install_mode: String,
     /// For `alongside`: how many GiB to carve out for Manifest OS (None = a
     /// sensible default).
+    #[serde(default)]
     pub alongside_gib: Option<u32>,
+    #[serde(default)]
     pub filesystem: String,
     /// Persistent swap for the *installed* system, one of:
     /// `"none"`, `"zram"` (compressed RAM swap via zram-generator),
     /// `"swapfile"` (a file on root), or `"partition"` (a dedicated partition).
     /// Independent of the always-on install-time zram that keeps low-memory
     /// machines from OOMing during pacstrap/AUR builds.
+    #[serde(default)]
     pub swap: String,
     /// Size in GiB for `swapfile`/`partition` swap (ignored otherwise).
+    #[serde(default)]
     pub swap_size_gib: Option<u32>,
     /// A bundled example name, a local path, or an `http(s)` URL.
+    #[serde(default)]
     pub manifest: String,
     /// Answers to the manifest's `survey` questions, as `(id, value)` pairs.
     /// Written to an `--answers` file so `{{id}}` tokens resolve during install.
+    #[serde(default)]
     pub answers: Vec<(String, String)>,
     /// Daily-driver account to create (None = use whatever the manifest declares).
+    #[serde(default)]
     pub account: Option<Account>,
     /// Hostname override (None = use the manifest's, or the default).
+    #[serde(default)]
     pub hostname: Option<String>,
-    /// Encrypt the root partition with LUKS2 (erase installs only).
-    pub encrypt: bool,
+    /// `"none"` | `"full"` (LUKS2 the whole root) | `"home"` (LUKS2 a separate
+    /// `/home` partition only, root stays plaintext). "full"/"home" are
+    /// mutually exclusive and erase-install only.
+    #[serde(default)]
+    pub encrypt_mode: String,
     /// LUKS passphrase (sensitive — fed to cryptsetup over stdin, never logged).
+    #[serde(default)]
     pub encrypt_passphrase: String,
+    /// Root partition size in GiB when `encrypt_mode == "home"` (the rest of
+    /// the disk becomes /home). Ignored otherwise. None = a sensible default.
+    #[serde(default)]
+    pub root_gib: Option<u32>,
+    /// Put the root filesystem on an LVM logical volume (a single LV filling
+    /// one volume group) instead of directly on the partition/mapper —
+    /// composes with encryption (LVM-on-LUKS) and RAID (LVM-on-RAID).
+    #[serde(default)]
+    pub lvm: bool,
+    /// A second disk to mirror the root onto via mdadm RAID1. Only the root
+    /// is mirrored — the ESP and any swap partition stay on the primary disk
+    /// only (the common, simpler tradeoff most installers make).
+    #[serde(default)]
+    pub raid1_disk: Option<String>,
     /// Timezone / locale / console keymap overrides (None = the manifest's).
+    #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default)]
     pub locale: Option<String>,
+    #[serde(default)]
     pub keymap: Option<String>,
     /// Set a root password (sensitive, stdin-only). None = leave root locked
     /// (the wheel/sudo account is the way in — the safer default).
+    #[serde(default)]
     pub root_password: Option<String>,
     /// Log the created account in automatically (skip the login screen).
+    #[serde(default)]
     pub autologin: bool,
     /// Install the proprietary NVIDIA driver (offered when an NVIDIA GPU is seen).
+    #[serde(default)]
     pub install_nvidia: bool,
+    /// Additional accounts beyond the primary one, each with its own sudo choice.
+    #[serde(default)]
+    pub extra_users: Vec<ExtraUser>,
+    /// Install and enable CUPS (printing).
+    #[serde(default)]
+    pub install_printing: bool,
+    /// A local script (on the install medium) to run inside the chroot after
+    /// everything else — the escape hatch for one-off customization beyond
+    /// what the manifest declares.
+    #[serde(default)]
+    pub post_install_script: Option<String>,
+    /// Static IPv4 for the install itself (and persisted into the target via a
+    /// systemd-networkd profile). None = DHCP, the default.
+    #[serde(default)]
+    pub static_ip: Option<StaticIp>,
+    /// HTTP(S) proxy for the install's downloads (pacman + curl), e.g.
+    /// "http://10.0.0.1:3128". Applied as `http_proxy`/`https_proxy`.
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// A VLAN to bring up before installing: tag `vlan_id` on `vlan_parent`
+    /// (e.g. id 100 on "eth0" -> "eth0.100"). Both must be set together.
+    #[serde(default)]
+    pub vlan_id: Option<u16>,
+    #[serde(default)]
+    pub vlan_parent: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +175,20 @@ pub fn wifi_device() -> Option<String> {
         }
     }
     None
+}
+
+/// The first non-loopback network interface, sorted (so e.g. `eth0` beats
+/// `wlan0` deterministically) — the default target for static-IP config when
+/// nothing more specific is asked.
+pub fn primary_iface() -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/net").ok()?;
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n != "lo")
+        .collect();
+    names.sort();
+    names.into_iter().next()
 }
 
 /// Strip ANSI escape sequences (iwctl colorizes its table output).

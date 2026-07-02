@@ -50,6 +50,10 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
         if uefi { "UEFI" } else { "BIOS" }
     );
 
+    // Static IP / VLAN / proxy, before any network check — the network itself
+    // may depend on them.
+    apply_network_live(plan, ctx);
+
     // Fail fast — before we touch (and would wipe/shrink) the disk — if we can't
     // reach the package mirrors. pacstrap needs the network; this turns a cryptic
     // "pacstrap exited 1" into a clear message, with the disk still untouched.
@@ -62,66 +66,55 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     // the same live session) keep the kernel from re-reading the partition table,
     // so sfdisk/sgdisk fail with "Device or resource busy" / atomic-commit errors.
     free_disk(&plan.disk, ctx);
-    // When encrypting, the raw partition that holds the LUKS container — kept so
-    // we can write crypttab + the cryptdevice= kernel param by its UUID.
-    let mut luks_part: Option<String> = None;
-    let parts = if alongside {
-        if plan.encrypt {
-            bail!("disk encryption is only available for a full-disk (erase) install, not alongside an existing OS");
+    let storage = if alongside {
+        if plan.encrypt_mode != "none" || plan.lvm || plan.raid1_disk.is_some() {
+            bail!("encryption, LVM and RAID are only available for a full-disk (erase) install, not alongside an existing OS");
         }
         // Dual boot: shrink Windows and install in the freed space, reusing its
         // ESP. carve_alongside formats only the new root (never the ESP/Windows).
-        carve_alongside(plan, ctx)?
+        StorageInfo { parts: carve_alongside(plan, ctx)?, root_luks_part: None, home_luks_part: None }
     } else {
-        // Erase: wipe and lay out the whole disk. A dedicated swap partition
-        // (size in GiB) is the only choice that changes the layout; default to
-        // 2 GiB if "partition" was chosen without one.
-        let swap_part_gib: Option<u32> = if plan.swap == "partition" {
-            Some(plan.swap_size_gib.filter(|&g| g > 0).unwrap_or(2))
-        } else {
-            None
-        };
-        partition(&plan.disk, uefi, swap_part_gib, ctx)?;
-        let mut parts = partition_names(&plan.disk, uefi, swap_part_gib.is_some());
-        format_aux(&parts, ctx)?; // ESP + swap (the root is handled below)
-        if plan.encrypt {
-            setup_luks(&parts.root, &plan.encrypt_passphrase, ctx)?;
-            luks_part = Some(parts.root.clone());
-            parts.root = LUKS_MAPPER.to_string(); // format + mount the unlocked mapper
+        if let Some(second) = &plan.raid1_disk {
+            if second == &plan.disk {
+                bail!("the RAID1 mirror disk must be different from the primary disk");
+            }
         }
-        mkfs_root(&parts.root, &plan.filesystem, ctx)?;
-        parts
+        build_storage(plan, uefi, ctx)?
     };
-    mount(&parts, ctx)?;
+    let parts = &storage.parts;
+    mount(parts, ctx)?;
     setup_install_zram(ctx)?; // always-on: keeps low-memory machines off the OOM killer
 
     pacstrap(ctx)?;
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
     install_fs_tools(&plan.filesystem, ctx)?;
-    setup_persistent_swap(plan, &parts, ctx)?;
-    let luks_systemd = luks_part.is_some() && initramfs_uses_systemd(ctx);
-    if let Some(lp) = &luks_part {
-        configure_encryption(lp, luks_systemd, ctx)?;
-    }
+    setup_persistent_swap(plan, parts, ctx)?;
+    configure_storage_boot(plan, &storage, ctx)?;
+    persist_network_config(plan, ctx)?;
     brand_system(ctx)?;
     create_bootstrap_user(ctx)?;
 
     let manifest_in_root = stage_manifest(&plan.manifest, ctx)?;
     ensure_boot_block(ctx)?;
     apply_system_overrides(plan, ctx)?;
-    if let Some(lp) = &luks_part {
-        inject_crypt_cmdline(lp, luks_systemd, ctx)?;
+    if let Some(root_luks) = &storage.root_luks_part {
+        inject_crypt_cmdline(root_luks, initramfs_uses_systemd(ctx), ctx)?;
     }
     personalize_manifest(plan, ctx)?;
     let answers = write_answers(plan, ctx)?;
     stage_binary(ctx)?;
     run_manifest(&manifest_in_root, answers.as_deref(), ctx)?;
     create_account(plan, ctx)?;
+    create_extra_users(plan, ctx)?;
     configure_root_password(plan, ctx)?;
     if plan.install_nvidia {
         install_nvidia_driver(ctx)?;
     }
+    if plan.install_printing {
+        install_printing(ctx)?;
+    }
     configure_autologin(plan, ctx)?;
+    run_post_install_script(plan, ctx)?;
     if alongside {
         enable_dual_boot(ctx);
     }
@@ -226,12 +219,50 @@ fn create_account(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
         ),
         true,
     )?;
+    ensure_wheel_sudo(ctx)?;
+    ctx.set_password_chroot("/mnt", &user, &acct.password)?;
+    println!("  · created administrator account `{user}`");
+    Ok(())
+}
+
+/// Let the `wheel` group use sudo. Idempotent (the file's content never
+/// changes). Needed whenever any created account — primary or extra — is sudo.
+fn ensure_wheel_sudo(ctx: &Ctx) -> Result<()> {
     ctx.write_root(
         "/mnt/etc/sudoers.d/10-wheel",
         "# Managed by Manifest OS — let the wheel group use sudo\n%wheel ALL=(ALL:ALL) ALL\n",
-    )?;
-    ctx.set_password_chroot("/mnt", &user, &acct.password)?;
-    println!("  · created administrator account `{user}`");
+    )
+}
+
+/// Create any accounts beyond the primary one, each with its own sudo choice.
+/// Mirrors [`create_account`]'s mechanics (useradd + stdin chpasswd); skips —
+/// with a warning, not a hard failure — any entry with an empty/invalid
+/// username, so one bad row in a preseed file can't sink the whole install.
+fn create_extra_users(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    if plan.extra_users.is_empty() {
+        return Ok(());
+    }
+    step("Creating additional accounts");
+    if plan.extra_users.iter().any(|u| u.sudo) {
+        ensure_wheel_sudo(ctx)?;
+    }
+    for u in &plan.extra_users {
+        let user = sanitize_username(&u.username);
+        if user.is_empty() {
+            println!("  · warning: skipping an extra user with an empty/invalid username");
+            continue;
+        }
+        let group_flag = if u.sudo { " -G wheel" } else { "" };
+        ctx.shell(
+            &format!(
+                "arch-chroot /mnt bash -c 'id {user} >/dev/null 2>&1 || \
+                 useradd -m{group_flag} -s /bin/bash {user}'"
+            ),
+            true,
+        )?;
+        ctx.set_password_chroot("/mnt", &user, &u.password)?;
+        println!("  · created account `{user}`{}", if u.sudo { " (sudo)" } else { "" });
+    }
     Ok(())
 }
 
@@ -410,6 +441,113 @@ fn staged_kernel_package(ctx: &Ctx) -> &'static str {
     crate::kernel::resolve(key.as_deref()).map(|k| k.package).unwrap_or(crate::kernel::DEFAULT_KEY)
 }
 
+/// Install and enable CUPS printing, plus Avahi for network-printer discovery.
+/// Best-effort — a failed printing setup shouldn't sink the install.
+fn install_printing(ctx: &Ctx) -> Result<()> {
+    step("Setting up printing (CUPS)");
+    if ctx
+        .shell("arch-chroot /mnt pacman -S --needed --noconfirm cups cups-pdf avahi", true)
+        .is_err()
+    {
+        println!("  · warning: printing setup failed — install `cups` manually later");
+        return Ok(());
+    }
+    let _ = ctx.shell("arch-chroot /mnt systemctl enable cups.socket avahi-daemon", true);
+    println!("  · CUPS installed — manage printers at http://localhost:631 once booted");
+    Ok(())
+}
+
+/// Run a user-provided script inside the chroot, after everything else — the
+/// escape hatch for one-off customization the manifest itself doesn't cover.
+/// Best-effort: a failing custom script must not sink an otherwise-complete
+/// install.
+fn run_post_install_script(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    let Some(src) = plan.post_install_script.as_deref().filter(|s| !s.trim().is_empty()) else {
+        return Ok(());
+    };
+    step("Running your post-install script");
+    let dest = "/mnt/root/manifest-post-install.sh";
+    if ctx.sudo("cp", &[src, dest]).is_err() {
+        println!("  · warning: couldn't read {src} — skipping");
+        return Ok(());
+    }
+    ctx.sudo("chmod", &["755", dest])?;
+    if ctx.shell("arch-chroot /mnt /root/manifest-post-install.sh", true).is_err() {
+        println!("  · warning: your post-install script exited non-zero — continuing anyway");
+    }
+    let _ = ctx.sudo("rm", &["-f", dest]);
+    Ok(())
+}
+
+/// Apply live-session networking overrides — a VLAN interface, a static IP,
+/// and an HTTP(S) proxy — before anything that needs the network runs. Static
+/// IP/VLAN affect connectivity itself; the proxy covers only THIS process's
+/// own downloads (pacstrap + fetching a URL manifest), not whatever the
+/// manifest itself downloads later inside the chroot — out of scope here, by
+/// design, to keep this simple. Best-effort: falls back to whatever DHCP
+/// already gave the live session.
+fn apply_network_live(plan: &InstallPlan, ctx: &Ctx) {
+    if let (Some(id), Some(parent)) = (plan.vlan_id, &plan.vlan_parent) {
+        step("Setting up a VLAN");
+        let iface = format!("{parent}.{id}");
+        let _ = ctx.shell(
+            &format!(
+                "ip link add link {parent} name {iface} type vlan id {id} 2>/dev/null || true; \
+                 ip link set {iface} up"
+            ),
+            true,
+        );
+    }
+    if let Some(ip) = &plan.static_ip {
+        step("Setting up a static IP");
+        let dev = crate::probe::primary_iface().unwrap_or_else(|| "eth0".to_string());
+        let _ = ctx.shell(&format!("ip addr flush dev {dev} 2>/dev/null || true"), true);
+        let _ = ctx.shell(&format!("ip addr add {} dev {dev}", ip.address), true);
+        let _ = ctx.shell(&format!("ip link set {dev} up"), true);
+        let _ = ctx.shell(&format!("ip route replace default via {}", ip.gateway), true);
+        if !ip.dns.trim().is_empty() {
+            let lines: String = ip.dns.split(',').map(|d| format!("nameserver {}\n", d.trim())).collect();
+            let _ = ctx.write_root("/etc/resolv.conf", &lines); // the LIVE session, not /mnt
+        }
+        println!("  · static IP {} on {dev}", ip.address);
+    }
+    if let Some(proxy) = &plan.proxy {
+        std::env::set_var("http_proxy", proxy);
+        std::env::set_var("https_proxy", proxy);
+        // sudo resets the environment by default; keep the proxy through it.
+        let _ = ctx.write_root(
+            "/etc/sudoers.d/90-manifest-proxy",
+            "Defaults env_keep += \"http_proxy https_proxy\"\n",
+        );
+        println!("  · proxy {proxy} set for the base install");
+    }
+}
+
+/// Persist the static IP into the installed system via a systemd-networkd
+/// profile — works headlessly regardless of which desktop the manifest later
+/// installs (NetworkManager, if the desktop uses it, can coexist or be
+/// reconfigured afterward). VLAN/proxy are install-time-only by design (see
+/// [`apply_network_live`]) and have nothing to persist.
+fn persist_network_config(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    let Some(ip) = &plan.static_ip else { return Ok(()) };
+    step("Persisting the static IP");
+    let dev = crate::probe::primary_iface().unwrap_or_else(|| "eth0".to_string());
+    let dns_lines: String = ip
+        .dns
+        .split(',')
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| format!("DNS={}\n", d.trim()))
+        .collect();
+    let profile = format!("[Match]\nName={dev}\n\n[Network]\nAddress={}\nGateway={}\n{dns_lines}", ip.address, ip.gateway);
+    ctx.write_root("/mnt/etc/systemd/network/20-manifest-static.network", &profile)?;
+    ctx.shell("arch-chroot /mnt systemctl enable systemd-networkd systemd-resolved", true)?;
+    let _ = ctx.shell(
+        "arch-chroot /mnt ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || true",
+        true,
+    );
+    Ok(())
+}
+
 /// Sync, unmount the target, and reboot — no prompt. For the GUI, which shows
 /// its own firmware-appropriate "you can remove the media" guidance on screen
 /// (it has no stdin to prompt on, unlike [`finish_and_reboot`]).
@@ -564,20 +702,46 @@ struct Parts {
     root: String,
     esp: Option<String>,
     swap: Option<String>,
+    /// A separate `/home` partition — only ever created for `encrypt_mode ==
+    /// "home"` (a plain partition; its own LUKS2 container wraps the
+    /// filesystem, not the partition type).
+    home: Option<String>,
 }
 
-/// Wipe and partition the disk. Layout depends on firmware and whether a
-/// dedicated swap partition was requested:
-///   BIOS:  [swap] root(*)
-///   UEFI:  ESP(550M) [swap] root
-fn partition(disk: &str, uefi: bool, swap_gib: Option<u32>, ctx: &Ctx) -> Result<()> {
-    step("Partitioning");
-    let layout = match (uefi, swap_gib) {
-        (true, Some(g)) => format!("label: gpt\n,550M,U\n,{g}G,S\n,,L\n"),
-        (true, None) => "label: gpt\n,550M,U\n,,L\n".to_string(),
-        (false, Some(g)) => format!("label: dos\n,{g}G,S\n,,L,*\n"),
-        (false, None) => "label: dos\n,,L,*\n".to_string(),
+/// Device path for partition `n` of `disk`, accounting for the `p` separator
+/// nvme/mmc devices need (`/dev/nvme0n1p1`) that plain `sdX`/RAID devices don't.
+fn part_path(disk: &str, n: u32) -> String {
+    let sep = if disk.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        "p"
+    } else {
+        ""
     };
+    format!("{disk}{sep}{n}")
+}
+
+/// Wipe and partition the disk. Layout, in order: `[ESP (UEFI only)] [swap]
+/// root [home]`. `root_gib` fixes root's size (only meaningful — and only
+/// non-None — when a separate `/home` follows, taking the rest of the disk);
+/// otherwise root takes all remaining space. `root_type` is the sfdisk
+/// one-letter type hint for root: `L` plain, `R` a RAID1 member, `V` an LVM
+/// physical volume (RAID wins over LVM when both are requested — LVM then
+/// layers on top of the assembled array, not the raw partition).
+fn partition(disk: &str, uefi: bool, swap_gib: Option<u32>, root_gib: Option<u32>, root_type: char, ctx: &Ctx) -> Result<()> {
+    step("Partitioning");
+    let mut lines = vec![format!("label: {}", if uefi { "gpt" } else { "dos" })];
+    if uefi {
+        lines.push(",550M,U".to_string());
+    }
+    if let Some(g) = swap_gib {
+        lines.push(format!(",{g}G,S"));
+    }
+    let root_size = root_gib.map(|g| format!("{g}G")).unwrap_or_default();
+    let bootable = if uefi { "" } else { ",*" }; // BIOS boot flag lives on root
+    lines.push(format!(",{root_size},{root_type}{bootable}"));
+    if root_gib.is_some() {
+        lines.push(",,L".to_string()); // /home: the rest of the disk
+    }
+    let layout = lines.join("\n") + "\n";
     // wipefs clears stale FS/RAID/LVM signatures that would make the kernel hold
     // references to old partitions; `--wipe always` does the same during the
     // write; partprobe + udevadm settle make the new partitions appear before we
@@ -594,26 +758,19 @@ fn partition(disk: &str, uefi: bool, swap_gib: Option<u32>, ctx: &Ctx) -> Result
     )
 }
 
-/// Partition device paths, accounting for the `p` separator on nvme/mmc and the
-/// order produced by [`partition`].
-fn partition_names(disk: &str, uefi: bool, has_swap: bool) -> Parts {
-    let sep = if disk
-        .chars()
-        .last()
-        .map(|c| c.is_ascii_digit())
-        .unwrap_or(false)
-    {
-        "p"
-    } else {
-        ""
+/// Partition device paths, in the order [`partition`] lays them out.
+fn partition_names(disk: &str, uefi: bool, has_swap: bool, has_home: bool) -> Parts {
+    let mut n = 1;
+    let mut next = || {
+        let p = part_path(disk, n);
+        n += 1;
+        p
     };
-    let p = |n: u32| format!("{disk}{sep}{n}");
-    match (uefi, has_swap) {
-        (true, true) => Parts { esp: Some(p(1)), swap: Some(p(2)), root: p(3) },
-        (true, false) => Parts { esp: Some(p(1)), swap: None, root: p(2) },
-        (false, true) => Parts { esp: None, swap: Some(p(1)), root: p(2) },
-        (false, false) => Parts { esp: None, swap: None, root: p(1) },
-    }
+    let esp = uefi.then(&mut next);
+    let swap = has_swap.then(&mut next);
+    let root = next();
+    let home = has_home.then(&mut next);
+    Parts { esp, swap, root, home }
 }
 
 /// Shrink the largest filesystem of an existing OS (Windows, another Linux, …)
@@ -641,7 +798,7 @@ fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
 
     if ctx.dry_run {
         println!("  · would shrink {} and create a {} GiB Manifest OS partition", os.shrink_part, give / gib);
-        return Ok(Parts { root: format!("{}-new", os.disk), esp: Some(os.esp), swap: None });
+        return Ok(Parts { root: format!("{}-new", os.disk), esp: Some(os.esp), swap: None, home: None });
     }
 
     let part_bytes = disk_bytes(&os.shrink_part, ctx);
@@ -702,7 +859,7 @@ fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
     // 4) Format ONLY our new root — never the ESP, never the existing OS.
     mkfs_root(&root, &plan.filesystem, ctx)?;
     println!("  · created Manifest OS on {} ({} GiB) — {} left intact", root, give / gib, os.label);
-    Ok(Parts { root, esp: Some(os.esp), swap: None })
+    Ok(Parts { root, esp: Some(os.esp), swap: None, home: None })
 }
 
 /// Shrink an existing filesystem to `new_size` bytes, in place, picking the tool
@@ -799,8 +956,132 @@ fn list_parts(disk: &str, ctx: &Ctx) -> Vec<String> {
         .collect()
 }
 
-/// The unlocked LUKS root device (a fixed name; only one encrypted root exists).
-const LUKS_MAPPER: &str = "/dev/mapper/cryptroot";
+/// The unlocked LUKS mapper device names (fixed — only one of each kind
+/// exists per install: root XOR home is ever encrypted, never both).
+const LUKS_ROOT_MAPPER: &str = "/dev/mapper/cryptroot";
+const LUKS_HOME_MAPPER: &str = "/dev/mapper/crypthome";
+
+/// Everything downstream boot-config needs to know about how the root/home
+/// devices were assembled, so RAID/encryption setup can run once, after
+/// pacstrap (when /mnt/etc exists) but before the manifest is applied.
+struct StorageInfo {
+    parts: Parts,
+    /// The raw device (partition, or `/dev/mdN` if RAID'd) that was
+    /// LUKS-formatted for root, if `encrypt_mode == "full"`. Needed at early
+    /// boot, so it drives an initramfs hook + boot-cmdline unlock parameter.
+    root_luks_part: Option<String>,
+    /// Same, for a separately-encrypted `/home` (`encrypt_mode == "home"`).
+    /// Needed only after root is already up, so it's unlocked via crypttab —
+    /// no initramfs/cmdline involvement.
+    home_luks_part: Option<String>,
+}
+
+/// Build the full "erase" storage layout: partition, then assemble the root
+/// device chain `partition -> [RAID1] -> [LUKS] -> [LVM] -> filesystem`, and a
+/// separate plain-partition `/home` (its own LUKS2 container) when
+/// `encrypt_mode == "home"`. Each stage transforms one device-path string, so
+/// any combination of RAID/LUKS/LVM composes without special-casing.
+fn build_storage(plan: &InstallPlan, uefi: bool, ctx: &Ctx) -> Result<StorageInfo> {
+    let swap_gib: Option<u32> = if plan.swap == "partition" {
+        Some(plan.swap_size_gib.filter(|&g| g > 0).unwrap_or(2))
+    } else {
+        None
+    };
+    let want_home = plan.encrypt_mode == "home";
+    let root_gib = want_home.then(|| plan.root_gib.filter(|&g| g > 0).unwrap_or(40));
+    let root_type = if plan.raid1_disk.is_some() {
+        'R'
+    } else if plan.lvm {
+        'V'
+    } else {
+        'L'
+    };
+
+    partition(&plan.disk, uefi, swap_gib, root_gib, root_type, ctx)?;
+    let mut parts = partition_names(&plan.disk, uefi, swap_gib.is_some(), want_home);
+    format_aux(&parts, ctx)?; // ESP + swap; root/home are formatted below
+
+    // Root device chain.
+    let mut root_dev = parts.root.clone();
+    if let Some(second) = &plan.raid1_disk {
+        root_dev = setup_raid1(&root_dev, second, ctx)?;
+    }
+    let mut root_luks_part = None;
+    if plan.encrypt_mode == "full" {
+        setup_luks(&root_dev, &plan.encrypt_passphrase, "cryptroot", ctx)?;
+        root_luks_part = Some(root_dev.clone());
+        root_dev = LUKS_ROOT_MAPPER.to_string();
+    }
+    if plan.lvm {
+        root_dev = setup_lvm(&root_dev, ctx)?;
+    }
+    mkfs_root(&root_dev, &plan.filesystem, ctx)?;
+    parts.root = root_dev;
+
+    // A separate, plain /home partition, LUKS2'd on its own.
+    let mut home_luks_part = None;
+    if let Some(home_part) = parts.home.clone() {
+        setup_luks(&home_part, &plan.encrypt_passphrase, "crypthome", ctx)?;
+        home_luks_part = Some(home_part);
+        mkfs_root(LUKS_HOME_MAPPER, &plan.filesystem, ctx)?;
+        parts.home = Some(LUKS_HOME_MAPPER.to_string());
+    }
+
+    Ok(StorageInfo { parts, root_luks_part, home_luks_part })
+}
+
+/// Mirror `primary_part` (the just-created root partition/device) with a
+/// whole-disk partition on `second_disk` via mdadm RAID1, returning the
+/// assembled array (`/dev/mdN`). Only the root is mirrored — the ESP and any
+/// swap partition stay on the primary disk (the common simplification most
+/// installers make; a lost primary disk still means recreating the ESP by
+/// hand, but the data itself survives on the mirror).
+fn setup_raid1(primary_part: &str, second_disk: &str, ctx: &Ctx) -> Result<String> {
+    step("Setting up RAID1 (mirroring the root across two disks)");
+    let _ = ctx.shell("mdadm --stop /dev/md0 2>/dev/null || true", true);
+    free_disk(second_disk, ctx);
+    ctx.shell(
+        &format!(
+            "set -e\n\
+             wipefs -af {second_disk} >/dev/null 2>&1 || true\n\
+             printf 'label: gpt\\n,,R\\n' | sfdisk --force --wipe always {second_disk}\n\
+             partprobe {second_disk} >/dev/null 2>&1 || true\n\
+             udevadm settle >/dev/null 2>&1 || true"
+        ),
+        true,
+    )?;
+    let second_part = part_path(second_disk, 1);
+    // --assume-clean skips the initial resync (wasted work — we're about to
+    // mkfs, which touches the whole device anyway); the mirror becomes
+    // consistent as soon as real writes happen.
+    ctx.shell(
+        &format!(
+            "yes | mdadm --create /dev/md0 --level=1 --raid-devices=2 --metadata=1.2 \
+             --assume-clean --run {primary_part} {second_part}"
+        ),
+        true,
+    )
+    .context("creating the RAID1 array failed")?;
+    let _ = ctx.shell("udevadm settle >/dev/null 2>&1 || true", true);
+    println!("  · RAID1 array /dev/md0 assembled from {primary_part} + {second_part}");
+    Ok("/dev/md0".to_string())
+}
+
+/// Put `dev` (a partition, or an assembled `/dev/mdN`) into a fresh LVM volume
+/// group with a single logical volume filling it, returning the LV's device
+/// path. Composes after RAID/LUKS have already turned `dev` into its final
+/// block device.
+fn setup_lvm(dev: &str, ctx: &Ctx) -> Result<String> {
+    step("Setting up LVM");
+    // Defensive cleanup: a previous failed attempt in the same live session may
+    // have left a VG of this name active on some other device.
+    let _ = ctx.shell("vgchange -an manifest 2>/dev/null || true; vgremove -f manifest 2>/dev/null || true", true);
+    ctx.sudo("pvcreate", &["-f", "-y", dev])?;
+    ctx.sudo("vgcreate", &["manifest", dev])?;
+    ctx.sudo("lvcreate", &["-l", "100%FREE", "-n", "root", "manifest"])?;
+    println!("  · LVM: volume group `manifest`, logical volume `root`");
+    Ok("/dev/manifest/root".to_string())
+}
 
 /// Install the userspace tools a non-ext4 root needs in the *target* — without
 /// them, mkinitcpio's fsck hook can't find `fsck.xfs`/`btrfs` and boot-time
@@ -837,10 +1118,10 @@ fn mkfs_root(dev: &str, fs: &str, ctx: &Ctx) -> Result<()> {
     }
 }
 
-/// Create the LUKS2 container on `part` and open it as `cryptroot`. The
+/// Create the LUKS2 container on `part` and open it as `mapper_name`. The
 /// passphrase is fed over stdin (never logged).
-fn setup_luks(part: &str, passphrase: &str, ctx: &Ctx) -> Result<()> {
-    step("Encrypting the disk (LUKS)");
+fn setup_luks(part: &str, passphrase: &str, mapper_name: &str, ctx: &Ctx) -> Result<()> {
+    step("Encrypting (LUKS)");
     if passphrase.trim().is_empty() {
         bail!("encryption is on but no passphrase was provided");
     }
@@ -848,8 +1129,8 @@ fn setup_luks(part: &str, passphrase: &str, ctx: &Ctx) -> Result<()> {
         &["luksFormat", "--type", "luks2", "--batch-mode", "--key-file=-", part],
         passphrase,
     )?;
-    ctx.cryptsetup(&["open", "--key-file=-", part, "cryptroot"], passphrase)?;
-    println!("  · root encrypted with LUKS2 (unlocked as cryptroot)");
+    ctx.cryptsetup(&["open", "--key-file=-", part, mapper_name], passphrase)?;
+    println!("  · {part} encrypted with LUKS2 (unlocked as {mapper_name})");
     Ok(())
 }
 
@@ -867,24 +1148,68 @@ fn initramfs_uses_systemd(ctx: &Ctx) -> bool {
         .unwrap_or(false)
 }
 
-/// After the base system exists, add the right LUKS initramfs hook and
-/// regenerate. The root is unlocked from the kernel cmdline (see
-/// [`inject_crypt_cmdline`]) — NOT /etc/crypttab, which is only for secondary
-/// volumes and would make systemd try to re-unlock the root post-boot.
-fn configure_encryption(luks_part: &str, systemd: bool, ctx: &Ctx) -> Result<()> {
-    let _ = luks_part;
-    step("Configuring encryption (initramfs)");
-    // cryptsetup isn't in `base`, but the encrypt hooks need it.
-    ctx.shell("arch-chroot /mnt pacman -S --needed --noconfirm cryptsetup", true)?;
-    // Insert the correct hook just before `filesystems` (idempotent). A
-    // systemd-based initramfs uses `sd-encrypt`; the classic udev base, `encrypt`.
-    let sed = if systemd {
-        "sed -i '/^HOOKS=/{/sd-encrypt/!s/filesystems/sd-encrypt filesystems/}' /mnt/etc/mkinitcpio.conf"
-    } else {
-        "sed -i '/^HOOKS=/{/encrypt/!s/filesystems/encrypt filesystems/}' /mnt/etc/mkinitcpio.conf"
-    };
-    ctx.shell(sed, true)?;
-    ctx.shell("arch-chroot /mnt mkinitcpio -P", true)?;
+/// Insert `hook` into `/mnt/etc/mkinitcpio.conf`'s HOOKS= line, right before
+/// the first of `filesystems`/`encrypt`/`sd-encrypt` that's present (so RAID's
+/// `mdadm_udev`, which must assemble the array before LUKS can find its
+/// container, naturally ends up ahead of the encrypt hooks when both are
+/// inserted in call order). Idempotent — a no-op if `hook` is already there.
+fn insert_mkinitcpio_hook(hook: &str, ctx: &Ctx) -> Result<()> {
+    let sed = format!(
+        "sed -i '/^HOOKS=/{{/\\b{hook}\\b/!s/\\b\\(filesystems\\|encrypt\\|sd-encrypt\\)\\b/{hook} \\1/}}' /mnt/etc/mkinitcpio.conf"
+    );
+    ctx.shell(&sed, true)
+}
+
+/// After pacstrap (when /mnt/etc exists) but before the manifest is applied,
+/// wire up whatever the storage layout needs to actually boot: RAID's
+/// mdadm.conf + initramfs hook, root LUKS's initramfs hook (root is unlocked
+/// from the kernel cmdline — see [`inject_crypt_cmdline`] — never crypttab,
+/// which would make systemd try to re-unlock an already-mounted root), and a
+/// crypttab entry for an encrypted `/home` (mounted after root is already up,
+/// so it needs no initramfs support at all). One mkinitcpio rebuild covers
+/// every hook change made here; at this point only the base `linux` kernel
+/// pacstrap installed exists yet (the manifest's own kernel choice is
+/// installed later, by `run_manifest`, and pacman's kernel-install hook
+/// rebuilds *that* kernel's initramfs automatically using this same
+/// mkinitcpio.conf) — so a full `-P` rebuild is safe and complete here, unlike
+/// the later NVIDIA step, which must target one preset specifically.
+fn configure_storage_boot(plan: &InstallPlan, storage: &StorageInfo, ctx: &Ctx) -> Result<()> {
+    if storage.root_luks_part.is_some() || storage.home_luks_part.is_some() {
+        // cryptsetup isn't in `base`, but both the encrypt hooks and crypttab
+        // unlocking need it.
+        ctx.shell("arch-chroot /mnt pacman -S --needed --noconfirm cryptsetup", true)?;
+    }
+
+    let mut hooks_changed = false;
+    if plan.raid1_disk.is_some() {
+        step("Configuring RAID (mdadm.conf + initramfs)");
+        ctx.shell("mdadm --detail --scan >> /mnt/etc/mdadm.conf", true)?;
+        insert_mkinitcpio_hook("mdadm_udev", ctx)?;
+        hooks_changed = true;
+    }
+    if storage.root_luks_part.is_some() {
+        step("Configuring encryption (initramfs)");
+        // A systemd-based initramfs uses `sd-encrypt`; the classic udev base,
+        // `encrypt`.
+        let hook = if initramfs_uses_systemd(ctx) { "sd-encrypt" } else { "encrypt" };
+        insert_mkinitcpio_hook(hook, ctx)?;
+        hooks_changed = true;
+    }
+    if hooks_changed {
+        ctx.shell("arch-chroot /mnt mkinitcpio -P", true)?;
+    }
+
+    if let Some(home_luks) = &storage.home_luks_part {
+        step("Configuring encrypted /home (crypttab)");
+        ctx.shell(
+            &format!(
+                "uuid=$(blkid -s UUID -o value {home_luks}) && \
+                 echo \"crypthome UUID=$uuid none luks\" >> /mnt/etc/crypttab"
+            ),
+            true,
+        )?;
+        println!("  · /home unlocks at boot via crypttab (prompted on the console)");
+    }
     Ok(())
 }
 
@@ -972,6 +1297,10 @@ fn mount(parts: &Parts, ctx: &Ctx) -> Result<()> {
     if let Some(esp) = &parts.esp {
         ctx.sudo("mkdir", &["-p", "/mnt/boot"])?;
         ctx.sudo("mount", &[esp, "/mnt/boot"])?;
+    }
+    if let Some(home) = &parts.home {
+        ctx.sudo("mkdir", &["-p", "/mnt/home"])?;
+        ctx.sudo("mount", &[home, "/mnt/home"])?;
     }
     Ok(())
 }

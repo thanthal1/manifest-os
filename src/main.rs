@@ -6,11 +6,11 @@
 //! parser fetched per `schema_version`. Phase 1 implements the install flow
 //! locally.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
-use manifest::probe::{Account, InstallPlan};
+use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::{desktop, install, installer, kernel, survey, tui};
 use std::path::PathBuf;
 
@@ -62,16 +62,22 @@ enum Command {
     },
     /// Unattended full install to a disk (the TUI/GUI flow, headless). Drives
     /// the same `installer::execute`, so it's scriptable for automation + CI.
+    /// Either give `file` + flags, or skip the wizard entirely with a single
+    /// `--config preseed.json` (an InstallPlan as JSON — see the GUI's Review
+    /// page "equivalent command" or any of the flags below for its shape).
     Provision {
-        /// Path to a manifest.json.
-        file: PathBuf,
+        /// Path to a manifest.json. Omit if using --config.
+        file: Option<PathBuf>,
+        /// A preseed file: an InstallPlan as JSON, bypassing every flag below.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Target disk, e.g. /dev/sda.
         #[arg(long)]
-        disk: String,
+        disk: Option<String>,
         /// "erase" (wipe the disk) or "alongside" (dual-boot an existing OS).
         #[arg(long, default_value = "erase")]
         mode: String,
-        /// Root filesystem: "ext4" or "btrfs".
+        /// Root filesystem: "ext4", "btrfs", or "xfs".
         #[arg(long, default_value = "ext4")]
         filesystem: String,
         /// Swap: "zram", "none", "swapfile", or "partition".
@@ -89,15 +95,31 @@ enum Command {
         /// Password for --user.
         #[arg(long)]
         password: Option<String>,
+        /// Additional account, repeatable: "name:password" or
+        /// "name:password:sudo".
+        #[arg(long = "extra-user")]
+        extra_user: Vec<String>,
         /// Override the hostname.
         #[arg(long)]
         hostname: Option<String>,
-        /// Encrypt the root with LUKS2 (erase installs only); needs --passphrase.
-        #[arg(long)]
-        encrypt: bool,
-        /// LUKS passphrase for --encrypt.
+        /// "none" (default), "full" (LUKS2 the whole root), or "home" (LUKS2 a
+        /// separate /home only). "full"/"home" need --passphrase; erase-install
+        /// only.
+        #[arg(long, default_value = "none")]
+        encrypt_mode: String,
+        /// LUKS passphrase for --encrypt-mode full|home.
         #[arg(long)]
         passphrase: Option<String>,
+        /// Root partition size in GiB when --encrypt-mode home (the rest of
+        /// the disk becomes /home). Default 40.
+        #[arg(long)]
+        root_gib: Option<u32>,
+        /// Put root on an LVM logical volume (composes with encryption/RAID).
+        #[arg(long)]
+        lvm: bool,
+        /// Mirror root onto this second disk via mdadm RAID1.
+        #[arg(long)]
+        raid1_disk: Option<String>,
         /// Timezone (e.g. America/New_York), locale (e.g. en_US.UTF-8), keymap.
         #[arg(long)]
         timezone: Option<String>,
@@ -115,6 +137,30 @@ enum Command {
         /// Install the proprietary NVIDIA driver (nvidia-dkms).
         #[arg(long)]
         install_nvidia: bool,
+        /// Install and enable CUPS printing.
+        #[arg(long)]
+        install_printing: bool,
+        /// A local script to run inside the chroot after everything else.
+        #[arg(long)]
+        post_script: Option<String>,
+        /// Static IPv4 for the install (CIDR, e.g. 192.168.1.50/24). Needs
+        /// --gateway too. Omit for DHCP.
+        #[arg(long)]
+        static_ip: Option<String>,
+        #[arg(long)]
+        gateway: Option<String>,
+        /// Comma-separated resolver IPs for --static-ip.
+        #[arg(long)]
+        dns: Option<String>,
+        /// HTTP(S) proxy for the base install's own downloads, e.g.
+        /// http://10.0.0.1:3128.
+        #[arg(long)]
+        proxy: Option<String>,
+        /// Bring up a VLAN before installing: tag --vlan-id on --vlan-parent.
+        #[arg(long)]
+        vlan_id: Option<u16>,
+        #[arg(long)]
+        vlan_parent: Option<String>,
         /// JSON object of survey answers for the manifest's questions.
         #[arg(long)]
         answers: Option<PathBuf>,
@@ -220,6 +266,7 @@ fn run() -> Result<()> {
         },
         Command::Provision {
             file,
+            config,
             disk,
             mode,
             filesystem,
@@ -228,67 +275,119 @@ fn run() -> Result<()> {
             alongside_gib,
             user,
             password,
+            extra_user,
             hostname,
-            encrypt,
+            encrypt_mode,
             passphrase,
+            root_gib,
+            lvm,
+            raid1_disk,
             timezone,
             locale,
             keymap,
             root_password,
             autologin,
             install_nvidia,
+            install_printing,
+            post_script,
+            static_ip,
+            gateway,
+            dns,
+            proxy,
+            vlan_id,
+            vlan_parent,
             answers,
             dry_run,
             no_reboot,
         } => {
-            // Survey answers (optional JSON object {"id": value}).
-            let answers_vec: Vec<(String, String)> = match &answers {
-                Some(p) => {
-                    let raw = std::fs::read_to_string(p)?;
-                    let v: serde_json::Value = serde_json::from_str(&raw)?;
-                    v.as_object()
-                        .map(|o| {
-                            o.iter()
-                                .map(|(k, val)| {
-                                    let s = val
-                                        .as_str()
-                                        .map(str::to_string)
-                                        .unwrap_or_else(|| val.to_string());
-                                    (k.clone(), s)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
+            let plan = if let Some(config) = config {
+                // Preseed: an InstallPlan as JSON, bypassing every other flag.
+                let raw = std::fs::read_to_string(&config)?;
+                serde_json::from_str(&raw)
+                    .with_context(|| format!("parsing preseed config {}", config.display()))?
+            } else {
+                let Some(file) = file else {
+                    anyhow::bail!("provide a manifest file, or --config <preseed.json>");
+                };
+                let Some(disk) = disk else {
+                    anyhow::bail!("--disk is required (unless using --config)");
+                };
+                // Survey answers (optional JSON object {"id": value}).
+                let answers_vec: Vec<(String, String)> = match &answers {
+                    Some(p) => {
+                        let raw = std::fs::read_to_string(p)?;
+                        let v: serde_json::Value = serde_json::from_str(&raw)?;
+                        v.as_object()
+                            .map(|o| {
+                                o.iter()
+                                    .map(|(k, val)| {
+                                        let s = val
+                                            .as_str()
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| val.to_string());
+                                        (k.clone(), s)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    }
+                    None => Vec::new(),
+                };
+                let account = match (user, password) {
+                    (Some(u), Some(pw)) => Some(Account {
+                        full_name: u.clone(),
+                        username: u,
+                        password: pw,
+                    }),
+                    _ => None,
+                };
+                // "name:password[:sudo]"
+                let extra_users: Vec<ExtraUser> = extra_user
+                    .iter()
+                    .filter_map(|s| {
+                        let mut parts = s.splitn(3, ':');
+                        let username = parts.next()?.to_string();
+                        let password = parts.next()?.to_string();
+                        let sudo = parts.next() == Some("sudo");
+                        Some(ExtraUser { username, password, sudo })
+                    })
+                    .collect();
+                let static_ip = match (static_ip, gateway) {
+                    (Some(address), Some(gw)) => {
+                        Some(StaticIp { address, gateway: gw, dns: dns.unwrap_or_default() })
+                    }
+                    _ => None,
+                };
+                InstallPlan {
+                    disk,
+                    install_mode: mode,
+                    alongside_gib,
+                    filesystem,
+                    swap,
+                    swap_size_gib,
+                    manifest: file.to_string_lossy().to_string(),
+                    answers: answers_vec,
+                    account,
+                    extra_users,
+                    hostname,
+                    encrypt_mode,
+                    encrypt_passphrase: passphrase.unwrap_or_default(),
+                    root_gib,
+                    lvm,
+                    raid1_disk,
+                    timezone,
+                    locale,
+                    keymap,
+                    root_password,
+                    autologin,
+                    install_nvidia,
+                    install_printing,
+                    post_install_script: post_script,
+                    static_ip,
+                    proxy,
+                    vlan_id,
+                    vlan_parent,
                 }
-                None => Vec::new(),
-            };
-            let account = match (user, password) {
-                (Some(u), Some(pw)) => Some(Account {
-                    full_name: u.clone(),
-                    username: u,
-                    password: pw,
-                }),
-                _ => None,
-            };
-            let plan = InstallPlan {
-                disk,
-                install_mode: mode,
-                alongside_gib,
-                filesystem,
-                swap,
-                swap_size_gib,
-                manifest: file.to_string_lossy().to_string(),
-                answers: answers_vec,
-                account,
-                hostname,
-                encrypt,
-                encrypt_passphrase: passphrase.unwrap_or_default(),
-                timezone,
-                locale,
-                keymap,
-                root_password,
-                autologin,
-                install_nvidia,
             };
             installer::execute(&plan, &Ctx::new(dry_run))?;
             if !dry_run && !no_reboot {
