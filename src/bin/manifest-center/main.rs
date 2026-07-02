@@ -37,6 +37,9 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &adw::Application) {
+    // Use the installed "{ }" icon for the window + taskbar (matches app-id).
+    gtk::Window::set_default_icon_name(APP_ID);
+
     let toasts = adw::ToastOverlay::new();
 
     let stack = adw::ViewStack::new();

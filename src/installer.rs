@@ -1553,8 +1553,21 @@ fn stage_desktop_app(ctx: &Ctx) {
     if ctx.sudo("install", &["-Dm755", &src, "/mnt/usr/local/bin/manifest-center"]).is_err() {
         return;
     }
-    let _ = ctx.write_root("/mnt/usr/share/applications/manifest-snapshots.desktop", SNAPSHOTS_DESKTOP);
+    // The "{ }" app icon (matches the app-id so the window + launcher share it).
+    let _ = ctx.write_root(
+        "/mnt/usr/share/icons/hicolor/scalable/apps/os.manifest.Snapshots.svg",
+        SNAPSHOTS_ICON,
+    );
+    // The launcher, named after the app-id so desktops associate the two.
+    let _ = ctx.write_root(
+        "/mnt/usr/share/applications/os.manifest.Snapshots.desktop",
+        SNAPSHOTS_DESKTOP,
+    );
 }
+
+/// Embedded so the installer is self-contained (no dependency on the ISO's
+/// file layout).
+const SNAPSHOTS_ICON: &str = include_str!("../assets/os.manifest.Snapshots.svg");
 
 const SNAPSHOTS_DESKTOP: &str = "[Desktop Entry]\n\
 Type=Application\n\
@@ -1562,8 +1575,9 @@ Name=System Snapshots\n\
 GenericName=Backup & Restore\n\
 Comment=Save and restore your setup\n\
 Exec=/usr/local/bin/manifest-center\n\
-Icon=document-open-recent\n\
+Icon=os.manifest.Snapshots\n\
 Terminal=false\n\
+StartupWMClass=os.manifest.Snapshots\n\
 Categories=System;Settings;Utility;\n\
 Keywords=snapshot;backup;restore;setup;\n";
 

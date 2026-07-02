@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- System Snapshots app icon: "{ }" for the JSON-manifest theme. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#45475a"/>
+      <stop offset="1" stop-color="#1e1e2e"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <g fill="none" stroke="#cba6f7" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M58 30 c-10 0 -12 8 -12 18 c0 10 -2 14 -10 16 c8 2 10 6 10 16 c0 10 2 18 12 18"/>
+    <path d="M70 30 c10 0 12 8 12 18 c0 10 2 14 10 16 c-8 2 -10 6 -10 16 c0 10 -2 18 -12 18"/>
+  </g>
+</svg>
