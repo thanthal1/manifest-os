@@ -115,6 +115,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     }
     configure_autologin(plan, ctx)?;
     run_post_install_script(plan, ctx)?;
+    stage_desktop_app(ctx);
     if alongside {
         enable_dual_boot(ctx);
     }
@@ -1536,6 +1537,35 @@ fn stage_binary(ctx: &Ctx) -> Result<()> {
     let src = src.to_string_lossy();
     ctx.sudo("install", &["-Dm755", &src, "/mnt/usr/local/bin/manifest"])
 }
+
+/// The System Snapshots desktop app (`manifest-center`) and its app-menu
+/// launcher, staged into the installed system so it shows up under System /
+/// Settings. Best-effort: only when the live ISO carries the binary (it does
+/// when built with `--features gui`), and never fails the install.
+fn stage_desktop_app(ctx: &Ctx) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let app = exe.with_file_name("manifest-center");
+    if !app.exists() {
+        return;
+    }
+    step("Installing the System Snapshots app");
+    let src = app.to_string_lossy();
+    if ctx.sudo("install", &["-Dm755", &src, "/mnt/usr/local/bin/manifest-center"]).is_err() {
+        return;
+    }
+    let _ = ctx.write_root("/mnt/usr/share/applications/manifest-snapshots.desktop", SNAPSHOTS_DESKTOP);
+}
+
+const SNAPSHOTS_DESKTOP: &str = "[Desktop Entry]\n\
+Type=Application\n\
+Name=System Snapshots\n\
+GenericName=Backup & Restore\n\
+Comment=Save and restore your setup\n\
+Exec=/usr/local/bin/manifest-center\n\
+Icon=document-open-recent\n\
+Terminal=false\n\
+Categories=System;Settings;Utility;\n\
+Keywords=snapshot;backup;restore;setup;\n";
 
 /// Write the survey answers the front-end collected to a JSON object the chroot
 /// install can read via `--answers`, so the manifest's `{{id}}` tokens resolve.
