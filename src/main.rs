@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
-use manifest::{desktop, install, installer, kernel, survey, tui};
+use manifest::{desktop, history, install, installer, kernel, survey, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -61,6 +61,18 @@ enum Command {
     },
     /// Show what an install would change (Phase 5).
     Diff { file: PathBuf },
+    /// List the manifests applied to this system (the rollback history).
+    History,
+    /// Undo a manifest change: re-apply a previously-recorded manifest.
+    /// Defaults to the one before the current; pass a git ref or "N applies
+    /// ago" as a bare number (e.g. `manifest rollback 2`).
+    Rollback {
+        /// Which recorded manifest to restore (default: the previous one).
+        reference: Option<String>,
+        /// Preview the rollback without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// List the desktop environments / window managers the installer can set up.
     Desktops,
     /// List the kernels the installer can install.
@@ -198,16 +210,26 @@ fn run() -> Result<()> {
             dry_run,
             answers,
         } => {
-            let manifest = load_manifest(&file, answers.as_deref())?;
-            install::run(&manifest, &Ctx::new(dry_run))
+            let (manifest, json) = load_manifest(&file, answers.as_deref())?;
+            let ctx = Ctx::new(dry_run);
+            install::run(&manifest, &ctx)?;
+            history::record(&json, &manifest.meta.name, &ctx);
+            Ok(())
         }
         Command::Sync {
             file,
             dry_run,
             answers,
         } => {
-            let manifest = load_manifest(&file, answers.as_deref())?;
-            install::sync(&manifest, &Ctx::new(dry_run))
+            let (manifest, json) = load_manifest(&file, answers.as_deref())?;
+            let ctx = Ctx::new(dry_run);
+            install::sync(&manifest, &ctx)?;
+            history::record(&json, &manifest.meta.name, &ctx);
+            Ok(())
+        }
+        Command::History => history::show(),
+        Command::Rollback { reference, dry_run } => {
+            history::rollback(reference.as_deref(), dry_run)
         }
         Command::Verify { file } => {
             let manifest = Manifest::from_path(&file)?;
@@ -412,18 +434,42 @@ fn run() -> Result<()> {
 }
 
 /// Read a manifest, run its survey (using `answers` when unattended), inject the
-/// answers, and fold in any conditional packages. Shared by `install` and
-/// `sync`, which differ only in what they do with the resulting manifest.
-fn load_manifest(file: &std::path::Path, answers: Option<&std::path::Path>) -> Result<Manifest> {
+/// answers, and fold in any conditional packages. Returns the parsed manifest
+/// plus the final substituted JSON (recorded into the rollback history so a
+/// re-apply reproduces exactly this state). Shared by `install` and `sync`.
+fn load_manifest(
+    file: &std::path::Path,
+    answers: Option<&std::path::Path>,
+) -> Result<(Manifest, String)> {
     let raw = std::fs::read_to_string(file)
         .with_context(|| format!("reading manifest at {}", file.display()))?;
     let answered = survey::collect(&raw, answers)?;
     let substituted = survey::substitute(&raw, &answered);
     let mut manifest = Manifest::from_str(&substituted)?;
     let extra = survey::conditional_packages(&manifest.conditional_packages, &answered);
+    let mut recorded = substituted.clone();
     if !extra.is_empty() {
         println!("survey: +{} conditional package(s)", extra.len());
-        manifest.packages.extend(extra);
+        manifest.packages.extend(extra.iter().cloned());
+        // Fold the survey-gated packages into the JSON we record, so a rollback
+        // restores the exact package set without re-running the survey.
+        recorded = merge_conditional_packages(&substituted, &extra).unwrap_or(substituted);
     }
-    Ok(manifest)
+    Ok((manifest, recorded))
+}
+
+/// Return `json` with `extra` appended to its top-level `packages` array.
+fn merge_conditional_packages(json: &str, extra: &[String]) -> Result<String> {
+    let mut v: serde_json::Value = serde_json::from_str(json)?;
+    let pkgs = v
+        .as_object_mut()
+        .context("manifest is not a JSON object")?
+        .entry("packages")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(arr) = pkgs.as_array_mut() {
+        for p in extra {
+            arr.push(serde_json::Value::String(p.clone()));
+        }
+    }
+    Ok(serde_json::to_string_pretty(&v)? + "\n")
 }

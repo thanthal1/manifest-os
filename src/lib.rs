@@ -8,6 +8,7 @@ pub mod desktop;
 pub mod dotfiles;
 pub mod exec;
 pub mod files;
+pub mod history;
 pub mod install;
 pub mod installer;
 pub mod keybindings;
