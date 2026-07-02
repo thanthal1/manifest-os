@@ -16,11 +16,11 @@ path = "src/main.rs"
 # the GTK toolchain; the ISO build compiles with `--features gui`.
 [[bin]]
 name = "manifest-gui"
-path = "src/bin/manifest-gui.rs"
+path = "src/bin/manifest-gui/main.rs"
 required-features = ["gui"]
 
 [features]
-gui = ["dep:gtk4", "dep:libadwaita"]
+gui = ["dep:gtk4", "dep:libadwaita", "dep:flate2"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -31,6 +31,9 @@ ratatui = "0.29"
 crossterm = "0.28"
 gtk4 = { version = "0.9", optional = true }
 libadwaita = { version = "0.7", optional = true }
+# Decompresses the installer's non-English UI language catalogs on demand.
+# rust_backend avoids a system zlib dependency on the live ISO's build.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 
 [profile.release]
 strip = true
