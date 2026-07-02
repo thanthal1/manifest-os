@@ -17,6 +17,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use manifest::exec::Ctx;
-use manifest::probe::{self, Account, InstallPlan};
+use manifest::probe::{self, Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::installer;
 
 const APP_ID: &str = "os.manifest.Installer";
@@ -44,8 +45,11 @@ struct State {
     filesystem: String,
     swap: String,
     swap_size_gib: Option<u32>,
-    encrypt: bool,
+    encrypt_mode: String, // "none" | "full" | "home"
     encrypt_passphrase: String,
+    root_gib: Option<u32>,  // root size when encrypt_mode == "home"
+    lvm: bool,
+    raid1_disk: String, // "" = off, else the mirror disk's path
     timezone: String,
     locale: String,
     keymap: String,
@@ -56,6 +60,16 @@ struct State {
     root_password: String,
     autologin: bool,
     install_nvidia: bool,
+    install_printing: bool,
+    extra_users_text: String, // one "name:password[:sudo]" per line
+    post_install_script: String,
+    static_ip: String,
+    gateway: String,
+    dns: String,
+    proxy: String,
+    vlan_id: String,
+    vlan_parent: String,
+    large_text: bool,
 }
 
 impl State {
@@ -64,6 +78,7 @@ impl State {
             install_mode: "erase".into(),
             filesystem: "ext4".into(),
             swap: "zram".into(),
+            encrypt_mode: "none".into(),
             ..Default::default()
         }
     }
@@ -103,6 +118,9 @@ fn build_ui(app: &adw::Application) {
     let state = Rc::new(RefCell::new(State::new()));
     // Widgets that only appear in Advanced mode; the header toggle flips them.
     let advanced_widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::new(RefCell::new(Vec::new()));
+    // The current install attempt's cancellation flag — set fresh by
+    // start_install each attempt, read by the Installing page's Cancel button.
+    let cancel_flag: Rc<RefCell<Option<Arc<AtomicBool>>>> = Rc::new(RefCell::new(None));
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::SlideLeftRight)
@@ -132,14 +150,14 @@ fn build_ui(app: &adw::Application) {
     // page (which shows it).
     let survey_content = Rc::new(gtk::Box::new(gtk::Orientation::Vertical, 16));
 
-    add_welcome(&stack);
-    add_network(&stack);
+    add_welcome(&stack, &state);
+    add_network(&stack, &state, &advanced_widgets);
     add_setup(&stack, &state, &advanced_widgets, &survey_content);
     add_survey(&stack, &survey_content);
     add_disk(&stack, &state, &advanced_widgets);
     add_account(&stack, &state, &advanced_widgets);
-    add_review(&stack, &state);
-    add_installing(&stack, &advanced_widgets);
+    add_review(&stack, &state, &cancel_flag);
+    add_installing(&stack, &advanced_widgets, &cancel_flag);
     add_done(&stack);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -220,19 +238,82 @@ fn goto(stack: &Rc<gtk::Stack>, name: &'static str) -> impl Fn(&gtk::Button) {
 // Pages
 // ---------------------------------------------------------------------------
 
-fn add_welcome(stack: &Rc<gtk::Stack>) {
+fn add_welcome(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
     let (root, content, buttons) = page(
         "Welcome to Manifest OS",
         "We'll set up your computer in a few simple steps. It only takes a few minutes.",
     );
-    let _ = &content;
+
+    // Larger text — a real, always-available accessibility option (not hidden
+    // behind Advanced). A true "high contrast" theme isn't bundled on the live
+    // ISO, so this is scoped to what we can honestly deliver.
+    let large_text = switch_row("Larger text", {
+        let state = state.clone();
+        move |on| {
+            state.borrow_mut().large_text = on;
+            apply_large_text(on);
+        }
+    });
+    content.append(&large_text);
+
+    // Skip the wizard entirely with a saved configuration (a preseed
+    // InstallPlan as JSON — see `manifest provision --config`).
+    let preseed_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let preseed_path = gtk::Entry::builder().placeholder_text("Path to a saved configuration (.json)").hexpand(true).build();
+    let preseed_status = gtk::Label::new(None);
+    preseed_status.add_css_class("dim-label");
+    let preseed_btn = gtk::Button::with_label("Load & review");
+    preseed_row.append(&preseed_path);
+    preseed_row.append(&preseed_btn);
+    content.append(&preseed_row);
+    content.append(&preseed_status);
+    {
+        let state = state.clone();
+        let stack = stack.clone();
+        let preseed_path = preseed_path.clone();
+        let preseed_status = preseed_status.clone();
+        preseed_btn.connect_clicked(move |_| {
+            let path = preseed_path.text().to_string();
+            if path.trim().is_empty() {
+                return;
+            }
+            match std::fs::read_to_string(path.trim())
+                .map_err(|e| e.to_string())
+                .and_then(|raw| serde_json::from_str::<InstallPlan>(&raw).map_err(|e| e.to_string()))
+            {
+                Ok(plan) => {
+                    load_preseed_into_state(&state, plan);
+                    stack.set_visible_child_name("review");
+                }
+                Err(e) => preseed_status.set_text(&format!("Couldn't load that file: {e}")),
+            }
+        });
+    }
+
     let start = nav_button("Get started", true);
     start.connect_clicked(goto(stack, "network"));
     buttons.append(&start);
     stack.add_named(&root, Some("welcome"));
 }
 
-fn add_network(stack: &Rc<gtk::Stack>) {
+/// Bump the default font size app-wide via a CSS provider — the "larger text"
+/// accessibility toggle. Re-applying with `on = false` removes it.
+fn apply_large_text(on: bool) {
+    use gtk::gdk;
+    thread_local! {
+        static PROVIDER: gtk::CssProvider = gtk::CssProvider::new();
+    }
+    PROVIDER.with(|p| {
+        let Some(display) = gdk::Display::default() else { return };
+        gtk::style_context_remove_provider_for_display(&display, p);
+        if on {
+            p.load_from_data("label, entry, button, textview { font-size: 1.25em; }");
+            gtk::style_context_add_provider_for_display(&display, p, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        }
+    });
+}
+
+fn add_network(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
     let (root, content, buttons) = page(
         "Internet connection",
         "Manifest OS downloads your software while it installs, so it needs to be online.",
@@ -256,6 +337,38 @@ fn add_network(stack: &Rc<gtk::Stack>) {
     wifi_box.append(&pass);
     wifi_box.append(&connect);
     content.append(&wifi_box);
+
+    // Advanced: static IP, an HTTP(S) proxy, and a VLAN — for networks that
+    // need more than plug-in-and-go DHCP.
+    let ip = text_field_row("Static IP (CIDR)", "e.g. 192.168.1.50/24 — leave blank for DHCP", {
+        let state = state.clone();
+        move |v| state.borrow_mut().static_ip = v
+    });
+    let gw = text_field_row("Gateway", "e.g. 192.168.1.1", {
+        let state = state.clone();
+        move |v| state.borrow_mut().gateway = v
+    });
+    let dns = text_field_row("DNS servers", "comma-separated, e.g. 1.1.1.1,8.8.8.8", {
+        let state = state.clone();
+        move |v| state.borrow_mut().dns = v
+    });
+    let proxy = text_field_row("HTTP(S) proxy", "e.g. http://10.0.0.1:3128", {
+        let state = state.clone();
+        move |v| state.borrow_mut().proxy = v
+    });
+    let vlan_id = text_field_row("VLAN ID", "e.g. 100 — leave blank for none", {
+        let state = state.clone();
+        move |v| state.borrow_mut().vlan_id = v
+    });
+    let vlan_parent = text_field_row("VLAN parent interface", "e.g. eth0", {
+        let state = state.clone();
+        move |v| state.borrow_mut().vlan_parent = v
+    });
+    for w in [&ip, &gw, &dns, &proxy, &vlan_id, &vlan_parent] {
+        w.set_visible(false);
+        content.append(w);
+        adv.borrow_mut().push(w.clone().upcast());
+    }
 
     let back = nav_button("Back", false);
     back.connect_clicked(goto(stack, "welcome"));
@@ -662,18 +775,25 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
 
     content.append(&list);
 
-    // Advanced: filesystem + swap + encryption + locale (+ dual-boot size).
+    // Advanced: filesystem + swap + storage (encryption/LVM/RAID) + locale.
     let fs = labeled_choice("Filesystem", &["ext4", "btrfs", "xfs"], 0, {
         let state = state.clone();
         move |v| state.borrow_mut().filesystem = v
     });
     let sw = swap_row(state);
-    let enc = encrypt_row(state);
-    let tz = text_field_row("Timezone", "Region/City (e.g. America/New_York)", {
+    let enc = encrypt_mode_row(state);
+    let storage = lvm_raid_row(state, &disk_names);
+    let timezones = probe::list_timezones();
+    let tz = searchable_dropdown_row("Timezone", &timezones, {
         let state = state.clone();
         move |v| state.borrow_mut().timezone = v
     });
-    let loc = text_field_row("Locale", "e.g. en_US.UTF-8", {
+    let common_locales: Vec<String> = probe::COMMON_LOCALES.iter().map(|s| s.to_string()).collect();
+    let loc = searchable_dropdown_row("Locale", &common_locales, {
+        let state = state.clone();
+        move |v| state.borrow_mut().locale = v
+    });
+    let loc_manual = text_field_row("Or type a locale manually", "overrides the list above, e.g. en_NZ.UTF-8", {
         let state = state.clone();
         move |v| state.borrow_mut().locale = v
     });
@@ -681,7 +801,15 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         let state = state.clone();
         move |v| state.borrow_mut().keymap = v
     });
-    for w in [&fs, &sw, &enc, &tz, &loc, &km] {
+    let printing = switch_row("Set up printing (CUPS)", {
+        let state = state.clone();
+        move |on| state.borrow_mut().install_printing = on
+    });
+    let post_script = text_field_row("Post-install script (path on this USB)", "run in the new system after everything else", {
+        let state = state.clone();
+        move |v| state.borrow_mut().post_install_script = v
+    });
+    for w in [&fs, &sw, &enc, &storage, &tz, &loc, &loc_manual, &km, &printing, &post_script] {
         w.set_visible(false);
         content.append(w);
         adv.borrow_mut().push(w.clone().upcast());
@@ -723,6 +851,11 @@ fn add_account(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefC
     content.append(&name);
     content.append(&pass);
 
+    // A live strength meter, always visible — not an Advanced feature.
+    let (strength_row, update_strength) = password_strength_meter();
+    content.append(&strength_row);
+    pass.connect_changed(move |e| update_strength(&e.text()));
+
     // Advanced: explicit username + hostname.
     let user = gtk::Entry::builder().placeholder_text("Username").build();
     let host = gtk::Entry::builder().placeholder_text("Computer name (hostname)").build();
@@ -734,7 +867,8 @@ fn add_account(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefC
     adv.borrow_mut().push(host.clone().upcast());
 
     // Advanced: an optional root password (root stays locked — login via this
-    // account's wheel/sudo — unless explicitly set) and auto-login.
+    // account's wheel/sudo — unless explicitly set), auto-login, and any
+    // additional accounts beyond this primary one.
     let root_pw = password_field_row("Root password (optional)", "Leave blank to keep root locked", {
         let state = state.clone();
         move |v| state.borrow_mut().root_password = v
@@ -743,11 +877,15 @@ fn add_account(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefC
         let state = state.clone();
         move |on| state.borrow_mut().autologin = on
     });
+    let extra_users = extra_users_row(state);
     for w in [&root_pw, &autologin] {
         w.set_visible(false);
         content.append(w);
         adv.borrow_mut().push(w.clone().upcast());
     }
+    extra_users.set_visible(false);
+    content.append(&extra_users);
+    adv.borrow_mut().push(extra_users.upcast());
 
     {
         let state = state.clone();
@@ -791,7 +929,7 @@ fn add_account(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefC
     stack.add_named(&root, Some("account"));
 }
 
-fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
+fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, cancel_flag: &Rc<RefCell<Option<Arc<AtomicBool>>>>) {
     let (root, content, buttons) = page("Ready to install", "Please review — this will erase the selected disk.");
 
     let summary = gtk::Label::new(None);
@@ -831,15 +969,26 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                 format!("{} (will be erased)", st.disk)
             };
             let mut fs_line = st.filesystem.clone();
-            if st.encrypt {
-                fs_line.push_str(" + LUKS encryption");
+            match st.encrypt_mode.as_str() {
+                "full" => fs_line.push_str(" + full-disk LUKS"),
+                "home" => fs_line.push_str(" + encrypted /home"),
+                _ => {}
             }
+            if st.lvm {
+                fs_line.push_str(" + LVM");
+            }
+            if !st.raid1_disk.trim().is_empty() {
+                fs_line.push_str(&format!(" + RAID1 with {}", st.raid1_disk.trim()));
+            }
+            let extra_n = parse_extra_users(&st.extra_users_text).len();
+            let account_extra = if extra_n > 0 { format!(" (+{extra_n} more)") } else { String::new() };
             summary.set_markup(&format!(
-                "<b>Setup:</b> {}\n<b>Disk:</b> {}\n<b>Account:</b> {} ({})\n<b>Filesystem:</b> {}   <b>Swap:</b> {}",
+                "<b>Setup:</b> {}\n<b>Disk:</b> {}\n<b>Account:</b> {} ({}){}\n<b>Filesystem:</b> {}   <b>Swap:</b> {}",
                 glib::markup_escape_text(&setup),
                 glib::markup_escape_text(&disk_str),
                 glib::markup_escape_text(&st.full_name),
                 glib::markup_escape_text(&st.username),
+                account_extra,
                 glib::markup_escape_text(&fs_line),
                 glib::markup_escape_text(&swap_str),
             ));
@@ -856,20 +1005,31 @@ fn add_review(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
     {
         let stack = stack.clone();
         let state = state.clone();
-        install.connect_clicked(move |_| start_install(&stack, &state));
+        let cancel_flag = cancel_flag.clone();
+        install.connect_clicked(move |_| start_install(&stack, &state, &cancel_flag));
     }
     buttons.append(&back);
     buttons.append(&install);
     stack.add_named(&root, Some("review"));
 }
 
-fn add_installing(stack: &Rc<gtk::Stack>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
-    let (root, content, _buttons) = page("Installing Manifest OS", "Sit back — this takes a few minutes. Don't turn off your computer.");
+fn add_installing(stack: &Rc<gtk::Stack>, adv: &Rc<RefCell<Vec<gtk::Widget>>>, cancel_flag: &Rc<RefCell<Option<Arc<AtomicBool>>>>) {
+    let (root, content, buttons) = page("Installing Manifest OS", "Sit back — this takes a few minutes. Don't turn off your computer.");
     let spinner = gtk::Spinner::new();
     spinner.set_size_request(48, 48);
     spinner.start();
     spinner.set_halign(gtk::Align::Center);
     content.append(&spinner);
+
+    // A running "Step N — <name>" counter, so a long silent stretch (a big
+    // package download, building paru) still reads as progress, not a hang.
+    // No fabricated "of M" total — which steps run varies with the plan, so a
+    // fake denominator would be dishonest.
+    let step_label = gtk::Label::new(None);
+    step_label.set_halign(gtk::Align::Center);
+    step_label.add_css_class("dim-label");
+    step_label.set_widget_name("step-counter");
+    content.append(&step_label);
 
     // A live log, so a long step (building paru, big package sets) doesn't look
     // frozen. It tails the same output the installer writes to
@@ -889,6 +1049,52 @@ fn add_installing(stack: &Rc<gtk::Stack>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
     scroller.set_visible(false);
     content.append(&scroller);
     adv.borrow_mut().push(scroller.upcast());
+
+    // Cancel, with a "click again to confirm" pattern (never a silent
+    // one-click cancel) — the install stops after the current step finishes,
+    // never mid-command, so a partial disk write can't happen.
+    let cancel_btn = gtk::Button::with_label("Cancel");
+    cancel_btn.add_css_class("destructive-action");
+    let confirming = Rc::new(std::cell::Cell::new(false));
+    {
+        let cancel_flag = cancel_flag.clone();
+        let confirming = confirming.clone();
+        let btn = cancel_btn.clone();
+        cancel_btn.connect_clicked(move |_| {
+            if confirming.get() {
+                if let Some(flag) = cancel_flag.borrow().as_ref() {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                btn.set_label("Cancelling…");
+                btn.set_sensitive(false);
+            } else {
+                confirming.set(true);
+                btn.set_label("Click again to cancel");
+                let confirming2 = confirming.clone();
+                let btn2 = btn.clone();
+                glib::timeout_add_local_once(Duration::from_secs(4), move || {
+                    if confirming2.get() {
+                        confirming2.set(false);
+                        btn2.set_label("Cancel");
+                    }
+                });
+            }
+        });
+    }
+    buttons.append(&cancel_btn);
+    // Reset the button each time a fresh install attempt shows this page.
+    {
+        let stack = stack.clone();
+        let confirming = confirming.clone();
+        let btn = cancel_btn.clone();
+        stack.connect_visible_child_name_notify(move |s| {
+            if s.visible_child_name().as_deref() == Some("installing") {
+                confirming.set(false);
+                btn.set_label("Cancel");
+                btn.set_sensitive(true);
+            }
+        });
+    }
 
     stack.add_named(&root, Some("installing"));
 }
@@ -917,6 +1123,60 @@ fn opt(s: &str) -> Option<String> {
     if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
+/// Populate `state` from a loaded preseed [`InstallPlan`], mapping its shape
+/// back into the GUI's flat per-widget fields — the same fields the wizard
+/// pages would have set, so Review/start_install work identically either way.
+fn load_preseed_into_state(state: &Rc<RefCell<State>>, plan: InstallPlan) {
+    let mut st = state.borrow_mut();
+    st.manifest = plan.manifest;
+    st.disk = plan.disk;
+    st.install_mode = plan.install_mode;
+    st.alongside_gib = plan.alongside_gib;
+    st.filesystem = plan.filesystem;
+    st.swap = plan.swap;
+    st.swap_size_gib = plan.swap_size_gib;
+    st.answers = plan.answers.into_iter().collect();
+    if let Some(acct) = plan.account {
+        st.full_name = acct.full_name;
+        st.username = acct.username;
+        st.password = acct.password;
+    }
+    st.hostname = plan.hostname.unwrap_or_default();
+    st.encrypt_mode = plan.encrypt_mode;
+    st.encrypt_passphrase = plan.encrypt_passphrase;
+    st.root_gib = plan.root_gib;
+    st.lvm = plan.lvm;
+    st.raid1_disk = plan.raid1_disk.unwrap_or_default();
+    st.timezone = plan.timezone.unwrap_or_default();
+    st.locale = plan.locale.unwrap_or_default();
+    st.keymap = plan.keymap.unwrap_or_default();
+    st.root_password = plan.root_password.unwrap_or_default();
+    st.autologin = plan.autologin;
+    st.install_nvidia = plan.install_nvidia;
+    st.install_printing = plan.install_printing;
+    st.extra_users_text = plan
+        .extra_users
+        .iter()
+        .map(|u| {
+            if u.sudo {
+                format!("{}:{}:sudo", u.username, u.password)
+            } else {
+                format!("{}:{}", u.username, u.password)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    st.post_install_script = plan.post_install_script.unwrap_or_default();
+    if let Some(ip) = plan.static_ip {
+        st.static_ip = ip.address;
+        st.gateway = ip.gateway;
+        st.dns = ip.dns;
+    }
+    st.proxy = plan.proxy.unwrap_or_default();
+    st.vlan_id = plan.vlan_id.map(|v| v.to_string()).unwrap_or_default();
+    st.vlan_parent = plan.vlan_parent.unwrap_or_default();
+}
+
 /// The `manifest provision …` command equivalent to the current selections, for
 /// the review page. Secrets are shown as `******`, never the real values.
 fn cli_command(st: &State) -> String {
@@ -938,8 +1198,17 @@ fn cli_command(st: &State) -> String {
     if let Some(g) = st.swap_size_gib {
         c.push_str(&format!(" --swap-size-gib {g}"));
     }
-    if st.encrypt {
-        c.push_str(" --encrypt --passphrase ******");
+    if st.encrypt_mode != "none" {
+        c.push_str(&format!(" --encrypt-mode {} --passphrase ******", st.encrypt_mode));
+        if let Some(g) = st.root_gib {
+            c.push_str(&format!(" --root-gib {g}"));
+        }
+    }
+    if st.lvm {
+        c.push_str(" --lvm");
+    }
+    if !st.raid1_disk.trim().is_empty() {
+        c.push_str(&format!(" --raid1-disk {}", st.raid1_disk.trim()));
     }
     for (flag, val) in [
         ("--timezone", &st.timezone),
@@ -954,6 +1223,9 @@ fn cli_command(st: &State) -> String {
     if !st.username.trim().is_empty() {
         c.push_str(&format!(" --user {} --password ******", st.username.trim()));
     }
+    for u in parse_extra_users(&st.extra_users_text) {
+        c.push_str(&format!(" --extra-user {}:******{}", u.username, if u.sudo { ":sudo" } else { "" }));
+    }
     if !st.root_password.trim().is_empty() {
         c.push_str(" --root-password ******");
     }
@@ -963,13 +1235,62 @@ fn cli_command(st: &State) -> String {
     if st.install_nvidia {
         c.push_str(" --install-nvidia");
     }
+    if st.install_printing {
+        c.push_str(" --install-printing");
+    }
+    if !st.post_install_script.trim().is_empty() {
+        c.push_str(&format!(" --post-script {}", st.post_install_script.trim()));
+    }
+    if !st.static_ip.trim().is_empty() {
+        c.push_str(&format!(" --static-ip {} --gateway {}", st.static_ip.trim(), st.gateway.trim()));
+        if !st.dns.trim().is_empty() {
+            c.push_str(&format!(" --dns {}", st.dns.trim()));
+        }
+    }
+    if !st.proxy.trim().is_empty() {
+        c.push_str(&format!(" --proxy {}", st.proxy.trim()));
+    }
+    if !st.vlan_id.trim().is_empty() {
+        c.push_str(&format!(" --vlan-id {} --vlan-parent {}", st.vlan_id.trim(), st.vlan_parent.trim()));
+    }
     c
 }
 
-fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
+/// Parse the extra-users textarea: one "username:password[:sudo]" per line,
+/// same format (and same parsing) as `provision --extra-user`.
+fn parse_extra_users(text: &str) -> Vec<ExtraUser> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let mut parts = line.splitn(3, ':');
+            let username = parts.next()?.to_string();
+            let password = parts.next()?.to_string();
+            let sudo = parts.next() == Some("sudo");
+            Some(ExtraUser { username, password, sudo })
+        })
+        .collect()
+}
+
+fn start_install(
+    stack: &Rc<gtk::Stack>,
+    state: &Rc<RefCell<State>>,
+    cancel_flag: &Rc<RefCell<Option<Arc<AtomicBool>>>>,
+) {
     // Build the plan from collected state.
     let plan = {
         let st = state.borrow();
+        let static_ip = if st.static_ip.trim().is_empty() {
+            None
+        } else {
+            Some(StaticIp {
+                address: st.static_ip.trim().to_string(),
+                gateway: st.gateway.trim().to_string(),
+                dns: st.dns.trim().to_string(),
+            })
+        };
         InstallPlan {
             disk: st.disk.clone(),
             install_mode: st.install_mode.clone(),
@@ -988,24 +1309,37 @@ fn start_install(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>) {
                     password: st.password.clone(),
                 })
             },
+            extra_users: parse_extra_users(&st.extra_users_text),
             hostname: opt(&st.hostname),
-            encrypt: st.encrypt,
+            encrypt_mode: st.encrypt_mode.clone(),
             encrypt_passphrase: st.encrypt_passphrase.clone(),
+            root_gib: st.root_gib,
+            lvm: st.lvm,
+            raid1_disk: opt(&st.raid1_disk),
             timezone: opt(&st.timezone),
             locale: opt(&st.locale),
             keymap: opt(&st.keymap),
             root_password: opt(&st.root_password),
             autologin: st.autologin,
             install_nvidia: st.install_nvidia,
+            install_printing: st.install_printing,
+            post_install_script: opt(&st.post_install_script),
+            static_ip,
+            proxy: opt(&st.proxy),
+            vlan_id: st.vlan_id.trim().parse().ok(),
+            vlan_parent: opt(&st.vlan_parent),
         }
     };
+
+    let flag = Arc::new(AtomicBool::new(false));
+    *cancel_flag.borrow_mut() = Some(flag.clone());
 
     stack.set_visible_child_name("installing");
     start_log_tail(stack);
 
     let stack2 = stack.clone();
     run_async(
-        move || installer::execute(&plan, &Ctx::new(false)).map_err(|e| format!("{e:#}")),
+        move || installer::execute(&plan, &Ctx::with_cancel_flag(false, flag)).map_err(|e| format!("{e:#}")),
         move |result| match result {
             Ok(()) => {
                 set_done_message(&stack2);
@@ -1029,6 +1363,7 @@ fn start_log_tail(stack: &Rc<gtk::Stack>) {
     let Some(page) = stack.child_by_name("installing") else { return };
     let Some(w) = find_named(&page, "install-log") else { return };
     let Ok(view) = w.downcast::<gtk::TextView>() else { return };
+    let step_label = find_named(&page, "step-counter").and_then(|w| w.downcast::<gtk::Label>().ok());
     let buffer = view.buffer();
     // Skip whatever predates the install (GUI/cage startup chatter).
     let start = std::fs::metadata(LOG).map(|m| m.len()).unwrap_or(0);
@@ -1044,8 +1379,32 @@ fn start_log_tail(stack: &Rc<gtk::Stack>) {
             let mut end = buffer.end_iter();
             view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
         }
+        if let Some(label) = &step_label {
+            let steps = scan_steps(LOG, start);
+            if let Some(current) = steps.last() {
+                label.set_text(&format!("Step {} — {}", steps.len(), current));
+            }
+        }
         glib::ControlFlow::Continue
     });
+}
+
+/// Distinct `[Step Name]` markers seen so far in the install log, from byte
+/// `start` onward — used for the "Step N — <name>" counter. Reads the whole
+/// remaining file each call (typically well under 1 MB), not just the
+/// display-truncated tail `read_log_tail` shows.
+fn scan_steps(path: &str, start: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
+    let _ = f.seek(SeekFrom::Start(start));
+    let mut buf = String::new();
+    let _ = f.read_to_string(&mut buf);
+    buf.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            (l.len() > 2 && l.starts_with('[') && l.ends_with(']')).then(|| l[1..l.len() - 1].to_string())
+        })
+        .collect()
 }
 
 /// Read `path` from byte `start` to EOF and return its last `max_lines` lines.
@@ -1180,6 +1539,32 @@ fn alongside_size_row(state: &Rc<RefCell<State>>) -> gtk::Box {
     row
 }
 
+/// A "Label: [searchable dropdown]" row — a long list (e.g. every timezone)
+/// with GTK4's built-in incremental search, so typing narrows it instantly.
+fn searchable_dropdown_row(
+    label: &str,
+    options: &[String],
+    on_change: impl Fn(String) + 'static,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let l = gtk::Label::new(Some(label));
+    l.set_halign(gtk::Align::Start);
+    l.set_hexpand(true);
+    row.append(&l);
+    let refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+    let dd = gtk::DropDown::from_strings(&refs);
+    dd.set_enable_search(true);
+    let opts = options.to_vec();
+    dd.connect_selected_notify(move |d| {
+        let i = d.selected() as usize;
+        if let Some(v) = opts.get(i) {
+            on_change(v.clone());
+        }
+    });
+    row.append(&dd);
+    row
+}
+
 /// A "Label: [entry]" row that reports the entry text on every change.
 fn text_field_row(
     label: &str,
@@ -1229,36 +1614,183 @@ fn switch_row(label: &str, on_change: impl Fn(bool) + 'static) -> gtk::Box {
     row
 }
 
-/// "Encrypt disk (LUKS)": a switch plus a passphrase entry that appears when on.
-fn encrypt_row(state: &Rc<RefCell<State>>) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let l = gtk::Label::new(Some("Encrypt disk (LUKS)"));
-    l.set_halign(gtk::Align::Start);
-    l.set_hexpand(true);
-    row.append(&l);
+/// Encryption mode: none / full-disk LUKS / home-only LUKS, plus the
+/// passphrase (shown for full or home) and a root-size field (shown for home
+/// only — the rest of the disk becomes /home). Returns a Box containing all of
+/// it, so callers add/hide it as one Advanced-only unit.
+fn encrypt_mode_row(state: &Rc<RefCell<State>>) -> gtk::Box {
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let pass = gtk::PasswordEntry::builder().show_peek_icon(true).build();
     pass.set_property("placeholder-text", "Encryption passphrase");
     pass.set_visible(false);
+    let root_gib = gtk::Entry::builder().placeholder_text("40").max_width_chars(9).build();
+    let root_gib_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let root_gib_label = gtk::Label::new(Some("Root size (GiB) — the rest becomes /home"));
+    root_gib_label.set_halign(gtk::Align::Start);
+    root_gib_label.set_hexpand(true);
+    root_gib_row.append(&root_gib_label);
+    root_gib_row.append(&root_gib);
+    root_gib_row.set_visible(false);
 
-    let sw = gtk::Switch::new();
-    sw.set_valign(gtk::Align::Center);
-    {
+    let choice = labeled_choice("Encryption", &["Off", "Full disk", "Home only"], 0, {
         let state = state.clone();
         let pass = pass.clone();
-        sw.connect_active_notify(move |s| {
-            let on = s.is_active();
-            state.borrow_mut().encrypt = on;
-            pass.set_visible(on);
-        });
-    }
+        let root_gib_row = root_gib_row.clone();
+        move |v| {
+            let mode = match v.as_str() {
+                "Full disk" => "full",
+                "Home only" => "home",
+                _ => "none",
+            };
+            state.borrow_mut().encrypt_mode = mode.to_string();
+            pass.set_visible(mode != "none");
+            root_gib_row.set_visible(mode == "home");
+        }
+    });
     {
         let state = state.clone();
         pass.connect_changed(move |e| state.borrow_mut().encrypt_passphrase = e.text().to_string());
     }
-    row.append(&sw);
-    row.append(&pass);
-    row
+    {
+        let state = state.clone();
+        root_gib.connect_changed(move |e| {
+            state.borrow_mut().root_gib = e.text().trim().parse::<u32>().ok();
+        });
+    }
+
+    col.append(&choice);
+    col.append(&pass);
+    col.append(&root_gib_row);
+    col
+}
+
+/// LVM (root on a single logical volume) + RAID1 (mirror root across a second
+/// disk). Composable with each other and with encryption — see
+/// `installer::build_storage`.
+fn lvm_raid_row(state: &Rc<RefCell<State>>, other_disks: &[String]) -> gtk::Box {
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let lvm = switch_row("Use LVM (root on a resizable logical volume)", {
+        let state = state.clone();
+        move |on| state.borrow_mut().lvm = on
+    });
+    col.append(&lvm);
+
+    if !other_disks.is_empty() {
+        let raid_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let label = gtk::Label::new(Some("Mirror root across a second disk (RAID1)"));
+        label.set_halign(gtk::Align::Start);
+        label.set_hexpand(true);
+        raid_row.append(&label);
+        let sw = gtk::Switch::new();
+        sw.set_valign(gtk::Align::Center);
+        raid_row.append(&sw);
+
+        let refs: Vec<&str> = other_disks.iter().map(|s| s.as_str()).collect();
+        let picker = gtk::DropDown::from_strings(&refs);
+        picker.set_visible(false);
+        raid_row.append(&picker);
+
+        {
+            let state = state.clone();
+            let picker = picker.clone();
+            let disks = other_disks.to_vec();
+            let set_from_picker = move |st: &mut State, picker: &gtk::DropDown| {
+                let i = picker.selected() as usize;
+                st.raid1_disk = disks.get(i).cloned().unwrap_or_default();
+            };
+            sw.connect_active_notify(move |s| {
+                let on = s.is_active();
+                picker.set_visible(on);
+                let mut st = state.borrow_mut();
+                if on {
+                    set_from_picker(&mut st, &picker);
+                } else {
+                    st.raid1_disk = String::new();
+                }
+            });
+        }
+        {
+            let state = state.clone();
+            let disks = other_disks.to_vec();
+            picker.connect_selected_notify(move |p| {
+                let i = p.selected() as usize;
+                state.borrow_mut().raid1_disk = disks.get(i).cloned().unwrap_or_default();
+            });
+        }
+        col.append(&raid_row);
+    }
+    col
+}
+
+/// Additional accounts beyond the primary one: one "username:password[:sudo]"
+/// per line, parsed the same way `provision --extra-user` is. A plain
+/// multi-line text field, rather than dynamic add/remove rows — this is
+/// Advanced-only, and the format is simple enough to type directly.
+fn extra_users_row(state: &Rc<RefCell<State>>) -> gtk::Box {
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let label = gtk::Label::new(Some("Additional accounts (one per line: username:password or username:password:sudo)"));
+    label.set_halign(gtk::Align::Start);
+    label.set_wrap(true);
+    col.append(&label);
+    let view = gtk::TextView::new();
+    view.set_monospace(true);
+    view.add_css_class("card");
+    let scroller = gtk::ScrolledWindow::builder().min_content_height(80).child(&view).build();
+    col.append(&scroller);
+    {
+        let state = state.clone();
+        view.buffer().connect_changed(move |b| {
+            let text = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+            state.borrow_mut().extra_users_text = text;
+        });
+    }
+    col
+}
+
+/// A rough live password-strength meter (length + character variety — no
+/// external dependency). Purely advisory; doesn't block a weak password.
+fn password_strength(pw: &str) -> (f64, &'static str) {
+    if pw.is_empty() {
+        return (0.0, "");
+    }
+    let len_score = (pw.len() as f64 / 12.0).min(1.0);
+    let kinds = [
+        pw.chars().any(|c| c.is_ascii_lowercase()),
+        pw.chars().any(|c| c.is_ascii_uppercase()),
+        pw.chars().any(|c| c.is_ascii_digit()),
+        pw.chars().any(|c| !c.is_ascii_alphanumeric()),
+    ];
+    let variety = kinds.iter().filter(|&&k| k).count() as f64 / 4.0;
+    let score = (len_score * 0.6 + variety * 0.4).min(1.0);
+    let label = if score < 0.34 { "Weak" } else if score < 0.67 { "Okay" } else { "Strong" };
+    (score, label)
+}
+
+/// A GtkLevelBar + word ("Weak"/"Okay"/"Strong") under a password entry.
+/// Returns the row; call `update(&entry.text())` from the entry's
+/// `connect_changed` to keep it live.
+fn password_strength_meter() -> (gtk::Box, impl Fn(&str)) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let bar = gtk::LevelBar::new();
+    bar.set_min_value(0.0);
+    bar.set_max_value(1.0);
+    bar.set_hexpand(true);
+    let word = gtk::Label::new(None);
+    word.add_css_class("dim-label");
+    word.set_width_chars(6);
+    row.append(&bar);
+    row.append(&word);
+    let update = {
+        let bar = bar.clone();
+        let word = word.clone();
+        move |pw: &str| {
+            let (score, label) = password_strength(pw);
+            bar.set_value(score);
+            word.set_text(label);
+        }
+    };
+    (row, update)
 }
 
 /// A "Label: [A] [B]" segmented choice row that reports the chosen string.

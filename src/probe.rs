@@ -8,6 +8,20 @@ use serde::Deserialize;
 use std::process::Command;
 use std::time::Duration;
 
+// Preseed-JSON defaults for InstallPlan — the same defaults `provision`'s CLI
+// flags declare, so a partial preseed file behaves identically to omitting a
+// flag (an empty `swap`/`filesystem` string would otherwise silently mean
+// "no swap" / fall through to ext4 inconsistently).
+fn default_install_mode() -> String {
+    "erase".to_string()
+}
+fn default_filesystem() -> String {
+    "ext4".to_string()
+}
+fn default_swap() -> String {
+    "zram".to_string()
+}
+
 /// A whole disk the system can be installed onto.
 pub struct Disk {
     pub name: String,
@@ -58,20 +72,20 @@ pub struct InstallPlan {
     pub disk: String,
     /// `"erase"` (wipe the whole disk) or `"alongside"` (shrink an existing OS
     /// and dual-boot).
-    #[serde(default)]
+    #[serde(default = "default_install_mode")]
     pub install_mode: String,
     /// For `alongside`: how many GiB to carve out for Manifest OS (None = a
     /// sensible default).
     #[serde(default)]
     pub alongside_gib: Option<u32>,
-    #[serde(default)]
+    #[serde(default = "default_filesystem")]
     pub filesystem: String,
     /// Persistent swap for the *installed* system, one of:
     /// `"none"`, `"zram"` (compressed RAM swap via zram-generator),
     /// `"swapfile"` (a file on root), or `"partition"` (a dedicated partition).
     /// Independent of the always-on install-time zram that keeps low-memory
     /// machines from OOMing during pacstrap/AUR builds.
-    #[serde(default)]
+    #[serde(default = "default_swap")]
     pub swap: String,
     /// Size in GiB for `swapfile`/`partition` swap (ignored otherwise).
     #[serde(default)]
@@ -190,6 +204,42 @@ pub fn primary_iface() -> Option<String> {
     names.sort();
     names.into_iter().next()
 }
+
+/// Every IANA timezone name systemd knows about, for a searchable picker.
+/// Falls back to a short common list if `timedatectl` isn't available.
+pub fn list_timezones() -> Vec<String> {
+    let out = Command::new("timedatectl").arg("list-timezones").output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let v: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        _ => {}
+    }
+    ["UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Europe/Paris", "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// A curated set of common locales — not exhaustive (there's no reliable way
+/// to enumerate every generatable locale from the live ISO, since it isn't
+/// what will be generated on the *target*), but covers the common case; the
+/// GUI also keeps a manual-entry field for anything else.
+pub const COMMON_LOCALES: &[&str] = &[
+    "en_US.UTF-8", "en_GB.UTF-8", "en_CA.UTF-8", "en_AU.UTF-8", "en_IE.UTF-8",
+    "de_DE.UTF-8", "fr_FR.UTF-8", "es_ES.UTF-8", "es_MX.UTF-8", "it_IT.UTF-8",
+    "pt_BR.UTF-8", "pt_PT.UTF-8", "nl_NL.UTF-8", "pl_PL.UTF-8", "ru_RU.UTF-8",
+    "ja_JP.UTF-8", "ko_KR.UTF-8", "zh_CN.UTF-8", "zh_TW.UTF-8", "sv_SE.UTF-8",
+    "da_DK.UTF-8", "fi_FI.UTF-8", "nb_NO.UTF-8", "tr_TR.UTF-8", "ar_SA.UTF-8",
+    "hi_IN.UTF-8", "el_GR.UTF-8", "cs_CZ.UTF-8", "uk_UA.UTF-8", "he_IL.UTF-8",
+];
 
 /// Strip ANSI escape sequences (iwctl colorizes its table output).
 fn strip_ansi(s: &str) -> String {

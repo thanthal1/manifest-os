@@ -11,16 +11,37 @@
 use anyhow::{bail, Result};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Shared execution context threaded through the install pipeline.
 pub struct Ctx {
     /// When true, commands are printed but never run.
     pub dry_run: bool,
+    /// Cooperative cancellation: checked before every command/write. Set by
+    /// the GUI's Cancel button (via a shared `Arc`). We never kill a running
+    /// command mid-write (that risks corrupting a partition/package
+    /// transaction) — cancelling only takes effect *between* steps.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Ctx {
     pub fn new(dry_run: bool) -> Self {
-        Self { dry_run }
+        Self { dry_run, cancelled: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// A Ctx sharing an existing cancellation flag, so something outside the
+    /// worker thread running `installer::execute` (e.g. the GUI's Cancel
+    /// button, in the main thread) can signal it.
+    pub fn with_cancel_flag(dry_run: bool, cancelled: Arc<AtomicBool>) -> Self {
+        Self { dry_run, cancelled }
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            bail!("Cancelled by user");
+        }
+        Ok(())
     }
 
     /// Run a program as the current user. Streams output to the terminal.
@@ -34,6 +55,7 @@ impl Ctx {
     }
 
     fn exec(&self, program: &str, args: &[&str], root: bool) -> Result<()> {
+        self.check_cancelled()?;
         let prefix = if root { "sudo " } else { "" };
         println!("  $ {prefix}{program} {}", args.join(" "));
         if self.dry_run {
@@ -56,6 +78,7 @@ impl Ctx {
     /// Run a raw shell command line via `sh -c`. Used for pre/post hooks and
     /// multi-step bootstraps. Set `root` to wrap the whole line in `sudo sh -c`.
     pub fn shell(&self, line: &str, root: bool) -> Result<()> {
+        self.check_cancelled()?;
         let prefix = if root { "sudo " } else { "" };
         println!("  $ {prefix}{line}");
         if self.dry_run {
@@ -81,6 +104,7 @@ impl Ctx {
     /// greeter configs, env drop-ins and other desktop setup that isn't a
     /// package install.
     pub fn write_root(&self, path: &str, content: &str) -> Result<()> {
+        self.check_cancelled()?;
         println!("  > write {path} ({} bytes, root)", content.len());
         if self.dry_run {
             return Ok(());
@@ -114,6 +138,7 @@ impl Ctx {
     /// In dry-run nothing executes and an empty string is returned, so callers
     /// must substitute a placeholder for preview output.
     pub fn output(&self, root: bool, program: &str, args: &[&str]) -> Result<String> {
+        self.check_cancelled()?;
         if self.dry_run {
             return Ok(String::new());
         }
@@ -139,6 +164,7 @@ impl Ctx {
 
     /// Write a file as the current user (no sudo), creating parent dirs.
     pub fn write_user(&self, path: &str, content: &str) -> Result<()> {
+        self.check_cancelled()?;
         println!("  > write {path} ({} bytes)", content.len());
         if self.dry_run {
             return Ok(());
@@ -153,6 +179,7 @@ impl Ctx {
     /// Set a user's password via `chpasswd`, feeding it over stdin so the
     /// password is NEVER printed to the log.
     pub fn set_password(&self, user: &str, password: &str) -> Result<()> {
+        self.check_cancelled()?;
         println!("  · setting password for {user}");
         if self.dry_run {
             return Ok(());
@@ -179,6 +206,7 @@ impl Ctx {
     /// Used by the installer to set the friendly account's password in the new
     /// system.
     pub fn set_password_chroot(&self, root: &str, user: &str, password: &str) -> Result<()> {
+        self.check_cancelled()?;
         println!("  · setting password for {user}");
         if self.dry_run {
             return Ok(());
@@ -204,6 +232,7 @@ impl Ctx {
     /// NEVER printed to the log or visible in the process list. Used for LUKS
     /// format/open during an encrypted install.
     pub fn cryptsetup(&self, args: &[&str], passphrase: &str) -> Result<()> {
+        self.check_cancelled()?;
         println!("  $ sudo cryptsetup {} (passphrase on stdin)", args.join(" "));
         if self.dry_run {
             return Ok(());
