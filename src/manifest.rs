@@ -67,6 +67,13 @@ pub struct Manifest {
     #[serde(default)]
     pub files: Vec<FileSpec>,
 
+    /// Config *fragments* inserted into existing files without replacing them
+    /// — e.g. drop a waybar launch bind into the `binds` section of someone's
+    /// niri/Hyprland config. Each snippet is wrapped in comment markers so
+    /// re-applying updates it in place. See [`crate::snippets`].
+    #[serde(default)]
+    pub snippets: Vec<Snippet>,
+
     /// Desktop wallpaper, applied across whatever environment the manifest sets
     /// up (GNOME, KDE, Xfce, a window manager, …). Either a bare string source
     /// (`"wallpaper": "https://…/bg.jpg"`) or an object with a fit mode
@@ -150,6 +157,29 @@ pub struct FileSpec {
     pub mode: Option<String>,
     /// chown target, e.g. "root:root" or "alice". Implies a root-owned write.
     pub owner: Option<String>,
+}
+
+/// A config fragment to insert into an existing file:
+/// ```json
+/// {
+///   "id": "waybar-bind",
+///   "path": "~/.config/niri/config.kdl",
+///   "section": "binds",
+///   "content": "Mod+W { spawn \"waybar\"; }"
+/// }
+/// ```
+/// `id` names the managed block (re-applying replaces it in place); `section`
+/// targets a brace block (`binds { … }`) or INI `[section]` — omitted, the
+/// snippet is appended to the end of the file. See [`crate::snippets`].
+#[derive(Debug, Deserialize)]
+pub struct Snippet {
+    /// Unique name for this fragment's managed block.
+    pub id: String,
+    /// Target file. `~/...` resolves to the primary user's home.
+    pub path: String,
+    /// Optional section to insert into (brace block or INI `[section]`).
+    pub section: Option<String>,
+    pub content: String,
 }
 
 /// A wallpaper source, accepted as either a bare string or an object with a

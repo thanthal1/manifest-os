@@ -80,6 +80,7 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
     "poweruser2:minimal:erase:--install-printing --post-script /root/post.sh:printf '#!/bin/sh\necho hello from post-install script\n' > /root/post.sh; chmod +x /root/post.sh"
     keybindings:keybindings-demo:erase
     theme:theme-demo:erase
+    snippets:snippet-demo:erase
   )
 fi
 

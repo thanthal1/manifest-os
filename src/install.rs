@@ -20,6 +20,7 @@ use crate::keybindings;
 use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
+use crate::snippets;
 use crate::system;
 use crate::theming;
 use crate::users;
@@ -147,6 +148,13 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     if !manifest.files.is_empty() {
         step("Writing files");
         files::apply(&manifest.files, ctx)?;
+    }
+
+    // Last of the file layers: snippets edit *inside* whatever dotfiles/files
+    // (or a generated keybindings config) put on disk.
+    if !manifest.snippets.is_empty() {
+        step("Inserting config snippets");
+        snippets::apply(&manifest.snippets, primary_user, ctx)?;
     }
 
     enable_services(manifest, ctx)?;

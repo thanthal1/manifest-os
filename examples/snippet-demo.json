@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Snippet Demo",
+    "author": "you",
+    "description": "Proves out `snippets`: a base niri config is written by `files`, then snippets insert a waybar autostart at the top level and a launch bind INSIDE the existing binds section — without replacing the file.",
+    "tags": ["niri", "wayland", "snippets", "waybar"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "snippet-demo",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us"
+  },
+  "users": [
+    {
+      "name": "demo",
+      "groups": ["wheel", "video", "input"],
+      "shell": "/bin/bash",
+      "sudo": true,
+      "password": "demo"
+    }
+  ],
+  "desktop": "niri",
+  "display_manager": "greetd",
+  "packages": ["waybar"],
+  "files": [
+    {
+      "path": "/home/demo/.config/niri/config.kdl",
+      "owner": "demo:demo",
+      "content": "input {\n    keyboard {\n        xkb {\n            layout \"us\"\n        }\n    }\n}\n\nprefer-no-csd\n\nbinds {\n    Mod+Return { spawn \"foot\"; }\n    Mod+Q { close-window; }\n}\n"
+    }
+  ],
+  "snippets": [
+    {
+      "id": "waybar-autostart",
+      "path": "~/.config/niri/config.kdl",
+      "content": "spawn-at-startup \"waybar\""
+    },
+    {
+      "id": "waybar-toggle-bind",
+      "path": "~/.config/niri/config.kdl",
+      "section": "binds",
+      "content": "Mod+W { spawn \"pkill\" \"-x\" \"waybar\"; }"
+    }
+  ]
+}
