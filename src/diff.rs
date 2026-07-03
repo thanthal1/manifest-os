@@ -134,7 +134,7 @@ fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>
     value_change(out, "Font", o.font.as_deref(), n.font.as_deref());
     let od = o.dark.map(yesno);
     let nd = n.dark.map(yesno);
-    value_change(out, "Dark mode", od.as_deref(), nd.as_deref());
+    value_change(out, "Dark mode", od, nd);
 }
 
 fn wall_pair(old: &Manifest, new: &Manifest) -> (Option<String>, Option<String>) {

@@ -109,10 +109,12 @@ fn markers(path: &str, id: &str) -> (String, String) {
 /// whatever comment characters surround it).
 pub fn extract_blocks(content: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
     for id in block_ids(content) {
         if let Some((a, b)) = block_bounds(content, &id) {
-            let lines: Vec<&str> = content.lines().collect();
-            let inner = lines[a + 1..b].join("\n");
+            // Both markers on one line (a == b) is a malformed but survivable
+            // block: treat it as empty rather than panicking on a[+1]..b.
+            let inner = lines.get(a + 1..b).unwrap_or_default().join("\n");
             out.push((id, inner));
         }
     }
@@ -163,12 +165,21 @@ pub fn upsert(current: &str, s: &Snippet) -> String {
     let (start, end) = markers(&s.path, &s.id);
     let block = format!("{start}\n{}\n{end}", s.content.trim_end());
 
-    // 1) Existing managed block → replace in place.
+    // 1) Existing managed block → replace in place, keeping the indentation
+    //    the original insertion gave it (a block inside `binds { … }` was
+    //    indented to match; the replacement must be too or re-applying
+    //    un-indents it).
     if let (Some(a), Some(b)) = (find_line(current, &start), find_line(current, &end)) {
         if a <= b {
             let lines: Vec<&str> = current.lines().collect();
+            let indent: String = lines[a].chars().take_while(|c| c.is_whitespace()).collect();
+            let indented = block
+                .lines()
+                .map(|l| if l.is_empty() { String::new() } else { format!("{indent}{l}") })
+                .collect::<Vec<_>>()
+                .join("\n");
             let mut out: Vec<String> = lines[..a].iter().map(|l| l.to_string()).collect();
-            out.push(block);
+            out.push(indented);
             out.extend(lines[b + 1..].iter().map(|l| l.to_string()));
             return join(out);
         }
@@ -377,6 +388,28 @@ mod tests {
         let blocks = extract_blocks(css);
         assert_eq!(blocks[0].0, "bar-style");
         assert!(blocks[0].1.contains("color: red"));
+    }
+
+    #[test]
+    fn reapplying_inside_a_section_keeps_the_indentation() {
+        let s1 = snip("waybar", "config.kdl", Some("binds"), "Mod+W { spawn \"waybar\"; }");
+        let once = upsert(NIRI, &s1);
+        let s2 = snip("waybar", "config.kdl", Some("binds"), "Mod+B { spawn \"waybar\"; }");
+        let twice = upsert(&once, &s2);
+        // The replaced block's marker keeps the indent the insertion gave it.
+        let marker_line = twice.lines().find(|l| l.contains(">>> manifest:waybar >>>")).unwrap();
+        assert!(marker_line.starts_with("    "), "lost indentation: {marker_line:?}");
+        let content_line = twice.lines().find(|l| l.contains("Mod+B")).unwrap();
+        assert!(content_line.starts_with("    "), "lost indentation: {content_line:?}");
+    }
+
+    #[test]
+    fn extract_blocks_survives_markers_on_one_line() {
+        // A malformed, hand-mangled block: both markers on the same line.
+        let bad = "# >>> manifest:x >>> # <<< manifest:x <<<\nrest\n";
+        let blocks = extract_blocks(bad);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].1, "");
     }
 
     #[test]

@@ -22,7 +22,8 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use manifest::manifest::Snippet;
+use manifest::history;
+use manifest::manifest::{Question, Snippet};
 use manifest::snippets;
 
 use crate::snapshots;
@@ -44,7 +45,10 @@ const KNOWN: &[(&str, &str, &str)] = &[
 ];
 
 struct Node {
-    /// Node identity: the snippet id, or `file:<path>` for file nodes.
+    /// Canvas-unique identity: `file:<path>` for file nodes, `<id>@<path>` for
+    /// segments — two files can legitimately carry blocks with the same
+    /// snippet id, and they must stay distinct nodes. The snippet id itself
+    /// lives in `title`.
     key: String,
     title: String,
     path: PathBuf,
@@ -62,6 +66,9 @@ struct Graph {
     edges: RefCell<Vec<(String, String)>>,
     /// Snippet blocks removed in this session; Apply strips them from disk.
     deleted: RefCell<Vec<(PathBuf, String)>>,
+    /// The last-applied manifest's survey questions, if any (`manifest history`)
+    /// — used to show which question fed a segment's `{{id}}` value, if any.
+    survey: Vec<Question>,
     fixed: gtk::Fixed,
     canvas: gtk::DrawingArea,
 }
@@ -80,6 +87,7 @@ pub fn build(
         nodes: RefCell::new(Vec::new()),
         edges: RefCell::new(Vec::new()),
         deleted: RefCell::new(Vec::new()),
+        survey: load_survey(),
         fixed: fixed.clone(),
         canvas: canvas.clone(),
     });
@@ -177,7 +185,7 @@ fn scan(graph: &Rc<Graph>, window: &adw::ApplicationWindow, toasts: &adw::ToastO
                 graph,
                 window,
                 toasts,
-                &id.clone(),
+                &format!("{id}@{}", path.display()),
                 &id,
                 &path,
                 false,
@@ -276,7 +284,7 @@ fn make_node(
             let n = node.clone();
             let g = graph.clone();
             del.connect_clicked(move |_| {
-                g.deleted.borrow_mut().push((n.path.clone(), n.key.clone()));
+                g.deleted.borrow_mut().push((n.path.clone(), n.title.clone()));
                 g.fixed.remove(&n.widget);
                 g.nodes.borrow_mut().retain(|m| m.key != n.key);
                 g.edges.borrow_mut().retain(|(a, b)| *a != n.key && *b != n.key);
@@ -318,6 +326,16 @@ fn make_node(
         sc.add_css_class("view");
         inner.append(&sc);
 
+        // The survey questions this segment actually uses (its content contains
+        // their `{{id}}` token), if the last-applied manifest declared any.
+        for q in matching_questions(content, &graph.survey) {
+            let badge = gtk::Label::new(Some(&format!("? {} — {}", q.id, q.label)));
+            badge.add_css_class("dim-label");
+            badge.set_halign(gtk::Align::Start);
+            badge.set_wrap(true);
+            inner.append(&badge);
+        }
+
         let target = gtk::Label::new(Some(&format!("→ {}", short(path))));
         target.add_css_class("dim-label");
         target.set_halign(gtk::Align::Start);
@@ -350,6 +368,34 @@ fn make_node(
     graph.fixed.put(&boxed, x, y);
     graph.nodes.borrow_mut().push(node.clone());
     node
+}
+
+/// The last-applied manifest's survey questions, if they can be read without
+/// interrupting startup. `history::current()` shells out to `sudo git` (the
+/// history repo is root-only); when sudo would stop to ask for a password —
+/// this app runs unprivileged, often from a terminal — skip rather than hang
+/// the launch on a prompt the user never asked for.
+fn load_survey() -> Vec<Question> {
+    let sudo_free = std::process::Command::new("sudo")
+        .args(["-n", "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !sudo_free {
+        return Vec::new();
+    }
+    history::current().map(|m| m.survey).unwrap_or_default()
+}
+
+/// Survey questions whose `{{id}}` token appears in a segment's content, in
+/// the order they're declared in the manifest.
+fn matching_questions<'a>(content: &str, survey: &'a [Question]) -> Vec<&'a Question> {
+    survey
+        .iter()
+        .filter(|q| content.contains(&format!("{{{{{}}}}}", q.id)))
+        .collect()
 }
 
 fn short(path: &PathBuf) -> String {
@@ -515,8 +561,13 @@ fn add_dialog(window: &adw::ApplicationWindow, graph: &Rc<Graph>, toasts: &adw::
         };
         let buffer = view.buffer();
         let content = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+        let key = format!("{name}@{}", full.display());
+        if graph.nodes.borrow().iter().any(|n| n.key == key) {
+            toasts.add_toast(adw::Toast::new("That segment already exists for this file."));
+            return;
+        }
         let node = make_node(
-            &graph, &window, &toasts, &name, &name, &full, false, &content,
+            &graph, &window, &toasts, &key, &name, &full, false, &content,
             section.text().trim(), 140.0, 60.0,
         );
         // Wire to the file node if it's on the canvas.
@@ -550,7 +601,7 @@ fn apply_all(graph: &Rc<Graph>, toasts: &adw::ToastOverlay) {
         let current = std::fs::read_to_string(&node.path).unwrap_or_default();
         let section = node.section.borrow();
         let s = Snippet {
-            id: node.key.clone(),
+            id: node.title.clone(),
             path: node.path.display().to_string(),
             section: (!section.trim().is_empty()).then(|| section.trim().to_string()),
             content: node.content.borrow().clone(),

@@ -104,10 +104,6 @@ fn build_home(
     page.add(&group);
 
     // The one big action.
-    let save_group = adw::PreferencesGroup::builder()
-        .title("Snapshots")
-        .description("A snapshot remembers your whole setup, so you can go back to it later — before trying something new, for peace of mind.")
-        .build();
     let save = gtk::Button::builder()
         .label("Save a snapshot")
         .halign(gtk::Align::Start)
@@ -122,9 +118,13 @@ fn build_home(
             prompt_save(win.as_ref(), &window_toasts, refresh.clone());
         });
     }
-    let holder = adw::PreferencesGroup::new();
+    // Titled like the discarded save_group was meant to be, so the button has
+    // context ("what's a snapshot?") for first-time users.
+    let holder = adw::PreferencesGroup::builder()
+        .title("Snapshots")
+        .description("A snapshot remembers your whole setup, so you can go back to it later — before trying something new, for peace of mind.")
+        .build();
     holder.add(&wrap(&save));
-    let _ = save_group;
     page.add(&holder);
 
     stack.add_titled(&page, Some("home"), "Home")
@@ -268,9 +268,9 @@ fn confirm_restore(
     dialog.add_response("restore", "Restore");
     dialog.set_response_appearance("restore", adw::ResponseAppearance::Destructive);
 
-    // Write the snapshot to a temp file `manifest sync` can read.
+    // A temp file `manifest sync` can read — written only on confirm, and a
+    // failed write surfaces here instead of as a confusing pkexec error.
     let path = std::env::temp_dir().join(format!("manifest-restore-{id}.json"));
-    let _ = std::fs::write(&path, &json);
     let path_str = path.to_string_lossy().to_string();
 
     let window = window.clone();
@@ -278,6 +278,10 @@ fn confirm_restore(
     let toasts = toasts.clone();
     dialog.connect_response(None, move |_, resp| {
         if resp != "restore" {
+            return;
+        }
+        if let Err(e) = std::fs::write(&path, &json) {
+            toasts.add_toast(adw::Toast::new(&format!("Couldn't prepare the restore: {e}")));
             return;
         }
         run_privileged(
@@ -490,16 +494,18 @@ fn run_privileged(
     let stack = stack.clone();
     let mut shown = 0usize;
     glib::timeout_add_local(Duration::from_millis(200), move || {
-        let (lines, done) = {
+        // Copy only the lines that arrived since the last tick — cloning the
+        // whole buffer every 200ms goes quadratic over a long install log.
+        let (fresh, done) = {
             let g = shared.lock().unwrap();
-            (g.0.clone(), g.1)
+            (g.0[shown..].to_vec(), g.1)
         };
-        if lines.len() > shown {
-            for l in &lines[shown..] {
+        if !fresh.is_empty() {
+            for l in &fresh {
                 buffer.insert(&mut buffer.end_iter(), l);
                 buffer.insert(&mut buffer.end_iter(), "\n");
             }
-            shown = lines.len();
+            shown += fresh.len();
             let mut end = buffer.end_iter();
             view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
         }
