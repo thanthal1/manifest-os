@@ -1,0 +1,131 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Hyprland Pro",
+    "author": "Manifest OS",
+    "description": "A complete, daily-drivable Hyprland desktop declared end to end — waybar, notifications, launcher, terminal, shell prompt and theme — with no post-install shell hooks. Everything is a `files`/`theme`/`wallpaper` entry.",
+    "tags": [
+      "hyprland",
+      "wayland",
+      "waybar",
+      "rice",
+      "declarative"
+    ],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "hyprland-pro",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us",
+    "kernel": "linux-zen"
+  },
+  "boot": {
+    "loader": "grub",
+    "cmdline": [
+      "quiet"
+    ],
+    "timeout": 3
+  },
+  "repos": {
+    "multilib": true
+  },
+  "users": [
+    {
+      "name": "dev",
+      "groups": [
+        "wheel",
+        "video",
+        "input",
+        "audio"
+      ],
+      "shell": "/bin/zsh",
+      "sudo": true,
+      "password": "dev"
+    }
+  ],
+  "desktop": "hyprland",
+  "display_manager": "sddm",
+  "packages": [
+    "firefox",
+    "nautilus",
+    "zsh",
+    "starship",
+    "eza",
+    "bat",
+    "fzf",
+    "ripgrep",
+    "btop",
+    "fastfetch",
+    "grim",
+    "slurp",
+    "wl-clipboard",
+    "brightnessctl",
+    "pavucontrol",
+    "polkit-gnome",
+    "qt5ct",
+    "ttf-jetbrains-mono-nerd",
+    "papirus-icon-theme"
+  ],
+  "theme": {
+    "gtk": "Adwaita-dark",
+    "icons": "Papirus-Dark",
+    "cursor": "Adwaita",
+    "cursor_size": 24,
+    "font": "Noto Sans 11",
+    "monospace_font": "JetBrainsMono Nerd Font 11",
+    "dark": true
+  },
+  "wallpaper": {
+    "source": "https://raw.githubusercontent.com/catppuccin/wallpapers/main/os/arch.png",
+    "mode": "fill"
+  },
+  "files": [
+    {
+      "path": "/home/dev/.config/hypr/hyprland.conf",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS — Hyprland\nmonitor = , preferred, auto, 1\n\n# ------- Autostart -------\nexec-once = waybar\nexec-once = mako\nexec-once = manifest-wallpaper           # cross-desktop wallpaper (see manifest `wallpaper`)\nexec-once = nm-applet --indicator\nexec-once = hypridle\nexec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1\n\n# ------- Environment -------\nenv = XCURSOR_SIZE,24\nenv = QT_QPA_PLATFORMTHEME,qt5ct\n\n# ------- Input -------\ninput {\n    kb_layout = us\n    follow_mouse = 1\n    touchpad {\n        natural_scroll = true\n        tap-to-click = true\n    }\n    sensitivity = 0\n}\n\n# ------- Look & feel -------\ngeneral {\n    gaps_in = 5\n    gaps_out = 12\n    border_size = 2\n    col.active_border = rgba(cba6f7ff) rgba(89b4faff) 45deg\n    col.inactive_border = rgba(45475aff)\n    layout = dwindle\n    resize_on_border = true\n}\n\ndecoration {\n    rounding = 10\n    blur {\n        enabled = true\n        size = 6\n        passes = 2\n    }\n    shadow {\n        enabled = true\n        range = 12\n        render_power = 3\n        color = rgba(1a1a2eee)\n    }\n    active_opacity = 1.0\n    inactive_opacity = 0.96\n}\n\nanimations {\n    enabled = true\n    bezier = smooth, 0.05, 0.9, 0.1, 1.0\n    animation = windows, 1, 5, smooth\n    animation = fade, 1, 6, smooth\n    animation = workspaces, 1, 5, smooth, slide\n}\n\ndwindle {\n    pseudotile = true\n    preserve_split = true\n}\n\ngestures {\n    workspace_swipe = true\n}\n\nmisc {\n    disable_hyprland_logo = true\n    disable_splash_rendering = true\n}\n\n# ------- Window rules -------\nwindowrulev2 = float, class:^(pavucontrol)$\nwindowrulev2 = float, class:^(nm-connection-editor)$\nwindowrulev2 = float, title:^(Picture-in-Picture)$\n\n# ------- Keybindings -------\n$mainMod = SUPER\n\nbind = $mainMod, Return, exec, kitty\nbind = $mainMod, D, exec, wofi --show drun\nbind = $mainMod, B, exec, firefox\nbind = $mainMod, E, exec, nautilus\nbind = $mainMod, Q, killactive,\nbind = $mainMod, F, fullscreen, 0\nbind = $mainMod, V, togglefloating,\nbind = $mainMod, P, pseudo,\nbind = $mainMod, J, togglesplit,\nbind = $mainMod SHIFT, E, exit,\nbind = $mainMod, L, exec, hyprlock\n\n# Focus\nbind = $mainMod, left, movefocus, l\nbind = $mainMod, right, movefocus, r\nbind = $mainMod, up, movefocus, u\nbind = $mainMod, down, movefocus, d\n\n# Workspaces\nbind = $mainMod, 1, workspace, 1\nbind = $mainMod, 2, workspace, 2\nbind = $mainMod, 3, workspace, 3\nbind = $mainMod, 4, workspace, 4\nbind = $mainMod, 5, workspace, 5\nbind = $mainMod SHIFT, 1, movetoworkspace, 1\nbind = $mainMod SHIFT, 2, movetoworkspace, 2\nbind = $mainMod SHIFT, 3, movetoworkspace, 3\nbind = $mainMod SHIFT, 4, movetoworkspace, 4\nbind = $mainMod SHIFT, 5, movetoworkspace, 5\n\n# Move/resize with the mouse\nbindm = $mainMod, mouse:272, movewindow\nbindm = $mainMod, mouse:273, resizewindow\n\n# Screenshots (grim+slurp ship with the recipe's toolset)\nbind = , Print, exec, grim -g \"$(slurp)\" ~/Pictures/screenshot-$(date +%s).png\n\n# Media & brightness keys\nbinde = , XF86AudioRaiseVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\nbinde = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\nbind = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\nbinde = , XF86MonBrightnessUp, exec, brightnessctl set +5%\nbinde = , XF86MonBrightnessDown, exec, brightnessctl set 5%-\n"
+    },
+    {
+      "path": "/home/dev/.config/waybar/config.jsonc",
+      "owner": "dev:dev",
+      "content": "// Managed by Manifest OS — waybar\n{\n  \"layer\": \"top\",\n  \"position\": \"top\",\n  \"height\": 34,\n  \"spacing\": 6,\n  \"modules-left\": [\"hyprland/workspaces\", \"hyprland/window\"],\n  \"modules-center\": [\"clock\"],\n  \"modules-right\": [\"pulseaudio\", \"network\", \"cpu\", \"memory\", \"battery\", \"tray\"],\n\n  \"hyprland/workspaces\": {\n    \"format\": \"{icon}\",\n    \"on-click\": \"activate\",\n    \"format-icons\": { \"default\": \"○\", \"active\": \"◉\" }\n  },\n  \"hyprland/window\": { \"max-length\": 60, \"separate-outputs\": true },\n  \"clock\": {\n    \"format\": \"{:%a %d %b  %H:%M}\",\n    \"tooltip-format\": \"<tt>{calendar}</tt>\"\n  },\n  \"cpu\": { \"format\": \" {usage}%\", \"interval\": 2 },\n  \"memory\": { \"format\": \" {}%\" },\n  \"battery\": {\n    \"format\": \"{icon} {capacity}%\",\n    \"format-charging\": \" {capacity}%\",\n    \"format-icons\": [\"\", \"\", \"\", \"\", \"\"],\n    \"states\": { \"warning\": 30, \"critical\": 15 }\n  },\n  \"network\": {\n    \"format-wifi\": \" {essid}\",\n    \"format-ethernet\": \" wired\",\n    \"format-disconnected\": \"⚠ offline\",\n    \"tooltip-format\": \"{ifname}: {ipaddr}\"\n  },\n  \"pulseaudio\": {\n    \"format\": \"{icon} {volume}%\",\n    \"format-muted\": \" muted\",\n    \"format-icons\": { \"default\": [\"\", \"\", \"\"] },\n    \"on-click\": \"pavucontrol\"\n  },\n  \"tray\": { \"spacing\": 8 }\n}\n"
+    },
+    {
+      "path": "/home/dev/.config/waybar/style.css",
+      "owner": "dev:dev",
+      "content": "/* Managed by Manifest OS — waybar (Catppuccin Mocha) */\n* {\n  font-family: \"JetBrainsMono Nerd Font\", monospace;\n  font-size: 13px;\n  border: none;\n  border-radius: 0;\n  min-height: 0;\n}\nwindow#waybar {\n  background: rgba(30, 30, 46, 0.92);\n  color: #cdd6f4;\n}\n#workspaces button {\n  padding: 0 8px;\n  color: #6c7086;\n  background: transparent;\n}\n#workspaces button.active {\n  color: #cba6f7;\n}\n#workspaces button:hover {\n  color: #cdd6f4;\n  background: rgba(203, 166, 247, 0.15);\n}\n#clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray, #window {\n  padding: 0 10px;\n}\n#clock { color: #89b4fa; font-weight: bold; }\n#battery.warning { color: #f9e2af; }\n#battery.critical { color: #f38ba8; }\n#network.disconnected { color: #f38ba8; }\n"
+    },
+    {
+      "path": "/home/dev/.config/mako/config",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS — mako\nfont=JetBrainsMono Nerd Font 10\nbackground-color=#1e1e2e\ntext-color=#cdd6f4\nborder-color=#cba6f7\nborder-size=2\nborder-radius=10\npadding=12\ndefault-timeout=6000\nmax-visible=5\n\n[urgency=critical]\nborder-color=#f38ba8\ndefault-timeout=0\n"
+    },
+    {
+      "path": "/home/dev/.config/kitty/kitty.conf",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS — kitty (Catppuccin Mocha)\nfont_family      JetBrainsMono Nerd Font\nfont_size        11.0\ncursor_shape     beam\nscrollback_lines 10000\nenable_audio_bell no\nwindow_padding_width 10\nbackground_opacity 0.95\nconfirm_os_window_close 0\n\nforeground #cdd6f4\nbackground #1e1e2e\nselection_foreground #1e1e2e\nselection_background #f5e0dc\ncolor0 #45475a\ncolor1 #f38ba8\ncolor2 #a6e3a1\ncolor3 #f9e2af\ncolor4 #89b4fa\ncolor5 #cba6f7\ncolor6 #94e2d5\ncolor7 #bac2de\n"
+    },
+    {
+      "path": "/home/dev/.config/wofi/config",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS — wofi\nwidth=600\nheight=380\nlocation=center\nshow=drun\nprompt=Search\nallow_images=true\ninsensitive=true\n"
+    },
+    {
+      "path": "/home/dev/.config/wofi/style.css",
+      "owner": "dev:dev",
+      "content": "/* Managed by Manifest OS — wofi (Catppuccin Mocha) */\nwindow {\n  margin: 0;\n  background-color: #1e1e2e;\n  border: 2px solid #cba6f7;\n  border-radius: 12px;\n  font-family: \"JetBrainsMono Nerd Font\";\n}\n#input {\n  margin: 8px;\n  padding: 8px;\n  color: #cdd6f4;\n  background-color: #313244;\n  border: none;\n  border-radius: 8px;\n}\n#entry:selected { background-color: #cba6f7; color: #1e1e2e; border-radius: 8px; }\n#text { color: #cdd6f4; padding: 4px; }\n"
+    },
+    {
+      "path": "/home/dev/.config/starship.toml",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS\nadd_newline = true\ncommand_timeout = 1000\n\n[character]\nsuccess_symbol = \"[❯](bold green)\"\nerror_symbol = \"[❯](bold red)\"\n\n[directory]\ntruncation_length = 3\nstyle = \"bold cyan\"\n\n[git_branch]\nsymbol = \" \"\nstyle = \"bold purple\"\n\n[git_status]\nstyle = \"bold yellow\"\n\n[cmd_duration]\nmin_time = 2000\nformat = \"took [$duration](bold yellow) \"\n"
+    },
+    {
+      "path": "/home/dev/.zshrc",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS\nsetopt AUTO_CD INTERACTIVE_COMMENTS\nHISTFILE=~/.zsh_history\nHISTSIZE=10000\nSAVEHIST=10000\nsetopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS\n\n# Sensible aliases (eza/bat are installed in packages)\nalias ls='eza --group-directories-first --icons'\nalias ll='eza -lah --group-directories-first --icons'\nalias tree='eza --tree'\nalias cat='bat --paging=never'\nalias grep='grep --color=auto'\nalias ..='cd ..'\nalias ...='cd ../..'\n\nautoload -Uz compinit && compinit\nzstyle ':completion:*' menu select\n\n# Prompt (starship is installed in packages)\neval \"$(starship init zsh)\"\n"
+    }
+  ]
+}
