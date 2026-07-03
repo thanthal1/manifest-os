@@ -1496,6 +1496,10 @@ fn set_done_message(stack: &Rc<gtk::Stack>) {
 }
 
 /// Swap the Installing page's spinner view for an error message + a Back button.
+/// The tail of the install log is shown right on the page: a DD-flashed USB's
+/// partitions are often invisible to Windows/macOS, so "the log is on the
+/// stick" can't be the only way to see what failed — the screen always works
+/// (photograph it, if nothing else).
 fn show_error(stack: &Rc<gtk::Stack>, err: &str) {
     let (root, content, buttons) = page(&t("error.title"), &t("error.subtitle"));
     let label = gtk::Label::new(Some(err));
@@ -1503,6 +1507,30 @@ fn show_error(stack: &Rc<gtk::Stack>, err: &str) {
     label.set_wrap(true);
     label.set_selectable(true);
     content.append(&label);
+
+    if let Some(tail) = log_tail("/tmp/manifest-install.log", 40) {
+        let hdr = gtk::Label::new(Some("The last lines of the install log (also saved to the installed disk's /var/log and any writable USB):"));
+        hdr.set_halign(gtk::Align::Start);
+        hdr.set_wrap(true);
+        hdr.add_css_class("dim-label");
+        content.append(&hdr);
+
+        let view = gtk::TextView::new();
+        view.set_editable(false);
+        view.set_monospace(true);
+        view.buffer().set_text(&tail);
+        view.add_css_class("card");
+        let scroller = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .min_content_height(220)
+            .child(&view)
+            .build();
+        content.append(&scroller);
+        // Start scrolled to the end — the failure is in the last lines.
+        let mut end = view.buffer().end_iter();
+        view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
+    }
+
     let back = nav_button(&t("error.back_to_start"), false);
     back.connect_clicked(goto(stack, "review"));
     buttons.append(&back);
@@ -1512,6 +1540,17 @@ fn show_error(stack: &Rc<gtk::Stack>, err: &str) {
     }
     stack.add_named(&root, Some("error"));
     stack.set_visible_child_name("error");
+}
+
+/// The last `n` lines of a log file, or `None` when it's missing/empty.
+fn log_tail(path: &str, n: usize) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(n);
+    Some(lines[start..].join("\n"))
 }
 
 // ---------------------------------------------------------------------------

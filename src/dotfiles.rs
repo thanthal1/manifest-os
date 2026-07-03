@@ -25,6 +25,17 @@ enum Method {
 }
 
 pub fn install(df: &Dotfiles, ctx: &Ctx) -> Result<()> {
+    // The bundled examples ship a "point this at your own repo" placeholder;
+    // installing one unedited must not kill the whole install at this stage.
+    // A real (non-placeholder) URL that fails to clone is still fatal below —
+    // dotfiles are load-bearing for a rice, silently skipping one would be worse.
+    if df.source.contains("github.com/you/") {
+        println!(
+            "  · dotfiles source {} is a placeholder — edit the manifest to point at your own repo; skipping",
+            df.source
+        );
+        return Ok(());
+    }
     let method = match df.method.as_str() {
         "" | "symlink" => Method::Symlink,
         "copy" => Method::Copy,

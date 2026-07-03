@@ -126,7 +126,11 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
 
     if let Some(w) = &manifest.wallpaper {
         step("Setting the wallpaper");
-        wallpaper::apply(w, manifest.desktop.as_deref(), ctx)?;
+        // Best-effort: a wallpaper is cosmetic — a dead URL or offline mirror
+        // must not fail an otherwise-complete install at this late stage.
+        if let Err(e) = wallpaper::apply(w, manifest.desktop.as_deref(), ctx) {
+            println!("  · warning: couldn't set the wallpaper ({e:#}) — continuing without it");
+        }
     }
 
     if let Some(th) = &manifest.theme {
