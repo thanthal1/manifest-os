@@ -180,6 +180,10 @@ enum Command {
         /// Install and enable CUPS printing.
         #[arg(long)]
         install_printing: bool,
+        /// Don't install the System Snapshots desktop app (for headless/server
+        /// installs with no GUI).
+        #[arg(long)]
+        no_desktop_app: bool,
         /// A local script to run inside the chroot after everything else.
         #[arg(long)]
         post_script: Option<String>,
@@ -343,6 +347,7 @@ fn run() -> Result<()> {
             autologin,
             install_nvidia,
             install_printing,
+            no_desktop_app,
             post_script,
             static_ip,
             gateway,
@@ -436,6 +441,7 @@ fn run() -> Result<()> {
                     autologin,
                     install_nvidia,
                     install_printing,
+                    skip_desktop_app: no_desktop_app,
                     post_install_script: post_script,
                     static_ip,
                     proxy,

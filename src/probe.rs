@@ -148,6 +148,12 @@ pub struct InstallPlan {
     /// Install and enable CUPS (printing).
     #[serde(default)]
     pub install_printing: bool,
+    /// Skip staging the System Snapshots desktop app (`manifest-center`) into
+    /// the installed system. Off by default (the app is installed); turned on
+    /// for headless/server installs that don't want a GUI app. Inverted so the
+    /// type default (false) keeps the friendly behaviour.
+    #[serde(default)]
+    pub skip_desktop_app: bool,
     /// A local script (on the install medium) to run inside the chroot after
     /// everything else — the escape hatch for one-off customization beyond
     /// what the manifest declares.

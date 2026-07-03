@@ -65,6 +65,7 @@ struct State {
     autologin: bool,
     install_nvidia: bool,
     install_printing: bool,
+    skip_desktop_app: bool, // headless/server: don't install the System Snapshots app
     extra_users_text: String, // one "name:password[:sudo]" per line
     post_install_script: String,
     static_ip: String,
@@ -238,12 +239,21 @@ fn page(title: &str, subtitle: &str) -> (gtk::Box, gtk::Box, gtk::Box) {
     outer.set_vexpand(true);
     outer.set_hexpand(true);
 
+    // The title + content live in a ScrolledWindow so a page taller than the
+    // screen (e.g. all the Advanced disk options, or a long install log)
+    // scrolls instead of pushing the navigation buttons off-screen where they
+    // can't be reached.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .build();
+
     let clamp = adw::Clamp::builder().maximum_size(620).build();
-    clamp.set_vexpand(true);
     let col = gtk::Box::new(gtk::Orientation::Vertical, 18);
     col.set_valign(gtk::Align::Center);
     col.set_margin_top(24);
-    col.set_margin_bottom(24);
+    col.set_margin_bottom(12);
     col.set_margin_start(24);
     col.set_margin_end(24);
 
@@ -263,12 +273,22 @@ fn page(title: &str, subtitle: &str) -> (gtk::Box, gtk::Box, gtk::Box) {
     content.set_vexpand(true);
     col.append(&content);
 
+    clamp.set_child(Some(&col));
+    scroller.set_child(Some(&clamp));
+    outer.append(&scroller);
+
+    // The navigation buttons are pinned in a bar *below* the scroll area, so
+    // Back/Continue/Install are always visible no matter how tall the page is.
+    let bar = adw::Clamp::builder().maximum_size(620).build();
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     buttons.set_halign(gtk::Align::End);
-    col.append(&buttons);
+    buttons.set_margin_top(6);
+    buttons.set_margin_bottom(18);
+    buttons.set_margin_start(24);
+    buttons.set_margin_end(24);
+    bar.set_child(Some(&buttons));
+    outer.append(&bar);
 
-    clamp.set_child(Some(&col));
-    outer.append(&clamp);
     (outer, content, buttons)
 }
 
@@ -854,11 +874,29 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         let state = state.clone();
         move |on| state.borrow_mut().install_printing = on
     });
+    // Install the System Snapshots app — on by default; turned off for a
+    // headless/server box that doesn't want a GUI app. Built inline (not
+    // switch_row) so the switch starts ON.
+    let desktop_app = {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let label = gtk::Label::new(Some(&t("disk.desktop_app_label")));
+        label.set_halign(gtk::Align::Start);
+        label.set_hexpand(true);
+        label.set_wrap(true);
+        row.append(&label);
+        let sw = gtk::Switch::new();
+        sw.set_valign(gtk::Align::Center);
+        sw.set_active(true);
+        let state = state.clone();
+        sw.connect_active_notify(move |s| state.borrow_mut().skip_desktop_app = !s.is_active());
+        row.append(&sw);
+        row
+    };
     let post_script = text_field_row(&t("disk.post_script_label"), &t("disk.post_script_placeholder"), {
         let state = state.clone();
         move |v| state.borrow_mut().post_install_script = v
     });
-    for w in [&fs, &sw, &enc, &storage, &tz, &loc, &loc_manual, &km, &printing, &post_script] {
+    for w in [&fs, &sw, &enc, &storage, &tz, &loc, &loc_manual, &km, &printing, &desktop_app, &post_script] {
         w.set_visible(false);
         content.append(w);
         adv.borrow_mut().push(w.clone().upcast());
@@ -1238,6 +1276,9 @@ fn cli_command(st: &State) -> String {
     if st.install_printing {
         c.push_str(" --install-printing");
     }
+    if st.skip_desktop_app {
+        c.push_str(" --no-desktop-app");
+    }
     if !st.post_install_script.trim().is_empty() {
         c.push_str(&format!(" --post-script {}", st.post_install_script.trim()));
     }
@@ -1323,6 +1364,7 @@ fn start_install(
             autologin: st.autologin,
             install_nvidia: st.install_nvidia,
             install_printing: st.install_printing,
+            skip_desktop_app: st.skip_desktop_app,
             post_install_script: opt(&st.post_install_script),
             static_ip,
             proxy: opt(&st.proxy),
@@ -1375,9 +1417,18 @@ fn start_log_tail(stack: &Rc<gtk::Stack>) {
         let text = read_log_tail(LOG, start, 250);
         let current = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
         if current != text {
+            // Only auto-scroll to the newest line if the user is already at the
+            // bottom — otherwise leave their scroll position alone so they can
+            // read back through what's happened without it being yanked away.
+            let at_bottom = view
+                .vadjustment()
+                .map(|a| a.value() >= a.upper() - a.page_size() - 8.0)
+                .unwrap_or(true);
             buffer.set_text(&text);
-            let mut end = buffer.end_iter();
-            view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
+            if at_bottom {
+                let mut end = buffer.end_iter();
+                view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
+            }
         }
         if let Some(label) = &step_label {
             let steps = scan_steps(LOG, start);

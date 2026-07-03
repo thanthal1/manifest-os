@@ -115,7 +115,7 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     }
     configure_autologin(plan, ctx)?;
     run_post_install_script(plan, ctx)?;
-    stage_desktop_app(ctx);
+    stage_desktop_app(plan, ctx);
     if alongside {
         enable_dual_boot(ctx);
     }
@@ -1542,7 +1542,11 @@ fn stage_binary(ctx: &Ctx) -> Result<()> {
 /// launcher, staged into the installed system so it shows up under System /
 /// Settings. Best-effort: only when the live ISO carries the binary (it does
 /// when built with `--features gui`), and never fails the install.
-fn stage_desktop_app(ctx: &Ctx) {
+fn stage_desktop_app(plan: &InstallPlan, ctx: &Ctx) {
+    if plan.skip_desktop_app {
+        println!("  · skipping the System Snapshots app (headless/server install)");
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else { return };
     let app = exe.with_file_name("manifest-center");
     if !app.exists() {

@@ -89,6 +89,7 @@ static EN: &[(&str, &str)] = &[
     ("disk.keymap_label", "Keymap"),
     ("disk.keymap_placeholder", "console keymap, e.g. us"),
     ("disk.printing_label", "Set up printing (CUPS)"),
+    ("disk.desktop_app_label", "Install the System Snapshots app (turn off for a server)"),
     ("disk.post_script_label", "Post-install script (path on this USB)"),
     ("disk.post_script_placeholder", "run in the new system after everything else"),
     ("disk.alongside_size_label", "Space for Manifest OS (GiB)"),
