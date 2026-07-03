@@ -39,7 +39,17 @@ const FASTFETCH_CONF: &str = r#"{
 /// The Manifest OS logo, embedded at build time.
 const LOGO: &str = include_str!("logo.txt");
 
+/// Run the install, then save the log regardless of outcome. `save_install_log`
+/// exists specifically to survive a *failure* (its whole point is a crash
+/// forensics trail), so it must not live inside the fallible step sequence —
+/// any `?` early-return there would skip it exactly when it's needed most.
 pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
+    let result = run_steps(plan, ctx);
+    save_install_log(&plan.disk, ctx);
+    result
+}
+
+fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     if plan.disk.is_empty() {
         bail!("no disk selected");
     }
@@ -120,7 +130,6 @@ pub fn execute(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
         enable_dual_boot(ctx);
     }
     finalize_boot(uefi, ctx);
-    save_install_log(ctx);
 
     println!("\n✓ Manifest OS installed.");
     Ok(())
@@ -1626,8 +1635,10 @@ fn run_manifest(manifest_in_root: &str, answers: Option<&str>, ctx: &Ctx) -> Res
 /// Save the install log somewhere it survives a failure: the target's
 /// `/var/log` and — since the boot ISO is read-only — any writable removable
 /// drive's `logs/` folder. Best-effort; the live log lives at
-/// `/tmp/manifest-install.log` (see the `.zlogin` launcher).
-pub fn save_install_log(ctx: &Ctx) {
+/// `/tmp/manifest-install.log` (see the `.zlogin` launcher). `target_disk`
+/// (e.g. `/dev/sda`) is excluded from the removable-drive search so we never
+/// write into the disk being installed to.
+pub fn save_install_log(target_disk: &str, ctx: &Ctx) {
     if ctx.dry_run {
         return;
     }
@@ -1646,7 +1657,11 @@ pub fn save_install_log(ctx: &Ctx) {
         .output(false, "date", &["+%Y%m%d-%H%M%S"])
         .unwrap_or_default();
     let stamp = if stamp.is_empty() { "install".into() } else { stamp };
-    for mp in crate::probe::writable_removable_mounts() {
+    let drives = crate::probe::writable_removable_mounts(target_disk);
+    if drives.is_empty() {
+        println!("  · no writable USB found to save a copy onto");
+    }
+    for mp in drives {
         let dir = format!("{mp}/logs");
         if std::fs::create_dir_all(&dir).is_ok() {
             let dest = format!("{dir}/manifest-install-{stamp}.log");

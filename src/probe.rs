@@ -588,7 +588,19 @@ fn os_label(esp: &str, shrink: &str) -> String {
 /// partition (an ISO-mode flash, or one freed by copytoram) is exactly where a
 /// single-USB user expects the log. We only ever *create* a `logs/` folder; the
 /// squashfs the live system reads lives in the ISO9660 part we never touch.
-pub fn writable_removable_mounts() -> Vec<String> {
+///
+/// `target_disk` (e.g. `/dev/sda`) is the disk being installed to — its
+/// partitions are always skipped, even in the fallback pass below, so we never
+/// write into (or race) whatever the installer is doing to it.
+///
+/// lsblk's `RM` (removable) flag is what we'd prefer to gate on, but it's not
+/// reliable on real hardware: plenty of USB controllers/BIOSes report `RM=0`
+/// for an honest-to-god USB stick (VirtualBox's virtual media are *also*
+/// always `RM=0`, which is why this had never been exercised against real
+/// hardware — see HANDOFF.md). So: prefer `RM=1` drives first, and only if
+/// that finds nothing, fall back to any other non-target, non-system-mounted
+/// writable partition.
+pub fn writable_removable_mounts(target_disk: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     // If the boot medium is a writable FAT (Rufus "ISO" mode) still mounted
@@ -609,7 +621,21 @@ pub fn writable_removable_mounts() -> Vec<String> {
     else {
         return out;
     };
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
+    let text = String::from_utf8_lossy(&o.stdout).to_string();
+
+    collect_writable_partitions(&text, target_disk, true, &mut out);
+    if out.is_empty() {
+        collect_writable_partitions(&text, target_disk, false, &mut out);
+    }
+    out
+}
+
+/// One pass over `lsblk -P` output, appending usable mountpoints to `out`.
+/// `require_removable` gates on `RM=1`; when false (the fallback pass), any
+/// partition not on `target_disk` and not already mounted at a system path is
+/// accepted instead.
+fn collect_writable_partitions(lsblk_out: &str, target_disk: &str, require_removable: bool, out: &mut Vec<String>) {
+    for line in lsblk_out.lines() {
         let val = |k: &str| -> String {
             line.split(&format!("{k}=\""))
                 .nth(1)
@@ -617,10 +643,16 @@ pub fn writable_removable_mounts() -> Vec<String> {
                 .unwrap_or("")
                 .to_string()
         };
-        if val("TYPE") != "part" || val("RM") != "1" {
+        if val("TYPE") != "part" {
             continue;
         }
         let name = val("NAME");
+        if !target_disk.is_empty() && name.starts_with(target_disk) {
+            continue; // never touch the disk we're installing to
+        }
+        if require_removable && val("RM") != "1" {
+            continue;
+        }
         // Only filesystems we can actually write a log onto (this skips the
         // boot medium's read-only ISO9660 partition).
         if !matches!(
@@ -632,9 +664,13 @@ pub fn writable_removable_mounts() -> Vec<String> {
         let mp = val("MOUNTPOINT");
         if !mp.is_empty() {
             // Already mounted somewhere usable (bootmnt is handled above).
-            if !mp.starts_with("/run/archiso") {
-                out.push(mp);
+            if mp.starts_with("/run/archiso") || out.contains(&mp) {
+                continue;
             }
+            if !require_removable && is_system_mount(&mp) {
+                continue; // fallback pass: don't write into the live root/etc.
+            }
+            out.push(mp);
         } else {
             // Not mounted (e.g. copytoram freed the boot USB) — mount it rw.
             let dir = format!("/run/manifest-logs/{}", name.replace('/', "_"));
@@ -649,7 +685,12 @@ pub fn writable_removable_mounts() -> Vec<String> {
             }
         }
     }
-    out
+}
+
+/// A mountpoint that's part of the live system itself, never a log-drop target
+/// (only relevant to the fallback, non-removable-gated pass).
+fn is_system_mount(mp: &str) -> bool {
+    mp == "/" || mp.starts_with("/mnt") || matches!(mp, "/usr" | "/etc" | "/var" | "/boot")
 }
 
 /// Friendly display name for a manifest source — its `meta.name` if we can read

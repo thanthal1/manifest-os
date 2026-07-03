@@ -1379,6 +1379,9 @@ fn start_install(
     stack.set_visible_child_name("installing");
     start_log_tail(stack);
 
+    // `plan` moves into the worker closure below; grab the disk now for the
+    // (redundant but harmless) save_install_log retry in the error handler.
+    let disk_for_log = plan.disk.clone();
     let stack2 = stack.clone();
     run_async(
         move || installer::execute(&plan, &Ctx::with_cancel_flag(false, flag)).map_err(|e| format!("{e:#}")),
@@ -1388,8 +1391,9 @@ fn start_install(
                 stack2.set_visible_child_name("done");
             }
             Err(e) => {
-                // Preserve the install log (target + writable USB) for debugging.
-                installer::save_install_log(&Ctx::new(false));
+                // installer::execute already saves the log itself (even on
+                // failure) now — this is just a harmless no-op retry.
+                installer::save_install_log(&disk_for_log, &Ctx::new(false));
                 show_error(&stack2, &e);
             }
         },
