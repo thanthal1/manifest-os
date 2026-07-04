@@ -72,8 +72,6 @@ SENSITIVE_PATHS = [
     (r"/etc/cron|/var/spool/cron|\.config/systemd/user/.*\.timer$",
      "HIGH", "scheduled task",
      "Cron/timer entries run code on a schedule (persistence)."),
-    (r"/etc/hosts$",                       "MEDIUM", "/etc/hosts",
-     "Editing hosts can redirect domains (update servers, telemetry, auth)."),
     (r"/etc/udev/rules\.d/|/etc/polkit-1/|/usr/share/polkit-1/",
      "MEDIUM", "udev / polkit rule",
      "These can run code on device events or widen privileges."),
@@ -126,6 +124,40 @@ SHELL_DANGER = [
 B64_BLOB = re.compile(r"[A-Za-z0-9+/]{120,}={0,2}")
 HEX_BLOB = re.compile(r"(?:\\x[0-9a-fA-F]{2}){20,}")
 
+# --- DNS control / spoofing ------------------------------------------------
+# A manifest that can change how names resolve can silently redirect update
+# servers, package mirrors, keyservers, auth/telemetry endpoints — pointing the
+# machine at attacker-controlled infrastructure. Every DNS-touching capability
+# is surfaced so a reviewer can confirm it isn't spoofing.
+DNS_PATHS = [
+    (r"/etc/resolv\.conf$", "HIGH", "resolv.conf — DNS server override",
+     "Pins the system's DNS servers; an attacker resolver can spoof any domain."),
+    (r"/etc/systemd/resolved\.conf(\.d/|$)", "HIGH", "systemd-resolved DNS config",
+     "Sets system DNS servers — can redirect all name resolution."),
+    (r"/etc/NetworkManager/(conf\.d/|system-connections/|NetworkManager\.conf)",
+     "HIGH", "NetworkManager DNS / connection config",
+     "Can set DNS servers or a connection profile that redirects name resolution."),
+    (r"/etc/nsswitch\.conf$", "HIGH", "nsswitch — name-resolution order",
+     "Reordering/adding resolution modules can hijack how hostnames resolve."),
+    (r"/etc/dnsmasq\.conf$|/etc/dnsmasq\.d/|/etc/unbound/|/etc/named\.conf$|/etc/bind/|/etc/dnscrypt|/etc/stubby/",
+     "MEDIUM", "local DNS server / resolver config",
+     "Configures a local DNS forwarder/server; review its upstreams and per-domain overrides."),
+]
+# Commands (in hooks or written scripts) that repoint resolution at runtime.
+DNS_CMD = re.compile(
+    r"resolvectl\s+dns|systemd-resolve\b[^\n]*dns|nmcli\b[^\n]*\bdns\b|"
+    r">\s*/etc/resolv\.conf|tee\s+/etc/resolv\.conf|nameserver\s+\d{1,3}(\.\d{1,3}){3}", re.I)
+DNS_PKGS = {"dnsmasq", "unbound", "bind", "dnscrypt-proxy", "stubby", "adguardhome",
+            "coredns", "pihole", "pi-hole", "blocky", "https-dns-proxy", "smartdns"}
+# A hosts line mapping an IP to a real (non-loopback) domain = a static DNS override.
+HOSTS_ENTRY = re.compile(
+    r"^\s*(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]{3,})\s+(?!localhost|ip6-|::1\b)([A-Za-z0-9.-]+\.[A-Za-z]{2,}\S*)",
+    re.M)
+# Domains whose spoofing is especially dangerous (updates, mirrors, keys, auth).
+SENSITIVE_DOMAINS = ("github", "archlinux", "aur.", "mirror", "kernel.org", "gnu.org",
+                     "google", "cloudflare", "microsoft", "apple", "pgp", "keyserver",
+                     "gpg", "letsencrypt", "pypi", "npmjs")
+
 
 # ---------------------------------------------------------------------------
 # Checks
@@ -173,6 +205,44 @@ def scan_files(m, rep):
         scan_shell_text(str(s.get("content", "")), rep, f"snippets[{i}].content")
 
 
+def scan_dns(m, rep):
+    """DNS-control / spoofing capabilities — see DNS_* tables above."""
+    for i, f in enumerate(m.get("files", []) or []):
+        path = str(f.get("path", ""))
+        content = str(f.get("content", ""))
+        for rx, sev, title, detail in DNS_PATHS:
+            if re.search(rx, path, re.I):
+                rep.add(sev, "DNS", title, detail, f"files[{i}]")
+        if re.search(r"/etc/hosts$", path, re.I):
+            hits = HOSTS_ENTRY.findall(content)
+            if hits:
+                hot = any(any(d in h.lower() for d in SENSITIVE_DOMAINS) for h in hits)
+                rep.add("HIGH" if hot else "MEDIUM", "DNS",
+                        f"/etc/hosts statically redirects {len(hits)} host(s)",
+                        "Hosts entries override DNS for specific domains — a spoofing vector "
+                        "(redirect update/mirror/keyserver/auth endpoints)."
+                        + (" One targets a sensitive domain." if hot else "")
+                        + " Entries: " + ", ".join(hits[:6]), f"files[{i}]")
+            else:
+                rep.add("MEDIUM", "DNS", "writes /etc/hosts",
+                        "Editing hosts can redirect domains — review the entries.", f"files[{i}]")
+        if DNS_CMD.search(content):
+            rep.add("HIGH", "DNS", f"a written file changes DNS resolution ({path})",
+                    "The content repoints which resolver the system uses — a spoofing vector.",
+                    f"files[{i}]")
+    for phase in ("pre_install", "post_install"):
+        for i, line in enumerate(m.get(phase, []) or []):
+            if DNS_CMD.search(line):
+                rep.add("HIGH", "DNS", f"{phase} changes DNS resolution",
+                        "A hook sets nameservers / resolv.conf — can point the machine at an "
+                        "attacker resolver that spoofs any domain.", f"{phase}[{i}]: {shorten(line)}")
+    for p in m.get("packages", []) or []:
+        if p in DNS_PKGS:
+            rep.add("MEDIUM", "DNS", f"installs a DNS server/resolver (`{p}`)",
+                    "A local DNS server/forwarder intercepts all name resolution — review its "
+                    "config for spoofed or overridden domains.", "packages")
+
+
 def scan_users(m, rep):
     for i, u in enumerate(m.get("users", []) or []):
         name = u.get("name", "")
@@ -187,8 +257,9 @@ def scan_users(m, rep):
                     "wheel members can escalate to root (sudo).", f"users[{i}]")
         if u.get("password"):
             rep.add("MEDIUM", "credential", f"hardcoded password for `{name}`",
-                    "A baked-in password is a known credential and shouldn't ship in a "
-                    "public manifest — use a survey `secret`.", f"users[{i}]")
+                    "Fine for a personal install-script manifest, but a baked-in credential "
+                    "shouldn't ship in a *public marketplace* listing — use a survey `secret` "
+                    "there so each install sets its own.", f"users[{i}]")
 
 
 def scan_sources(m, rep):
@@ -283,6 +354,7 @@ def scan(manifest, check_packages=False):
         return rep
     scan_hooks(manifest, rep)
     scan_files(manifest, rep)
+    scan_dns(manifest, rep)
     scan_users(manifest, rep)
     scan_sources(manifest, rep)
     scan_repos_boot(manifest, rep)

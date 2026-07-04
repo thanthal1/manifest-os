@@ -15,6 +15,7 @@ This README is how to *use* what's here.
 | [`scan.py`](scan.py) | Static security + sanity scanner (CLI). The source of truth. | ✅ works |
 | [`web/index.html`](web/index.html) | Self-contained web UI — paste/drop a manifest, see findings + flagged sources. | ✅ works |
 | [`boot-test.sh`](boot-test.sh) | Review one submission: static scan, then (opt) a real VM install + boot. | ✅ scan gate; ⏳ boot stage |
+| [`cache-setup.sh`](cache-setup.sh) | Stand up the pacoloco package cache for the boot-test farm (62× warm speedup). | ✅ works |
 | [`DESIGN.md`](DESIGN.md) | The full pipeline: static → boot test → sign-off, package cache, signing. | design |
 
 ## The scanner (`scan.py`)
@@ -27,6 +28,10 @@ can do harm, ranked CRITICAL → INFO:
 - **Persistence / privilege:** writes to `sudoers`, `~/.ssh/authorized_keys`,
   `pacman.conf`, PAM, systemd units, cron, shell rc / `profile.d`; `users` with
   `sudo`/`wheel`/root/hardcoded passwords.
+- **DNS / spoofing:** anything that can repoint name resolution — `/etc/hosts`
+  redirects (flagged harder when they target update/mirror/keyserver/auth
+  domains), `resolv.conf`, `systemd-resolved`, NetworkManager DNS, `nsswitch`,
+  a bundled `dnsmasq`/`unbound`, or a hook running `resolvectl`/`nmcli … dns`.
 - **Untrusted sources:** custom/third-party repos, AUR packages, plain-HTTP
   URLs, and **links to code/paste hosting (GitHub, gists, pastebin, …)** whose
   content can change after review.

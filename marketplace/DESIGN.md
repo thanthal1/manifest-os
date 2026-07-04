@@ -60,26 +60,32 @@ it with:
 - **A hard timeout + snapshot rollback** so a hostile manifest can't wedge the
   runner. VMs are disposable and never reused between submissions.
 
-### The package cache  *(the "don't install every time" ask)*
+### The package cache  *(the "don't install every time" ask — built)*
 
-Every boot test otherwise re-downloads the same ~2 GB of packages. Two options;
-the pipeline should use the **caching proxy**, which is transparent and scales:
+Every boot test otherwise re-downloads the same ~2 GB of packages — slow, and
+enough repeated mirror traffic to get **rate-limited**. The pipeline uses a
+[`pacoloco`](https://github.com/anatol/pacoloco) caching proxy: the first VM to
+need a package downloads it, every later VM is served the local copy. It caches
+`pacstrap`, the chroot's `pacman -Syu`, and the desktop package set alike (all
+repos incl. CachyOS); AUR builds still compile from source, but their
+*dependencies* come from cache.
 
-1. **Caching proxy (recommended).** Run [`pacoloco`](https://github.com/anatol/pacoloco)
-   (or a plain caching reverse-proxy) on the runner host. Point each VM's
-   `/etc/pacman.d/mirrorlist` at `http://<host>:9129/repo/...`. First download
-   populates the cache; every later VM hits the local copy. Works for `pacstrap`,
-   the chroot's `pacman -Syu`, and package installs alike — no per-VM setup, and
-   it caches *all* repos including CachyOS. AUR builds still compile from source
-   (that's inherent), but their *dependencies* come from cache.
+`marketplace/cache-setup.sh` stands it up (installs, configures `/etc/pacoloco.yaml`,
+starts it). Point each test VM's mirrorlist at it:
 
-2. **Shared cache dir.** Mount a persistent host directory as the VM's
-   `/var/cache/pacman/pkg` (VBox shared folder, or a dedicated data disk reused
-   across runs). Simpler, but only caches the final `pacman -S` step, not
-   `pacstrap`, and needs the mount wired before the install starts.
+```
+Server = http://<cache-host>:9129/repo/archlinux/$repo/os/$arch
+```
 
-A warm cache turns a ~15-minute cold boot test into a few minutes — enough to
-make per-submission testing practical.
+`boot-test.sh` reads `$PACOLOCO_URL` and rewrites the VM's mirrorlist
+automatically. VBox reachability: run pacoloco on the **host** (NAT VMs reach it
+at `http://10.0.2.2:9129`), or on a **cache VM** sharing a VBox *NAT Network*
+with the test VMs.
+
+**Verified 2026-07-04:** a warm fetch served vim (2.65 MB) in **13 ms** vs
+**809 ms** cold — ~62× faster, and a cache hit never touches the upstream mirror
+(so no rate-limit exposure on repeated runs). A warm cache turns a ~15-minute
+cold boot test into a few minutes.
 
 ## Stage 3 — Human sign-off
 
@@ -109,8 +115,9 @@ the reviewer's console; the boot-test evidence attaches to the same view.
 |---|---|
 | 1. Static scan (`scan.py` + web UI) | ✅ built |
 | 1. `--check-packages` (AUR/typosquat) | ✅ built (needs Arch + synced DB) |
+| 1. DNS-spoofing detection | ✅ built (hosts/resolv.conf/resolved/NM/nsswitch/dnsmasq + runtime DNS cmds) |
 | 2. Boot test harness | ⏳ `scripts/audit-vms.sh` exists; `boot-test.sh` is the review-wrapper skeleton |
 | 2. Behavioural capture (net/listeners/fs-diff) | ❌ to build |
-| 2. Package caching proxy | ❌ to deploy (pacoloco) |
+| 2. Package caching proxy | ✅ built + verified (`cache-setup.sh`, pacoloco; 62× warm speedup) |
 | 3. Reviewer console + evidence attach | ⏳ web UI renders findings; boot evidence not yet wired |
 | Pin/mirror + signing | ❌ to build |
