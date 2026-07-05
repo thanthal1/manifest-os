@@ -12,12 +12,16 @@ manifest install ./my-setup.json
 
 ## Status
 
-**Phase 1 — Core CLI.** This repo currently implements the local install
-pipeline against an already-running Arch system. The ISO/TUI installer, the
-versioned schema loader, the survey system, and the catalog come later (see the
-project plan).
+Working end-to-end: the **`manifest` CLI** applies a manifest to a running Arch
+system; a **bootable ISO** boots straight into a **graphical installer**
+(`manifest-gui`, GTK4) or a text TUI and installs to a blank disk, alongside
+Windows, or onto encrypted/LVM/RAID layouts; and an installed system gets
+**System Snapshots** (`manifest-center`) — a friendly desktop app to save/restore
+setups and edit config visually (the node-graph "Designer"). The manifest
+lifecycle (`export` / `diff` / `sync` / `history` / `rollback`) is implemented.
+See [HANDOFF.md](HANDOFF.md) for the full map and what's verified.
 
-The install flow that exists today:
+The core install flow:
 
 | Step | What it does |
 |------|--------------|
@@ -182,17 +186,38 @@ install is destructive and meant to be rolled back during development.
 ## Commands
 
 ```bash
-manifest install <file.json> [--dry-run]   # apply a manifest
+manifest install <file.json> [--dry-run] [--answers a.json]   # apply a manifest
 manifest verify  <file.json>               # validate structure + schema version
-manifest desktops                          # list supported desktops / WMs
-manifest kernels                           # list installable kernels
-manifest export | sync | diff              # Phase 5 (not yet implemented)
+manifest export  [-o out.json]             # capture the running system into a manifest
+manifest diff    <file.json>               # preview what applying would change
+manifest sync    <file.json>               # re-apply an edited manifest
+manifest history                           # list applied manifests (git-backed)
+manifest rollback [<ref>]                  # revert to a previous manifest
+manifest desktops | kernels                # list supported desktops/WMs / kernels
+manifest tui | provision …                 # guided (ISO) / unattended headless installer
 ```
+
+`--dry-run` prints every command without executing — safe to inspect on any OS.
 
 ## Schema
 
-See [`examples/minimal.json`](examples/minimal.json) for a complete v1.0.0
-manifest. The schema is defined in [`src/manifest.rs`](src/manifest.rs).
+See [`examples/minimal.json`](examples/minimal.json) for a minimal v1.0.0
+manifest, or [`examples/hyprland-pro.json`](examples/hyprland-pro.json) for a
+complete all-declarative desktop. The schema is defined in
+[`src/manifest.rs`](src/manifest.rs).
+
+## Sharing manifests (marketplace tooling)
+
+A manifest installs as root, so a shared one is untrusted until reviewed.
+[`marketplace/`](marketplace/) has the review pipeline: a static security
+scanner (`scan.py` — flags shell hooks, sudoers/SSH/DNS-spoofing/RCE patterns,
+untrusted sources), a self-contained web console, and a package-cached VM
+boot-test. See [`marketplace/README.md`](marketplace/README.md).
+
+Two auditors keep the bundled examples honest:
+[`scripts/audit-examples.sh`](scripts/audit-examples.sh) (fast: URL liveness,
+package existence, compositor-config validity) and
+[`scripts/audit-vms.sh`](scripts/audit-vms.sh) (full VM installs).
 
 ## License
 
