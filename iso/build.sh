@@ -58,6 +58,18 @@ for m in "$repo"/examples/*.json; do
 done
 echo "bundled $(ls "$repo"/examples/*.json | wc -l) example manifest(s)"
 
+# Reference manifests (feature demos + extra desktop configs) go in a subdir.
+# `bundled_manifests()` reads the examples dir non-recursively, so these stay
+# OUT of the installer picker — but they're still on the ISO and installable by
+# an explicit path (e.g. the audit-vms.sh feature scenarios point at them).
+if compgen -G "$repo/examples/reference/*.json" >/dev/null; then
+    for m in "$repo"/examples/reference/*.json; do
+        [[ -s "$m" ]] || { echo "ERROR: reference $(basename "$m") is empty — aborting build" >&2; exit 1; }
+        install -Dm644 "$m" "$profile/airootfs/usr/share/manifest-os/examples/reference/$(basename "$m")"
+    done
+    echo "bundled $(ls "$repo"/examples/reference/*.json | wc -l) reference manifest(s) (not shown in picker)"
+fi
+
 # Normalize line endings — a Windows checkout may carry CRLF, which makes
 # mkarchiso choke when it sources profiledef.sh ($'\r': command not found).
 # grep -I skips binary files (e.g. the baked-in manifest binary).

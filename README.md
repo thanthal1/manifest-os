@@ -164,8 +164,12 @@ services, and any greeter/session config that has to be written:
 
 Each recipe picks a sensible display manager (GDM/SDDM/LightDM/greetd/ly/
 cosmic-greeter) and writes its config automatically. Override it per manifest
-with `"display_manager"`. See [`examples/hyprland-rice.json`](examples/hyprland-rice.json)
-and [`examples/gnome.json`](examples/gnome.json).
+with `"display_manager"`. See the four flagship desktops in
+[`examples/`](examples): [`tokyonight-aurora.json`](examples/tokyonight-aurora.json)
+(Hyprland), [`catppuccin-plasma.json`](examples/catppuccin-plasma.json) (KDE Plasma),
+[`niri-rice.json`](examples/niri-rice.json) (Niri) and
+[`sway-pro.json`](examples/sway-pro.json) (Sway). Smaller feature-demos and extra
+configs live in [`examples/reference/`](examples/reference).
 
 > All 118 packages across the catalog are validated against the real Arch repos
 > in CI-style container runs — no broken package names.
@@ -176,8 +180,8 @@ The `--dry-run` flag prints every step without touching the system, so it works
 even on a non-Arch dev machine:
 
 ```bash
-cargo run -- verify  examples/minimal.json
-cargo run -- install examples/minimal.json --dry-run
+cargo run -- verify  examples/reference/minimal.json
+cargo run -- install examples/reference/minimal.json --dry-run
 ```
 
 For a real install, run it inside a **throwaway Arch VM with snapshots** — the
@@ -201,9 +205,9 @@ manifest tui | provision …                 # guided (ISO) / unattended headles
 
 ## Schema
 
-See [`examples/minimal.json`](examples/minimal.json) for a minimal v1.0.0
-manifest, or [`examples/hyprland-pro.json`](examples/hyprland-pro.json) for a
-complete all-declarative desktop. The schema is defined in
+See [`examples/reference/minimal.json`](examples/reference/minimal.json) for a
+minimal v1.0.0 manifest, or [`examples/tokyonight-aurora.json`](examples/tokyonight-aurora.json)
+for a complete all-declarative desktop. The schema is defined in
 [`src/manifest.rs`](src/manifest.rs).
 
 ## Sharing manifests (marketplace tooling)

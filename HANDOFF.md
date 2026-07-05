@@ -66,7 +66,7 @@ Three binaries: **`manifest`** (CLI, always), **`manifest-gui`** and
 `snippets`, `wallpaper`, `keybindings`, `theme`, and `pre_install`/`post_install`
 (the escape hatch — everything else is declarative). Schema:
 [`src/manifest.rs`](src/manifest.rs); complete example:
-[`examples/hyprland-pro.json`](examples/hyprland-pro.json).
+[`examples/tokyonight-aurora.json`](examples/tokyonight-aurora.json).
 
 ## Install options (TUI + GUI + `provision`)
 
@@ -100,7 +100,7 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 ## How to build & test
 
 **Engine (Docker, any host):** `docker build -f docker/Dockerfile -t manifest-test .`
-then `docker run --rm manifest-test install examples/bootstrap.json [--dry-run]`.
+then `docker run --rm manifest-test install examples/reference/bootstrap.json [--dry-run]`.
 
 **Audit the examples before an ISO:** `bash scripts/audit-examples.sh` (fast:
 URLs live? packages exist? add `-c` to validate compositor configs). Deeper:

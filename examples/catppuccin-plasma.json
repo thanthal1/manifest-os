@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Catppuccin Plasma",
+    "author": "Manifest OS",
+    "description": "A cohesive Catppuccin Mocha KDE Plasma desktop: a self-contained dark color scheme with a mauve accent, matched Konsole (blurred, Catppuccin), Breeze-Dark widgets with blur + contrast effects, Papirus icons and a JetBrains Mono terminal — all declared, no post-install shell.",
+    "tags": [
+      "plasma",
+      "kde",
+      "catppuccin",
+      "mocha",
+      "dark",
+      "desktop"
+    ],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "plasma",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us",
+    "kernel": "cachy"
+  },
+  "boot": {
+    "loader": "grub",
+    "cmdline": [
+      "quiet"
+    ],
+    "timeout": 3
+  },
+  "repos": {
+    "multilib": true
+  },
+  "users": [
+    {
+      "name": "kai",
+      "groups": [
+        "wheel",
+        "video",
+        "input",
+        "audio"
+      ],
+      "shell": "/bin/zsh",
+      "sudo": true,
+      "password": "kai"
+    }
+  ],
+  "desktop": "plasma",
+  "display_manager": "sddm",
+  "packages": [
+    "firefox",
+    "kdeplasma-addons",
+    "plasma-browser-integration",
+    "power-profiles-daemon",
+    "breeze-gtk",
+    "papirus-icon-theme",
+    "ttf-jetbrains-mono-nerd",
+    "noto-fonts",
+    "noto-fonts-emoji",
+    "zsh",
+    "starship",
+    "fastfetch",
+    "eza",
+    "bat",
+    "fzf",
+    "ripgrep",
+    "btop",
+    "git",
+    "wl-clipboard"
+  ],
+  "theme": {
+    "gtk": "Breeze-Dark",
+    "icons": "Papirus-Dark",
+    "cursor": "breeze_cursors",
+    "cursor_size": 24,
+    "font": "Noto Sans 11",
+    "monospace_font": "JetBrainsMono Nerd Font 11",
+    "dark": true
+  },
+  "wallpaper": {
+    "source": "https://raw.githubusercontent.com/dharmx/walls/main/outrun/a_city_skyline_with_a_sunset_in_the_background.png",
+    "mode": "fill"
+  },
+  "files": [
+    {
+      "path": "/home/kai/.config/kdeglobals",
+      "owner": "kai:kai",
+      "content": "[General]\nColorScheme=CatppuccinMocha\nName=Catppuccin Mocha\nshadeSortColumn=true\nAccentColor=203,166,247\naccentColorFromWallpaper=false\nfont=Noto Sans,10,-1,5,50,0,0,0,0,0\nfixed=JetBrainsMono Nerd Font,10,-1,5,50,0,0,0,0,0\nmenuFont=Noto Sans,10,-1,5,50,0,0,0,0,0\nsmallestReadableFont=Noto Sans,8,-1,5,50,0,0,0,0,0\ntoolBarFont=Noto Sans,10,-1,5,50,0,0,0,0,0\n\n[KDE]\nwidgetStyle=Breeze\nLookAndFeelPackage=org.kde.breezedark.desktop\ncontrast=4\nAnimationDurationFactor=0.5\nSingleClick=false\n\n[Icons]\nTheme=Papirus-Dark\n\n[WM]\nactiveBackground=30,30,46\nactiveForeground=205,214,244\ninactiveBackground=24,24,37\ninactiveForeground=166,173,200\nactiveBlend=203,166,247\ninactiveBlend=88,91,112\n\n[Colors:Window]\nBackgroundNormal=30,30,46\nBackgroundAlternate=24,24,37\nForegroundNormal=205,214,244\nForegroundInactive=166,173,200\nForegroundActive=203,166,247\nForegroundLink=137,180,250\nForegroundVisited=180,190,254\nForegroundNegative=243,139,168\nForegroundNeutral=249,226,175\nForegroundPositive=166,227,161\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:View]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundInactive=166,173,200\nForegroundActive=203,166,247\nForegroundLink=137,180,250\nForegroundNegative=243,139,168\nForegroundNeutral=249,226,175\nForegroundPositive=166,227,161\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Button]\nBackgroundNormal=49,50,68\nBackgroundAlternate=69,71,90\nForegroundNormal=205,214,244\nForegroundInactive=166,173,200\nForegroundActive=203,166,247\nForegroundNegative=243,139,168\nForegroundNeutral=249,226,175\nForegroundPositive=166,227,161\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Selection]\nBackgroundNormal=203,166,247\nBackgroundAlternate=180,190,254\nForegroundNormal=30,30,46\nForegroundInactive=17,17,27\nForegroundActive=17,17,27\nForegroundLink=49,50,68\nForegroundNegative=118,58,73\nForegroundNeutral=133,111,64\nForegroundPositive=71,109,68\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Tooltip]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundActive=203,166,247\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Complementary]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundActive=203,166,247\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Header]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundActive=203,166,247\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n"
+    },
+    {
+      "path": "/home/kai/.local/share/color-schemes/CatppuccinMocha.colors",
+      "owner": "kai:kai",
+      "content": "[General]\nColorScheme=CatppuccinMocha\nName=Catppuccin Mocha\nshadeSortColumn=true\n\n[WM]\nactiveBackground=30,30,46\nactiveForeground=205,214,244\ninactiveBackground=24,24,37\ninactiveForeground=166,173,200\nactiveBlend=203,166,247\ninactiveBlend=88,91,112\n\n[Colors:Window]\nBackgroundNormal=30,30,46\nBackgroundAlternate=24,24,37\nForegroundNormal=205,214,244\nForegroundInactive=166,173,200\nForegroundActive=203,166,247\nForegroundLink=137,180,250\nForegroundVisited=180,190,254\nForegroundNegative=243,139,168\nForegroundNeutral=249,226,175\nForegroundPositive=166,227,161\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:View]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundInactive=166,173,200\nForegroundActive=203,166,247\nForegroundLink=137,180,250\nForegroundNegative=243,139,168\nForegroundNeutral=249,226,175\nForegroundPositive=166,227,161\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Button]\nBackgroundNormal=49,50,68\nBackgroundAlternate=69,71,90\nForegroundNormal=205,214,244\nForegroundInactive=166,173,200\nForegroundActive=203,166,247\nForegroundNegative=243,139,168\nForegroundNeutral=249,226,175\nForegroundPositive=166,227,161\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Selection]\nBackgroundNormal=203,166,247\nBackgroundAlternate=180,190,254\nForegroundNormal=30,30,46\nForegroundInactive=17,17,27\nForegroundActive=17,17,27\nForegroundLink=49,50,68\nForegroundNegative=118,58,73\nForegroundNeutral=133,111,64\nForegroundPositive=71,109,68\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Tooltip]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundActive=203,166,247\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n\n[Colors:Complementary]\nBackgroundNormal=24,24,37\nBackgroundAlternate=30,30,46\nForegroundNormal=205,214,244\nForegroundActive=203,166,247\nDecorationFocus=203,166,247\nDecorationHover=203,166,247\n"
+    },
+    {
+      "path": "/home/kai/.config/kwinrc",
+      "owner": "kai:kai",
+      "content": "[org.kde.kdecoration2]\nlibrary=org.kde.breeze\ntheme=Breeze\nBorderSize=Normal\nBorderSizeAuto=false\nButtonsOnLeft=MS\nButtonsOnRight=HIAX\n\n[Plugins]\nblurEnabled=true\ncontrastEnabled=true\nwobblywindowsEnabled=false\n\n[Effect-blur]\nBlurStrength=10\nNoiseStrength=4\n\n[Windows]\nPlacement=Centered\n\n[Compositing]\nBackend=OpenGL\nGLCore=true\n"
+    },
+    {
+      "path": "/home/kai/.config/konsolerc",
+      "owner": "kai:kai",
+      "content": "[Desktop Entry]\nDefaultProfile=Catppuccin.profile\n\n[General]\nConfigVersion=1\n\n[MainWindow]\nMenuBar=Disabled\nToolBarsMovable=Disabled\n"
+    },
+    {
+      "path": "/home/kai/.local/share/konsole/Catppuccin.profile",
+      "owner": "kai:kai",
+      "content": "[Appearance]\nColorScheme=CatppuccinMocha\nFont=JetBrainsMono Nerd Font,12,-1,5,50,0,0,0,0,0\n\n[General]\nName=Catppuccin\nParent=FALLBACK/\nTerminalColumns=110\nTerminalRows=30\n\n[Scrolling]\nHistoryMode=2\n\n[Terminal Features]\nBlinkingCursorEnabled=true\n"
+    },
+    {
+      "path": "/home/kai/.local/share/konsole/CatppuccinMocha.colorscheme",
+      "owner": "kai:kai",
+      "content": "[Background]\nColor=30,30,46\n\n[BackgroundIntense]\nColor=30,30,46\n\n[BackgroundFaint]\nColor=30,30,46\n\n[Color0]\nColor=69,71,90\n\n[Color0Intense]\nColor=88,91,112\n\n[Color1]\nColor=243,139,168\n\n[Color1Intense]\nColor=243,139,168\n\n[Color2]\nColor=166,227,161\n\n[Color2Intense]\nColor=166,227,161\n\n[Color3]\nColor=249,226,175\n\n[Color3Intense]\nColor=249,226,175\n\n[Color4]\nColor=137,180,250\n\n[Color4Intense]\nColor=137,180,250\n\n[Color5]\nColor=245,194,231\n\n[Color5Intense]\nColor=245,194,231\n\n[Color6]\nColor=148,226,213\n\n[Color6Intense]\nColor=148,226,213\n\n[Color7]\nColor=186,194,222\n\n[Color7Intense]\nColor=166,173,200\n\n[Foreground]\nColor=205,214,244\n\n[ForegroundIntense]\nColor=205,214,244\n\n[ForegroundFaint]\nColor=205,214,244\n\n[General]\nBlur=true\nColorRandomization=false\nDescription=Catppuccin Mocha\nOpacity=0.96\nWallpaper=\n"
+    },
+    {
+      "path": "/home/kai/.zshrc",
+      "owner": "kai:kai",
+      "content": "# Catppuccin Plasma — Manifest OS\nexport EDITOR=nano\nexport HISTFILE=~/.zsh_history\nexport HISTSIZE=10000\nexport SAVEHIST=10000\nsetopt HIST_IGNORE_ALL_DUPS SHARE_HISTORY\n\nalias ls='eza --icons --group-directories-first'\nalias ll='eza -lah --icons --group-directories-first'\nalias cat='bat --paging=never'\nalias grep='grep --color=auto'\nalias update='sudo pacman -Syu'\n\n# fzf keybindings if present\n[ -f /usr/share/fzf/key-bindings.zsh ] && source /usr/share/fzf/key-bindings.zsh\n[ -f /usr/share/fzf/completion.zsh ] && source /usr/share/fzf/completion.zsh\n\nautoload -Uz compinit && compinit\neval \"$(starship init zsh)\"\ncommand -v fastfetch >/dev/null && fastfetch\n"
+    },
+    {
+      "path": "/home/kai/.config/starship.toml",
+      "owner": "kai:kai",
+      "content": "# Catppuccin Mocha — Manifest OS\nadd_newline = true\nformat = \"\"\"\n[](surface0)$os$username[](bg:surface1 fg:surface0)$directory[](fg:surface1 bg:none) $git_branch$git_status\n$character\"\"\"\n\npalette = 'catppuccin_mocha'\n\n[palettes.catppuccin_mocha]\nsurface0 = '#313244'\nsurface1 = '#45475a'\nmauve = '#cba6f7'\nblue = '#89b4fa'\ngreen = '#a6e3a1'\ntext = '#cdd6f4'\n\n[os]\ndisabled = false\nstyle = 'bg:surface0 fg:mauve'\n[os.symbols]\nArch = ' '\n\n[username]\nshow_always = true\nstyle_user = 'bg:surface0 fg:text'\nstyle_root = 'bg:surface0 fg:red'\nformat = '[ $user ]($style)'\n\n[directory]\nstyle = 'bg:surface1 fg:text'\nformat = '[ $path ]($style)'\ntruncation_length = 3\n\n[git_branch]\nsymbol = ' '\nstyle = 'fg:mauve'\nformat = '[$symbol$branch]($style) '\n\n[git_status]\nstyle = 'fg:blue'\n\n[character]\nsuccess_symbol = '[❯](bold green)'\nerror_symbol = '[❯](bold red)'\n"
+    },
+    {
+      "path": "/home/kai/.config/fastfetch/config.jsonc",
+      "owner": "kai:kai",
+      "content": "{\n  \"$schema\": \"https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json\",\n  \"logo\": { \"type\": \"builtin\", \"source\": \"arch\", \"padding\": { \"top\": 1, \"right\": 3 } },\n  \"display\": { \"separator\": \"  \" },\n  \"modules\": [\n    { \"type\": \"title\", \"color\": { \"user\": \"magenta\", \"host\": \"blue\" } },\n    \"separator\",\n    { \"type\": \"os\", \"key\": \" OS\", \"keyColor\": \"magenta\" },\n    { \"type\": \"kernel\", \"key\": \" Kernel\", \"keyColor\": \"blue\" },\n    { \"type\": \"de\", \"key\": \" DE\", \"keyColor\": \"cyan\" },\n    { \"type\": \"wm\", \"key\": \" WM\", \"keyColor\": \"cyan\" },\n    { \"type\": \"terminal\", \"key\": \" Term\", \"keyColor\": \"green\" },\n    { \"type\": \"cpu\", \"key\": \" CPU\", \"keyColor\": \"yellow\" },\n    { \"type\": \"memory\", \"key\": \" RAM\", \"keyColor\": \"red\" },\n    \"break\",\n    { \"type\": \"colors\", \"paddingLeft\": 2, \"symbol\": \"circle\" }\n  ]\n}\n"
+    }
+  ]
+}

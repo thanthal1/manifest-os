@@ -18,7 +18,8 @@
     "hostname": "sway-station",
     "locale": "en_US.UTF-8",
     "timezone": "UTC",
-    "keymap": "us"
+    "keymap": "us",
+    "kernel": "cachy"
   },
   "boot": {
     "loader": "grub",

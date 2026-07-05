@@ -56,7 +56,7 @@ ok()   { echo "    $(grn "ok")     $1"; }
 urls_of() {
   python - "$1" <<'PY'
 import json,sys,re
-d=json.load(open(sys.argv[1]))
+d=json.load(open(sys.argv[1], encoding="utf-8"))
 urls=[]
 w=d.get("wallpaper")
 if isinstance(w,str): urls.append(w)
@@ -75,8 +75,8 @@ for u in urls:
 print("\n".join(sorted(set(out))))
 PY
 }
-packages_of() { python -c 'import json,sys; d=json.load(open(sys.argv[1])); print("\n".join(d.get("packages",[])))' "$1"; }
-desktop_of()  { python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("desktop") or "")' "$1"; }
+packages_of() { python -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print("\n".join(d.get("packages",[])))' "$1"; }
+desktop_of()  { python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("desktop") or "")' "$1"; }
 # Emit "compositor<TAB>tmpfile" for each embedded file whose path is a known
 # compositor config; the fragment's content is written to the tmpfile.
 configs_of() {
@@ -84,7 +84,7 @@ configs_of() {
 import json,sys,os,tempfile
 KNOWN={"hypr/hyprland.conf":"hyprland",".config/niri/config.kdl":"niri",
        "sway/config":"sway","i3/config":"i3"}
-d=json.load(open(sys.argv[1]))
+d=json.load(open(sys.argv[1], encoding="utf-8"))
 for f in d.get("files",[]):
     p=f.get("path","")
     for suffix,comp in KNOWN.items():
@@ -181,9 +181,11 @@ for j in "${FILES[@]}"; do
     echo; continue
   fi
   ok "manifest verify"
-  while IFS= read -r u; do [ -n "$u" ] && check_url "$u"; done < <(urls_of "$j")
-  while IFS= read -r p; do [ -n "$p" ] && check_pkg "$p"; done < <(packages_of "$j")
-  while IFS=$'\t' read -r comp f; do [ -n "$comp" ] && check_config "$comp" "$f"; done < <(configs_of "$j")
+  # Strip any trailing CR: Windows Python prints CRLF, and a stray \r on a URL
+  # or package name makes curl/pacman look up "<value>\r" (curl → exit 000).
+  while IFS= read -r u; do u="${u%$'\r'}"; [ -n "$u" ] && check_url "$u"; done < <(urls_of "$j")
+  while IFS= read -r p; do p="${p%$'\r'}"; [ -n "$p" ] && check_pkg "$p"; done < <(packages_of "$j")
+  while IFS=$'\t' read -r comp f; do comp="${comp%$'\r'}"; f="${f%$'\r'}"; [ -n "$comp" ] && check_config "$comp" "$f"; done < <(configs_of "$j")
   echo
 done
 

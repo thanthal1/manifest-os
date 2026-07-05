@@ -62,25 +62,30 @@ ISO_WIN="$(win "$ISO")"
 # name:manifest:mode  (manifest = bundled example basename)
 SCENARIOS=( "$@" )
 if [ "${#SCENARIOS[@]}" -eq 0 ]; then
+  # The four flagship desktops (in the installer picker) get first-class DE
+  # coverage; feature-demo + workhorse manifests now live under examples/
+  # reference/ on the ISO, so scenarios point at `reference/<name>`.
   SCENARIOS=(
-    minimal:minimal:erase
-    bootstrap:bootstrap:erase
-    survey:survey-demo:erase
-    gnome:gnome:erase
+    minimal:reference/minimal:erase
+    bootstrap:reference/bootstrap:erase
+    survey:reference/survey-demo:erase
+    gnome:reference/gnome:erase
+    hyprland:tokyonight-aurora:erase
+    plasma:catppuccin-plasma:erase
     niri:niri-rice:erase
-    hyprland:hyprland-rice:erase
-    dualboot:minimal:alongside
-    "luks:minimal:erase:--encrypt-mode full --passphrase test1234 --filesystem xfs"
-    "poweruser:minimal:erase:--root-password rootpw123 --autologin --install-nvidia"
-    "lvm:minimal:erase:--lvm"
-    "raid1:minimal:erase:--raid1-disk /dev/sdb"
-    "homeenc:minimal:erase:--encrypt-mode home --passphrase test1234 --root-gib 20"
-    "multiuser:minimal:erase:--extra-user alice:alicepw:sudo --extra-user bob:bobpw"
-    "preseed:minimal:erase:--config /root/preseed.json:printf '{\"disk\":\"/dev/sda\",\"manifest\":\"/usr/share/manifest-os/examples/minimal.json\",\"account\":{\"full_name\":\"Preseed\",\"username\":\"preseed\",\"password\":\"pw123\"}}' > /root/preseed.json"
-    "poweruser2:minimal:erase:--install-printing --post-script /root/post.sh:printf '#!/bin/sh\necho hello from post-install script\n' > /root/post.sh; chmod +x /root/post.sh"
-    keybindings:keybindings-demo:erase
-    theme:theme-demo:erase
-    snippets:snippet-demo:erase
+    sway:sway-pro:erase
+    dualboot:reference/minimal:alongside
+    "luks:reference/minimal:erase:--encrypt-mode full --passphrase test1234 --filesystem xfs"
+    "poweruser:reference/minimal:erase:--root-password rootpw123 --autologin --install-nvidia"
+    "lvm:reference/minimal:erase:--lvm"
+    "raid1:reference/minimal:erase:--raid1-disk /dev/sdb"
+    "homeenc:reference/minimal:erase:--encrypt-mode home --passphrase test1234 --root-gib 20"
+    "multiuser:reference/minimal:erase:--extra-user alice:alicepw:sudo --extra-user bob:bobpw"
+    "preseed:reference/minimal:erase:--config /root/preseed.json:printf '{\"disk\":\"/dev/sda\",\"manifest\":\"/usr/share/manifest-os/examples/reference/minimal.json\",\"account\":{\"full_name\":\"Preseed\",\"username\":\"preseed\",\"password\":\"pw123\"}}' > /root/preseed.json"
+    "poweruser2:reference/minimal:erase:--install-printing --post-script /root/post.sh:printf '#!/bin/sh\necho hello from post-install script\n' > /root/post.sh; chmod +x /root/post.sh"
+    keybindings:reference/keybindings-demo:erase
+    theme:reference/theme-demo:erase
+    snippets:reference/snippet-demo:erase
   )
 fi
 

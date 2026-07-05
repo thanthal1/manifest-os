@@ -380,7 +380,12 @@ pub fn bundled_manifests() -> Vec<String> {
     v.sort();
     v.dedup();
     if v.is_empty() {
-        v = vec!["niri-rice".into(), "hyprland-rice".into(), "gnome".into(), "minimal".into()];
+        v = vec![
+            "tokyonight-aurora".into(),
+            "catppuccin-plasma".into(),
+            "niri-rice".into(),
+            "sway-pro".into(),
+        ];
     }
     v
 }
