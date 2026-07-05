@@ -1,0 +1,141 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Tokyo Night Aurora",
+    "author": "Manifest OS",
+    "description": "An r/unixporn-tier Hyprland rice: floating Tokyo Night waybar islands, heavy blur, an animated aurora gradient border, popin animations, a glassy launcher and matched terminal/notifications — all declared, no post-install shell.",
+    "tags": [
+      "hyprland",
+      "tokyonight",
+      "rice",
+      "unixporn",
+      "blur",
+      "waybar"
+    ],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "system": {
+    "hostname": "aurora",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us",
+    "kernel": "linux-zen"
+  },
+  "boot": {
+    "loader": "grub",
+    "cmdline": [
+      "quiet"
+    ],
+    "timeout": 3
+  },
+  "repos": {
+    "multilib": true
+  },
+  "users": [
+    {
+      "name": "dev",
+      "groups": [
+        "wheel",
+        "video",
+        "input",
+        "audio"
+      ],
+      "shell": "/bin/zsh",
+      "sudo": true,
+      "password": "dev"
+    }
+  ],
+  "desktop": "hyprland",
+  "display_manager": "sddm",
+  "packages": [
+    "firefox",
+    "nautilus",
+    "zsh",
+    "starship",
+    "eza",
+    "bat",
+    "fzf",
+    "ripgrep",
+    "btop",
+    "fastfetch",
+    "cava",
+    "grim",
+    "slurp",
+    "hyprpicker",
+    "wl-clipboard",
+    "brightnessctl",
+    "playerctl",
+    "pavucontrol",
+    "polkit-gnome",
+    "qt5ct",
+    "ttf-jetbrains-mono-nerd",
+    "noto-fonts-emoji",
+    "papirus-icon-theme"
+  ],
+  "theme": {
+    "gtk": "Adwaita-dark",
+    "icons": "Papirus-Dark",
+    "cursor": "Adwaita",
+    "cursor_size": 24,
+    "font": "Noto Sans 11",
+    "monospace_font": "JetBrainsMono Nerd Font 11",
+    "dark": true
+  },
+  "wallpaper": {
+    "source": "https://raw.githubusercontent.com/dharmx/walls/main/digital/a_car_on_a_road_with_purple_clouds_in_the_sky.png",
+    "mode": "fill"
+  },
+  "files": [
+    {
+      "path": "/home/dev/.config/hypr/hyprland.conf",
+      "owner": "dev:dev",
+      "content": "# Tokyo Night Aurora — Manifest OS\nmonitor = , preferred, auto, 1.0\n\n# ------- Autostart -------\nexec-once = waybar\nexec-once = mako\nexec-once = manifest-wallpaper\nexec-once = nm-applet --indicator\nexec-once = hypridle\nexec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1\n\nenv = XCURSOR_SIZE,24\nenv = HYPRCURSOR_SIZE,24\nenv = QT_QPA_PLATFORMTHEME,qt5ct\n\ninput {\n    kb_layout = us\n    follow_mouse = 1\n    sensitivity = 0\n    touchpad {\n        natural_scroll = true\n        tap-to-click = true\n    }\n}\n\ngeneral {\n    gaps_in = 6\n    gaps_out = 16\n    border_size = 2\n    # animated aurora gradient border\n    col.active_border = rgba(7aa2f7ee) rgba(bb9af7ee) rgba(7dcfffee) 45deg\n    col.inactive_border = rgba(292e42aa)\n    layout = dwindle\n    resize_on_border = true\n    allow_tearing = false\n}\n\ndecoration {\n    rounding = 14\n    active_opacity = 0.96\n    inactive_opacity = 0.90\n    blur {\n        enabled = true\n        size = 8\n        passes = 3\n        new_optimizations = true\n        xray = true\n        ignore_opacity = true\n        noise = 0.015\n        contrast = 1.10\n        brightness = 1.0\n        vibrancy = 0.25\n        vibrancy_darkness = 0.2\n    }\n    shadow {\n        enabled = true\n        range = 24\n        render_power = 3\n        color = rgba(11121aee)\n        color_inactive = rgba(11121a99)\n    }\n    dim_inactive = true\n    dim_strength = 0.08\n}\n\nanimations {\n    enabled = true\n    bezier = wind, 0.05, 0.9, 0.1, 1.05\n    bezier = overshot, 0.13, 0.99, 0.29, 1.10\n    bezier = smoothOut, 0.36, 0.0, 0.66, -0.56\n    bezier = liner, 1, 1, 1, 1\n    animation = windows, 1, 5, overshot, popin 60%\n    animation = windowsOut, 1, 4, smoothOut, popin 60%\n    animation = border, 1, 8, default\n    animation = borderangle, 1, 90, liner, loop\n    animation = fade, 1, 6, default\n    animation = workspaces, 1, 5, wind, slidefade 20%\n}\n\ndwindle {\n    preserve_split = true\n    smart_split = false\n    smart_resizing = true\n}\n\nmaster {\n    new_status = master\n}\n\nmisc {\n    disable_hyprland_logo = true\n    force_default_wallpaper = 0\n    vfr = true\n}\n\n# glassy blur for the bar + launcher + notifications\nlayerrule = blur, waybar\nlayerrule = ignorezero, waybar\nlayerrule = blur, wofi\nlayerrule = ignorezero, wofi\nlayerrule = blur, notifications\nlayerrule = ignorezero, notifications\n\n# ------- Keybindings -------\n$mainMod = SUPER\n\nbind = $mainMod, Return, exec, kitty\nbind = $mainMod, D, exec, wofi --show drun\nbind = $mainMod, B, exec, firefox\nbind = $mainMod, E, exec, nautilus\nbind = $mainMod, Q, killactive,\nbind = $mainMod, F, fullscreen, 0\nbind = $mainMod, V, togglefloating,\nbind = $mainMod, P, pseudo,\nbind = $mainMod, L, exec, hyprlock\nbind = $mainMod, C, exec, hyprpicker -a\nbind = $mainMod SHIFT, E, exit,\n\n# focus\nbind = $mainMod, left, movefocus, l\nbind = $mainMod, right, movefocus, r\nbind = $mainMod, up, movefocus, u\nbind = $mainMod, down, movefocus, d\n\n# workspaces\nbind = $mainMod, 1, workspace, 1\nbind = $mainMod, 2, workspace, 2\nbind = $mainMod, 3, workspace, 3\nbind = $mainMod, 4, workspace, 4\nbind = $mainMod, 5, workspace, 5\nbind = $mainMod SHIFT, 1, movetoworkspace, 1\nbind = $mainMod SHIFT, 2, movetoworkspace, 2\nbind = $mainMod SHIFT, 3, movetoworkspace, 3\nbind = $mainMod SHIFT, 4, movetoworkspace, 4\nbind = $mainMod SHIFT, 5, movetoworkspace, 5\nbind = $mainMod, mouse_down, workspace, e+1\nbind = $mainMod, mouse_up, workspace, e-1\n\n# move/resize with mouse\nbindm = $mainMod, mouse:272, movewindow\nbindm = $mainMod, mouse:273, resizewindow\n\n# 3-finger swipe between workspaces\ngesture = 3, horizontal, workspace\n\n# screenshots\nbind = , Print, exec, grim -g \"$(slurp)\" ~/Pictures/screenshot-$(date +%s).png\n\n# media & brightness\nbinde = , XF86AudioRaiseVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\nbinde = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\nbind = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\nbind = , XF86AudioPlay, exec, playerctl play-pause\nbind = , XF86AudioNext, exec, playerctl next\nbind = , XF86AudioPrev, exec, playerctl previous\nbinde = , XF86MonBrightnessUp, exec, brightnessctl set +5%\nbinde = , XF86MonBrightnessDown, exec, brightnessctl set 5%-\n"
+    },
+    {
+      "path": "/home/dev/.config/waybar/config.jsonc",
+      "owner": "dev:dev",
+      "content": "// Tokyo Night Aurora — floating islands\n{\n  \"layer\": \"top\",\n  \"position\": \"top\",\n  \"height\": 34,\n  \"spacing\": 0,\n  \"margin-top\": 8,\n  \"margin-left\": 14,\n  \"margin-right\": 14,\n  \"modules-left\": [\"custom/launcher\", \"hyprland/workspaces\", \"hyprland/window\"],\n  \"modules-center\": [\"clock\"],\n  \"modules-right\": [\"tray\", \"pulseaudio\", \"network\", \"cpu\", \"memory\", \"battery\", \"custom/power\"],\n\n  \"custom/launcher\": { \"format\": \"󰣇\", \"on-click\": \"wofi --show drun\", \"tooltip\": false },\n  \"hyprland/workspaces\": {\n    \"format\": \"{icon}\",\n    \"on-click\": \"activate\",\n    \"format-icons\": { \"active\": \"\", \"default\": \"\", \"empty\": \"\" },\n    \"persistent-workspaces\": { \"*\": 5 }\n  },\n  \"hyprland/window\": { \"format\": \"  {title}\", \"max-length\": 45, \"separate-outputs\": true },\n  \"clock\": {\n    \"format\": \"  {:%H:%M}   {:%a %d %b}\",\n    \"tooltip-format\": \"<tt><big>{calendar}</big></tt>\"\n  },\n  \"cpu\": { \"format\": \"  {usage}%\", \"interval\": 2 },\n  \"memory\": { \"format\": \"  {percentage}%\" },\n  \"network\": {\n    \"format-wifi\": \"  {essid}\",\n    \"format-ethernet\": \"  wired\",\n    \"format-disconnected\": \"󰤭  off\",\n    \"tooltip-format\": \"{ifname}  {ipaddr}\"\n  },\n  \"pulseaudio\": {\n    \"format\": \"{icon}  {volume}%\",\n    \"format-muted\": \"  muted\",\n    \"format-icons\": { \"default\": [\"\", \"\", \"\"] },\n    \"on-click\": \"pavucontrol\"\n  },\n  \"battery\": {\n    \"format\": \"{icon}  {capacity}%\",\n    \"format-charging\": \"  {capacity}%\",\n    \"format-icons\": [\"\", \"\", \"\", \"\", \"\"],\n    \"states\": { \"warning\": 30, \"critical\": 15 }\n  },\n  \"tray\": { \"spacing\": 10 },\n  \"custom/power\": { \"format\": \"󰐥\", \"on-click\": \"hyprlock\", \"tooltip\": false }\n}\n"
+    },
+    {
+      "path": "/home/dev/.config/waybar/style.css",
+      "owner": "dev:dev",
+      "content": "/* Tokyo Night Aurora */\n* {\n  font-family: \"JetBrainsMono Nerd Font\", monospace;\n  font-size: 13px;\n  font-weight: bold;\n  min-height: 0;\n}\nwindow#waybar { background: transparent; }\n\n#custom-launcher, #workspaces, #window, #clock, #tray,\n#pulseaudio, #network, #cpu, #memory, #battery, #custom-power {\n  background: alpha(#1a1b26, 0.82);\n  border: 1px solid alpha(#7aa2f7, 0.18);\n  border-radius: 14px;\n  padding: 1px 12px;\n  margin: 3px 3px;\n  box-shadow: 0 2px 6px alpha(#11121a, 0.45);\n}\n\n#custom-launcher {\n  color: #7aa2f7;\n  font-size: 18px;\n  padding: 0 14px;\n  margin-left: 4px;\n}\n#custom-launcher:hover { color: #bb9af7; }\n\n#workspaces { padding: 1px 6px; }\n#workspaces button {\n  color: #565f89;\n  padding: 0 6px;\n  margin: 0 1px;\n  border-radius: 10px;\n  transition: all 0.25s cubic-bezier(0.55, 0, 0.28, 1.68);\n}\n#workspaces button.active {\n  color: #1a1b26;\n  background: linear-gradient(45deg, #7aa2f7, #bb9af7);\n  box-shadow: 0 0 10px alpha(#7aa2f7, 0.55);\n  padding: 0 12px;\n}\n#workspaces button:hover {\n  color: #c0caf5;\n  background: alpha(#7aa2f7, 0.20);\n  box-shadow: none;\n}\n\n#window { color: #a9b1d6; }\n#clock { color: #7dcfff; }\n#cpu { color: #9ece6a; }\n#memory { color: #e0af68; }\n#network { color: #7aa2f7; }\n#pulseaudio { color: #bb9af7; }\n#pulseaudio.muted { color: #565f89; }\n#battery { color: #9ece6a; }\n#battery.warning { color: #e0af68; }\n#battery.critical { color: #f7768e; }\n#custom-power { color: #f7768e; font-size: 15px; padding: 0 13px; margin-right: 4px; }\n#custom-power:hover { color: #ff9e64; }\n#tray { padding: 1px 10px; }\ntooltip {\n  background: #1a1b26;\n  border: 1px solid #7aa2f7;\n  border-radius: 12px;\n}\ntooltip label { color: #c0caf5; }\n"
+    },
+    {
+      "path": "/home/dev/.config/wofi/config",
+      "owner": "dev:dev",
+      "content": "width=560\nheight=420\nlocation=center\nshow=drun\nprompt=\nallow_images=true\nimage_size=28\ninsensitive=true\ngtk_dark=true\n"
+    },
+    {
+      "path": "/home/dev/.config/wofi/style.css",
+      "owner": "dev:dev",
+      "content": "/* Tokyo Night Aurora launcher */\nwindow {\n  margin: 0;\n  background: alpha(#1a1b26, 0.78);\n  border: 2px solid #7aa2f7;\n  border-radius: 20px;\n  font-family: \"JetBrainsMono Nerd Font\";\n}\n#input {\n  margin: 14px;\n  padding: 12px 16px;\n  color: #c0caf5;\n  background: alpha(#292e42, 0.9);\n  border: none;\n  border-radius: 14px;\n  font-size: 15px;\n}\n#inner-box { margin: 6px 14px 14px 14px; }\n#entry {\n  padding: 8px 12px;\n  margin: 2px 0;\n  border-radius: 12px;\n}\n#entry:selected {\n  background: linear-gradient(45deg, alpha(#7aa2f7, 0.9), alpha(#bb9af7, 0.9));\n}\n#entry:selected #text { color: #1a1b26; }\n#text { color: #c0caf5; margin-left: 8px; }\n#img { margin-right: 6px; }\n"
+    },
+    {
+      "path": "/home/dev/.config/mako/config",
+      "owner": "dev:dev",
+      "content": "# Tokyo Night Aurora\nfont=JetBrainsMono Nerd Font 10\nwidth=340\nheight=120\nmargin=14\npadding=14\nborder-size=2\nborder-radius=16\nbackground-color=#1a1b26ee\ntext-color=#c0caf5\nborder-color=#7aa2f7\nprogress-color=over #292e42\ndefault-timeout=6000\nicons=1\nmax-icon-size=48\n\n[urgency=high]\nborder-color=#f7768e\ndefault-timeout=0\n"
+    },
+    {
+      "path": "/home/dev/.config/kitty/kitty.conf",
+      "owner": "dev:dev",
+      "content": "# Tokyo Night Aurora\nfont_family      JetBrainsMono Nerd Font\nfont_size        11.5\ncursor_shape     beam\ncursor_blink_interval 0.5\nscrollback_lines 10000\nenable_audio_bell no\nwindow_padding_width 14\nbackground_opacity 0.82\nbackground_blur 1\nconfirm_os_window_close 0\nhide_window_decorations yes\n\nforeground #c0caf5\nbackground #1a1b26\nselection_foreground #1a1b26\nselection_background #c0caf5\ncursor #c0caf5\ncolor0 #15161e\ncolor1 #f7768e\ncolor2 #9ece6a\ncolor3 #e0af68\ncolor4 #7aa2f7\ncolor5 #bb9af7\ncolor6 #7dcfff\ncolor7 #a9b1d6\ncolor8 #414868\ncolor9 #f7768e\ncolor10 #9ece6a\ncolor11 #e0af68\ncolor12 #7aa2f7\ncolor13 #bb9af7\ncolor14 #7dcfff\ncolor15 #c0caf5\n"
+    },
+    {
+      "path": "/home/dev/.config/fastfetch/config.jsonc",
+      "owner": "dev:dev",
+      "content": "{\n  \"logo\": { \"type\": \"builtin\", \"source\": \"arch\", \"padding\": { \"top\": 1, \"left\": 2 } },\n  \"display\": { \"separator\": \"  \" },\n  \"modules\": [\n    \"title\", \"separator\",\n    { \"type\": \"os\", \"key\": \"󰣇 os\" },\n    { \"type\": \"kernel\", \"key\": \" kernel\" },\n    { \"type\": \"wm\", \"key\": \" wm\" },\n    { \"type\": \"packages\", \"key\": \"󰏖 pkgs\" },\n    { \"type\": \"shell\", \"key\": \" shell\" },\n    { \"type\": \"terminal\", \"key\": \" term\" },\n    { \"type\": \"memory\", \"key\": \" mem\" },\n    \"break\", \"colors\"\n  ]\n}\n"
+    },
+    {
+      "path": "/home/dev/.config/starship.toml",
+      "owner": "dev:dev",
+      "content": "# Tokyo Night Aurora\nadd_newline = true\nformat = \"$directory$git_branch$git_status$character\"\n[character]\nsuccess_symbol = \"[❯](bold #bb9af7)\"\nerror_symbol = \"[❯](bold #f7768e)\"\n[directory]\nstyle = \"bold #7aa2f7\"\ntruncation_length = 3\n[git_branch]\nsymbol = \" \"\nstyle = \"bold #7dcfff\"\n[git_status]\nstyle = \"bold #e0af68\"\n"
+    },
+    {
+      "path": "/home/dev/.zshrc",
+      "owner": "dev:dev",
+      "content": "setopt AUTO_CD INTERACTIVE_COMMENTS SHARE_HISTORY HIST_IGNORE_ALL_DUPS\nHISTFILE=~/.zsh_history; HISTSIZE=10000; SAVEHIST=10000\nalias ls='eza --icons --group-directories-first'\nalias ll='eza -lah --icons --group-directories-first'\nalias tree='eza --tree --icons'\nalias cat='bat --paging=never'\nalias ..='cd ..'\nautoload -Uz compinit && compinit\nzstyle ':completion:*' menu select\neval \"$(starship init zsh)\"\nfastfetch\n"
+    }
+  ]
+}
