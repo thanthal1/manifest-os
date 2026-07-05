@@ -55,7 +55,9 @@ pub fn enable_repos(manifest: &Manifest, kernel: &Kernel, ctx: &Ctx) -> Result<(
 /// AUR package can link against a newer libalpm than the one installed. Always
 /// `-Syu`, never `-Sy`.
 pub fn sync_system(ctx: &Ctx) -> Result<()> {
-    ctx.sudo("pacman", &["-Syu", "--noconfirm"])
+    // --disable-download-timeout: don't abort a slow-but-progressing download
+    // (a busy mirror trickling bytes) — pacman's default kills it at <1 B/s.
+    ctx.sudo("pacman", &["-Syu", "--noconfirm", "--disable-download-timeout"])
 }
 
 /// Whether a named repo is configured in pacman.conf.
@@ -112,7 +114,7 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
     println!("  · installing build prerequisites (base-devel, git)");
     ctx.sudo(
         "pacman",
-        &["-S", "--needed", "--noconfirm", "base-devel", "git"],
+        &["-S", "--needed", "--noconfirm", "--disable-download-timeout", "base-devel", "git"],
     )?;
 
     println!("  · building paru from the AUR (low-memory mode)");
@@ -155,6 +157,8 @@ pub fn install_packages(
         "-S".to_string(),
         "--needed".to_string(),
         "--noconfirm".to_string(),
+        // don't let one slow mirror's trickle abort the whole desktop install
+        "--disable-download-timeout".to_string(),
     ];
     args.extend(pkgs.into_iter().map(shell_quote));
     ctx.shell(&args.join(" "), false)

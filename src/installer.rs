@@ -69,6 +69,7 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     // "pacstrap exited 1" into a clear message, with the disk still untouched.
     ensure_online(ctx)?;
     fix_clock(ctx);
+    rank_mirrors(ctx);
     ensure_keyring(ctx)?;
     // Fail before we wipe the disk if the chosen manifest is missing, empty, or
     // not valid JSON. Otherwise we'd pacstrap onto a freshly-formatted disk and
@@ -649,6 +650,32 @@ fn ensure_online(ctx: &Ctx) -> Result<()> {
     }
     println!("  · online");
     Ok(())
+}
+
+/// Point pacman at fast mirrors before the big downloads. The archiso default
+/// mirrorlist can leave you on a slow or rate-limited mirror that trickles at
+/// "less than 1 byte/sec" until pacman times out and the whole transaction
+/// fails (a real-hardware install death). The geo-redirect mirror is
+/// Arch-maintained and always resolves to a fast nearby Tier-1 mirror — a
+/// reliable primary; `reflector` then appends speed-ranked HTTPS backups so
+/// there's failover. Also turns on ParallelDownloads. Best-effort: if this
+/// can't run, the existing mirrorlist stays and the install proceeds.
+fn rank_mirrors(ctx: &Ctx) {
+    if ctx.dry_run {
+        return;
+    }
+    step("Selecting fast package mirrors");
+    let _ = ctx.shell(
+        "printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\\n' > /etc/pacman.d/mirrorlist; \
+         if command -v reflector >/dev/null 2>&1; then \
+           timeout 45 reflector --protocol https --latest 15 --sort rate --download-timeout 4 \
+             2>/dev/null >> /etc/pacman.d/mirrorlist || true; \
+         fi; \
+         sed -i 's/^#\\?ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf 2>/dev/null || true; \
+         grep -q '^ParallelDownloads' /etc/pacman.conf || echo 'ParallelDownloads = 5' >> /etc/pacman.conf; \
+         echo '  · geo-redirect mirror + ranked HTTPS backups; parallel downloads on'",
+        true,
+    );
 }
 
 /// Correct the system clock before pacstrap. A machine with a dead CMOS battery
@@ -1418,6 +1445,9 @@ fn pacstrap(ctx: &Ctx) -> Result<()> {
     // `mkinitcpio` is named explicitly: `base` pulls a virtual `initramfs`
     // with three providers, which otherwise triggers a prompt that fails
     // non-interactively.
+    // pacstrap uses the host's (mirror-ranked) /etc/pacman.d/mirrorlist for the
+    // download and copies it into the new root, so a fast mirror here also means
+    // the installed system inherits fast mirrors. See rank_mirrors().
     ctx.sudo(
         "pacstrap",
         &[
