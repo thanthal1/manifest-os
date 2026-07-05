@@ -43,6 +43,12 @@ struct Pending {
 }
 
 struct Designer {
+    /// The manifest being edited, as JSON — the tree is generated from this
+    /// (`export::capture_json`), and every field edit writes back into it.
+    doc: RefCell<serde_json::Value>,
+    /// The manifest as first captured, to tell whether anything field-level
+    /// changed (so Apply only re-syncs when it needs to).
+    baseline: String,
     /// Loaded shareable segments the user can drag (drag-key → segment).
     tray: RefCell<HashMap<String, Segment>>,
     tray_seq: RefCell<u32>,
@@ -54,6 +60,7 @@ struct Designer {
     tray_box: gtk::Box,
     tree_box: gtk::Box,
     window: adw::ApplicationWindow,
+    stack: Rc<adw::ViewStack>,
     toasts: adw::ToastOverlay,
 }
 
@@ -62,7 +69,14 @@ pub fn build(
     stack: &Rc<adw::ViewStack>,
     toasts: &adw::ToastOverlay,
 ) {
+    // Generate the tree from the system's manifest (as JSON — the source of truth).
+    let captured = manifest::export::capture_json();
+    let doc: serde_json::Value =
+        serde_json::from_str(&captured).unwrap_or_else(|_| serde_json::json!({}));
+
     let d = Rc::new(Designer {
+        baseline: serde_json::to_string(&doc).unwrap_or_default(),
+        doc: RefCell::new(doc),
         tray: RefCell::new(HashMap::new()),
         tray_seq: RefCell::new(0),
         pending: RefCell::new(Vec::new()),
@@ -70,6 +84,7 @@ pub fn build(
         tray_box: gtk::Box::new(gtk::Orientation::Horizontal, 8),
         tree_box: gtk::Box::new(gtk::Orientation::Vertical, 12),
         window: window.clone(),
+        stack: stack.clone(),
         toasts: toasts.clone(),
     });
 
@@ -306,26 +321,124 @@ impl Designer {
         while let Some(c) = self.tree_box.first_child() {
             self.tree_box.remove(&c);
         }
+        // The manifest itself, generated from the captured JSON — editable.
+        self.tree_box.append(&self.system_group());
+        self.tree_box.append(&self.desktop_group());
+        self.tree_box.append(&self.appearance_group());
+
+        // The config files on disk + the segments you drop onto them.
         let targets = self.scan_targets();
-        if targets.is_empty() {
-            let empty = gtk::Label::new(Some(
-                "No desktop config found yet. Once you have a window manager or bar set up, \
-                 its parts will appear here to drop segments onto.",
-            ));
-            empty.add_css_class("dim-label");
-            empty.set_wrap(true);
-            empty.set_margin_top(24);
-            self.tree_box.append(&empty);
-            return;
-        }
         let group = adw::PreferencesGroup::builder()
-            .title("Your setup")
+            .title("Config files")
             .description("Drag a segment from above onto the matching part.")
             .build();
-        for t in &targets {
-            group.add(&self.target_row(t));
+        if targets.is_empty() {
+            let row = adw::ActionRow::builder()
+                .title("No desktop config files yet")
+                .subtitle("They appear here once your window manager / bar is set up.")
+                .build();
+            group.add(&row);
+        } else {
+            for t in &targets {
+                group.add(&self.target_row(t));
+            }
         }
         self.tree_box.append(&group);
+    }
+
+    // ---- manifest field groups (generated from the JSON) ------------------
+
+    fn system_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let g = adw::PreferencesGroup::builder()
+            .title("System")
+            .description("The basics — pick from a list, no editing files.")
+            .build();
+        let doc = self.doc.borrow();
+        let kernels: Vec<(String, String)> = manifest::kernel::catalog()
+            .iter()
+            .map(|k| (k.key.to_string(), format!("{} ({})", k.display, k.key)))
+            .collect();
+        let cur_kernel = {
+            let v = jstr(&doc, &["system", "kernel"]);
+            if v.is_empty() { "linux".into() } else { v }
+        };
+        g.add(&self.combo_row("Kernel", &kernels, &cur_kernel, vec!["system".into(), "kernel".into()]));
+        g.add(&self.entry_row("Hostname", &jstr(&doc, &["system", "hostname"]), vec!["system".into(), "hostname".into()]));
+        g.add(&self.entry_row("Timezone", &jstr(&doc, &["system", "timezone"]), vec!["system".into(), "timezone".into()]));
+        g.add(&self.entry_row("Locale", &jstr(&doc, &["system", "locale"]), vec!["system".into(), "locale".into()]));
+        g
+    }
+
+    fn desktop_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let g = adw::PreferencesGroup::builder().title("Desktop").build();
+        let doc = self.doc.borrow();
+        let mut desktops: Vec<(String, String)> = vec![(String::new(), "(none)".into())];
+        desktops.extend(
+            manifest::desktop::catalog()
+                .iter()
+                .map(|r| (r.key.to_string(), r.display_name.to_string())),
+        );
+        let cur = jstr(&doc, &["desktop"]);
+        g.add(&self.combo_row("Desktop / window manager", &desktops, &cur, vec!["desktop".into()]));
+        g.add(&self.entry_row(
+            "Display manager (optional)",
+            &jstr(&doc, &["display_manager"]),
+            vec!["display_manager".into()],
+        ));
+        g
+    }
+
+    fn appearance_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let g = adw::PreferencesGroup::builder().title("Appearance").build();
+        let doc = self.doc.borrow();
+        g.add(&self.entry_row("App theme (GTK)", &jstr(&doc, &["theme", "gtk"]), vec!["theme".into(), "gtk".into()]));
+        g.add(&self.entry_row("Icons", &jstr(&doc, &["theme", "icons"]), vec!["theme".into(), "icons".into()]));
+        g.add(&self.switch_row("Dark mode", jbool(&doc, &["theme", "dark"]), vec!["theme".into(), "dark".into()]));
+        g.add(&self.entry_row("Wallpaper (path or URL)", &wallpaper_src(&doc), vec!["wallpaper".into()]));
+        g
+    }
+
+    fn combo_row(
+        self: &Rc<Self>,
+        title: &str,
+        options: &[(String, String)],
+        current_key: &str,
+        path: Vec<String>,
+    ) -> adw::ComboRow {
+        let names: Vec<&str> = options.iter().map(|(_, d)| d.as_str()).collect();
+        let model = gtk::StringList::new(&names);
+        let row = adw::ComboRow::builder().title(title).model(&model).build();
+        let keys: Vec<String> = options.iter().map(|(k, _)| k.clone()).collect();
+        let sel = keys.iter().position(|k| k == current_key).unwrap_or(0);
+        row.set_selected(sel as u32); // set before connecting so it doesn't fire
+        let this = self.clone();
+        row.connect_selected_notify(move |r| {
+            if let Some(k) = keys.get(r.selected() as usize) {
+                let p: Vec<&str> = path.iter().map(String::as_str).collect();
+                jset_str(&mut this.doc.borrow_mut(), &p, k);
+            }
+        });
+        row
+    }
+
+    fn entry_row(self: &Rc<Self>, title: &str, current: &str, path: Vec<String>) -> adw::EntryRow {
+        let row = adw::EntryRow::builder().title(title).text(current).build();
+        let this = self.clone();
+        row.connect_changed(move |r| {
+            let p: Vec<&str> = path.iter().map(String::as_str).collect();
+            jset_str(&mut this.doc.borrow_mut(), &p, &r.text());
+        });
+        row
+    }
+
+    fn switch_row(self: &Rc<Self>, title: &str, current: bool, path: Vec<String>) -> adw::SwitchRow {
+        let row = adw::SwitchRow::builder().title(title).active(current).build();
+        let this = self.clone();
+        row.connect_active_notify(move |r| {
+            let p: Vec<&str> = path.iter().map(String::as_str).collect();
+            jset_bool(&mut this.doc.borrow_mut(), &p, r.is_active());
+        });
+        row
     }
 
     /// One expandable config-file row: a drop target, with its existing +
@@ -450,7 +563,7 @@ impl Designer {
         let _ = snapshots::save("Before Designer changes");
         let mut touched = 0usize;
 
-        // Removals first.
+        // 1) Config-file segments — user-owned files, written directly (no root).
         for (path, id) in self.deleted.borrow_mut().drain(..) {
             if let Ok(current) = std::fs::read_to_string(&path) {
                 let out = snippets::remove_block(&current, &id);
@@ -459,7 +572,6 @@ impl Designer {
                 }
             }
         }
-        // Then staged segments.
         for p in self.pending.borrow_mut().drain(..) {
             let current = std::fs::read_to_string(&p.target).unwrap_or_default();
             let sn = p.seg.to_snippet(&p.target.display().to_string());
@@ -472,6 +584,28 @@ impl Designer {
                     touched += 1;
                 }
             }
+        }
+
+        // 2) Manifest field changes (kernel, desktop, theme, …) — these need the
+        //    system re-synced to match, which is privileged. Hand the edited
+        //    manifest to the same `manifest sync` flow the "Apply a setup" page
+        //    uses (pkexec + a live progress view).
+        let now = serde_json::to_string(&*self.doc.borrow()).unwrap_or_default();
+        if now != self.baseline {
+            let pretty = serde_json::to_string_pretty(&*self.doc.borrow()).unwrap_or_default();
+            let path = std::env::temp_dir().join("manifest-designer.json");
+            if std::fs::write(&path, pretty).is_ok() {
+                crate::run_privileged(
+                    &self.window,
+                    &self.stack,
+                    &self.toasts,
+                    "Applying your changes",
+                    vec!["sync".into(), path.to_string_lossy().to_string()],
+                );
+                return; // run_privileged takes over the view + streams progress
+            }
+            self.toast("Couldn't stage the manifest changes.");
+            return;
         }
 
         self.rebuild_tree();
@@ -517,6 +651,72 @@ fn scan_segment(content: &str, seg: &Segment) -> Vec<String> {
         w.push("untagged segment (fits anything) — make sure it belongs here".into());
     }
     w
+}
+
+// ---- tiny serde_json path get/set helpers ---------------------------------
+
+/// Read a string at `path` (e.g. `["system","kernel"]`); "" if absent.
+fn jstr(v: &serde_json::Value, path: &[&str]) -> String {
+    let mut cur = v;
+    for k in path {
+        match cur.get(k) {
+            Some(x) => cur = x,
+            None => return String::new(),
+        }
+    }
+    cur.as_str().unwrap_or("").to_string()
+}
+
+fn jbool(v: &serde_json::Value, path: &[&str]) -> bool {
+    let mut cur = v;
+    for k in path {
+        match cur.get(k) {
+            Some(x) => cur = x,
+            None => return false,
+        }
+    }
+    cur.as_bool().unwrap_or(false)
+}
+
+/// Set (or, when `val` is empty, remove) a string at `path`, creating any
+/// intermediate objects.
+fn jset_str(v: &mut serde_json::Value, path: &[&str], val: &str) {
+    let (last, parents) = path.split_last().expect("non-empty path");
+    let mut cur = v;
+    for k in parents {
+        if !cur.get(k).map(|x| x.is_object()).unwrap_or(false) {
+            cur[*k] = serde_json::json!({});
+        }
+        cur = cur.get_mut(k).unwrap();
+    }
+    if val.trim().is_empty() {
+        if let Some(o) = cur.as_object_mut() {
+            o.remove(*last);
+        }
+    } else {
+        cur[*last] = serde_json::Value::String(val.to_string());
+    }
+}
+
+fn jset_bool(v: &mut serde_json::Value, path: &[&str], val: bool) {
+    let (last, parents) = path.split_last().expect("non-empty path");
+    let mut cur = v;
+    for k in parents {
+        if !cur.get(k).map(|x| x.is_object()).unwrap_or(false) {
+            cur[*k] = serde_json::json!({});
+        }
+        cur = cur.get_mut(k).unwrap();
+    }
+    cur[*last] = serde_json::Value::Bool(val);
+}
+
+/// Wallpaper source, whether stored as a bare string or `{ "source": … }`.
+fn wallpaper_src(v: &serde_json::Value) -> String {
+    match v.get("wallpaper") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(o) => o.get("source").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        None => String::new(),
+    }
 }
 
 fn one_line(s: &str, n: usize) -> String {
