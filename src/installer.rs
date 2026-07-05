@@ -665,15 +665,26 @@ fn rank_mirrors(ctx: &Ctx) {
         return;
     }
     step("Selecting fast package mirrors");
+    // Also install a resilient curl-based XferCommand: unlike pacman's built-in
+    // downloader (which aborts at "<1 byte/sec for 10s" — the failure that keeps
+    // killing installs, and which `pacstrap` can't be told to disable), curl here
+    // retries transient failures and never aborts a slow-but-progressing
+    // download. pacstrap copies this pacman.conf into the target, so the chroot
+    // install inherits the same resilience (we add `curl` to pacstrap so the
+    // target has it). This disables ParallelDownloads — resilience over speed,
+    // deliberately, given how often a slow mirror has killed a real install.
+    let xfer = "XferCommand = /usr/bin/curl -fL -C - --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 30 -o %o %u";
     let _ = ctx.shell(
-        "printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\\n' > /etc/pacman.d/mirrorlist; \
-         if command -v reflector >/dev/null 2>&1; then \
-           timeout 45 reflector --protocol https --latest 15 --sort rate --download-timeout 4 \
-             2>/dev/null >> /etc/pacman.d/mirrorlist || true; \
-         fi; \
-         sed -i 's/^#\\?ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf 2>/dev/null || true; \
-         grep -q '^ParallelDownloads' /etc/pacman.conf || echo 'ParallelDownloads = 5' >> /etc/pacman.conf; \
-         echo '  · geo-redirect mirror + ranked HTTPS backups; parallel downloads on'",
+        &format!(
+            "printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\\n' > /etc/pacman.d/mirrorlist; \
+             if command -v reflector >/dev/null 2>&1; then \
+               timeout 45 reflector --protocol https --latest 15 --sort rate --download-timeout 4 \
+                 2>/dev/null >> /etc/pacman.d/mirrorlist || true; \
+             fi; \
+             sed -i '/^[[:space:]]*XferCommand/d' /etc/pacman.conf; \
+             sed -i '/^\\[options\\]/a {xfer}' /etc/pacman.conf; \
+             echo '  · geo mirror + ranked backups; resilient curl downloader (retries, no low-speed abort)'"
+        ),
         true,
     );
 }
@@ -1458,6 +1469,9 @@ fn pacstrap(ctx: &Ctx) -> Result<()> {
             "linux-firmware",
             "mkinitcpio",
             "sudo",
+            // curl: the resilient XferCommand (see rank_mirrors) is copied into
+            // the target's pacman.conf, so the chroot install needs curl present.
+            "curl",
         ],
     )
 }
@@ -1503,6 +1517,12 @@ fn stage_manifest(choice: &str, ctx: &Ctx) -> Result<String> {
         };
         ctx.sudo("cp", &[&src, dest])?;
     }
+    // `manifest install` runs as the unprivileged `installer` user, so the
+    // staged manifest MUST be world-readable. `cp` preserves the source's mode,
+    // and a root-only (600) source — a hand-made manifest, or a curl download —
+    // would otherwise leave it unreadable ("reading manifest … Permission
+    // denied"). Force 644.
+    ctx.sudo("chmod", &["644", dest])?;
     // Defense in depth: never proceed with an empty staged manifest (a bad
     // source, a failed download). precheck_manifest already caught local files
     // before the disk was touched; this also covers the URL path.
