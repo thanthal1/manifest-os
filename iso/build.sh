@@ -45,7 +45,15 @@ else
 fi
 
 # Ship the example manifests so the TUI can list and install them by name.
+# Refuse to bake an empty/invalid example — a 0-byte bundle installs onto a
+# wiped disk and only fails deep in the chroot ("reading survey block: EOF").
 for m in "$repo"/examples/*.json; do
+    if [[ ! -s "$m" ]]; then
+        echo "ERROR: example $(basename "$m") is empty — aborting build" >&2; exit 1
+    fi
+    if command -v python &>/dev/null && ! python -c "import json,sys; json.load(open(sys.argv[1]))" "$m" 2>/dev/null; then
+        echo "ERROR: example $(basename "$m") is not valid JSON — aborting build" >&2; exit 1
+    fi
     install -Dm644 "$m" "$profile/airootfs/usr/share/manifest-os/examples/$(basename "$m")"
 done
 echo "bundled $(ls "$repo"/examples/*.json | wc -l) example manifest(s)"

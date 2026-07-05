@@ -70,6 +70,12 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     ensure_online(ctx)?;
     fix_clock(ctx);
     ensure_keyring(ctx)?;
+    // Fail before we wipe the disk if the chosen manifest is missing, empty, or
+    // not valid JSON. Otherwise we'd pacstrap onto a freshly-formatted disk and
+    // only discover the problem when `manifest install` chokes on it deep in the
+    // chroot ("reading survey block: EOF"), leaving a half-installed system. A
+    // 0-byte bundled example (a build/bake accident) is exactly this case.
+    precheck_manifest(&plan.manifest, ctx)?;
     let alongside = plan.install_mode == "alongside";
     // Free the target disk before partitioning: a leftover /mnt mount, active
     // swap, or auto-mounted partitions (often from a previous failed attempt in
@@ -1467,7 +1473,40 @@ fn stage_manifest(choice: &str, ctx: &Ctx) -> Result<String> {
         };
         ctx.sudo("cp", &[&src, dest])?;
     }
+    // Defense in depth: never proceed with an empty staged manifest (a bad
+    // source, a failed download). precheck_manifest already caught local files
+    // before the disk was touched; this also covers the URL path.
+    if !ctx.dry_run {
+        match std::fs::metadata(dest) {
+            Ok(m) if m.len() > 0 => {}
+            _ => bail!("staged manifest {dest} is empty or missing — refusing to continue"),
+        }
+    }
     Ok("/etc/manifest-install.json".to_string())
+}
+
+/// Resolve the chosen manifest to its on-disk source and confirm it's readable,
+/// non-empty, and valid — *before* any destructive disk step. A URL manifest is
+/// fetched later (and re-checked in [`stage_manifest`]); we can't cheaply
+/// pre-read it here. Skipped in dry-run (a preview may reference a bundled name
+/// that isn't present on a non-Arch dev box).
+fn precheck_manifest(choice: &str, ctx: &Ctx) -> Result<()> {
+    if ctx.dry_run || choice.starts_with("http://") || choice.starts_with("https://") {
+        return Ok(());
+    }
+    let src = if Path::new(choice).is_file() {
+        choice.to_string()
+    } else {
+        format!("/usr/share/manifest-os/examples/{choice}.json")
+    };
+    let raw = std::fs::read_to_string(&src)
+        .with_context(|| format!("can't read the chosen manifest at {src}"))?;
+    if raw.trim().is_empty() {
+        bail!("the chosen manifest ({src}) is empty — nothing to install (a broken/0-byte bundle?)");
+    }
+    crate::manifest::Manifest::from_str(&raw)
+        .with_context(|| format!("the chosen manifest ({src}) is not a valid manifest"))?;
+    Ok(())
 }
 
 /// Guarantee the installed system can boot. The manifest's `boot` block is

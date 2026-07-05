@@ -5,7 +5,8 @@
 //! plan type, so the engine has exactly one input shape.
 
 use serde::Deserialize;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 // Preseed-JSON defaults for InstallPlan — the same defaults `provision`'s CLI
@@ -607,11 +608,17 @@ pub fn writable_removable_mounts(target_disk: &str) -> Vec<String> {
     // read-only at bootmnt, flip it read-write so the log lands on the install
     // USB. Harmlessly fails on a read-only ISO9660 or when copytoram already
     // unmounted it (the scan below then mounts that partition fresh).
-    if Command::new("mount")
-        .args(["-o", "remount,rw", "/run/archiso/bootmnt"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // stderr is silenced: when bootmnt doesn't exist (copytoram, or not an
+    // archiso boot), mount prints a scary "mount point does not exist" that
+    // isn't an error here — this whole step is best-effort.
+    if Path::new("/run/archiso/bootmnt").exists()
+        && Command::new("mount")
+            .args(["-o", "remount,rw", "/run/archiso/bootmnt"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     {
         out.push("/run/archiso/bootmnt".to_string());
     }
