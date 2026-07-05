@@ -1,0 +1,8 @@
+{
+  "id": "screenshot-region",
+  "label": "Region screenshot",
+  "description": "Adds Print → select a region to screenshot, to your niri config.",
+  "applies_to": "niri",
+  "section": "binds",
+  "content": "Print { screenshot; }"
+}

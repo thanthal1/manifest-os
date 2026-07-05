@@ -18,6 +18,7 @@ pub mod kernel;
 pub mod manifest;
 pub mod pacman;
 pub mod probe;
+pub mod segment;
 pub mod snippets;
 pub mod survey;
 pub mod system;

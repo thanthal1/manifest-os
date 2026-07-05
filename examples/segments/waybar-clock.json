@@ -1,0 +1,8 @@
+{
+  "id": "fancy-clock",
+  "label": "Fancy Clock",
+  "description": "A styled clock module for your bar, with a calendar tooltip.",
+  "applies_to": "waybar",
+  "section": "modules-right",
+  "content": "\"clock\": { \"format\": \"{:%a %d %b  %H:%M}\", \"tooltip-format\": \"<tt>{calendar}</tt>\" }"
+}

@@ -1,76 +1,60 @@
-//! The Designer — a node-graph view of your setup, in the spirit of Blender's
-//! shader editor.
+//! The Designer — a **tree** of your setup you drop shareable *segments* onto.
 //!
-//! Config files (niri, Hyprland, waybar, …) and the managed snippet blocks
-//! inside them appear as draggable **nodes** on a canvas; **wires** show what
-//! flows into what — each snippet wires into the file it edits, and a desktop
-//! config that launches waybar wires into the waybar node. Snippet values are
-//! edited right on the node; **Swap** replaces a node's content with a
-//! fragment downloaded from anywhere (a snippet .json), and **Apply** writes
-//! everything back through the same marker-block engine `snippets` uses — so
-//! edits land in place, idempotently, without replacing anyone's files.
+//! The goal: someone downloads, say, a fancy waybar clock segment and just
+//! **drags it onto their bar** — no path, no section, no JSON, no shell. The
+//! tree is generated from what's actually on disk (window manager, bar,
+//! terminal, notifications…), each config a **drop target**. A segment carries
+//! what it fits (`applies_to`), so dropping a waybar segment onto a niri config
+//! is simply refused. A dropped segment lands **pending** (amber), is scanned
+//! for anything risky, and previewed — it only touches disk on **Apply**, which
+//! saves a snapshot first so it's one Restore away from undone.
 //!
-//! Everything here touches only the user's own config files, so no password
-//! is needed; Apply auto-saves a snapshot first, so the change is one
-//! Restore away from undone.
+//! Everything here touches only the user's own config files (no password).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::gdk;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use manifest::history;
-use manifest::manifest::{Question, Snippet};
+use manifest::segment::{self, Segment};
 use manifest::snippets;
 
 use crate::snapshots;
 
-const NODE_W: f64 = 280.0;
-const CANVAS_W: i32 = 2200;
-const CANVAS_H: i32 = 1400;
-
-/// Config files worth scanning for nodes, with a friendly title and the
-/// keyword other files use to "launch" them (for flow wires).
-const KNOWN: &[(&str, &str, &str)] = &[
-    ("Niri", ".config/niri/config.kdl", "niri"),
-    ("Hyprland", ".config/hypr/hyprland.conf", "hyprland"),
-    ("Sway", ".config/sway/config", "sway"),
-    ("i3", ".config/i3/config", "i3"),
-    ("Waybar", ".config/waybar/config.jsonc", "waybar"),
-    ("Waybar", ".config/waybar/config", "waybar"),
-    ("Waybar style", ".config/waybar/style.css", "waybar"),
-];
-
-struct Node {
-    /// Canvas-unique identity: `file:<path>` for file nodes, `<id>@<path>` for
-    /// segments — two files can legitimately carry blocks with the same
-    /// snippet id, and they must stay distinct nodes. The snippet id itself
-    /// lives in `title`.
-    key: String,
+/// A config file discovered on disk that segments can be dropped into.
+struct Target {
     title: String,
     path: PathBuf,
-    is_file: bool,
-    content: RefCell<String>,
-    section: RefCell<String>,
-    x: Cell<f64>,
-    y: Cell<f64>,
-    widget: gtk::Box,
+    kind: &'static str,
+    /// Existing managed segments in the file: (id, inner content).
+    existing: Vec<(String, String)>,
 }
 
-struct Graph {
-    nodes: RefCell<Vec<Rc<Node>>>,
-    /// Wires as (from key, to key).
-    edges: RefCell<Vec<(String, String)>>,
-    /// Snippet blocks removed in this session; Apply strips them from disk.
+/// A segment staged onto a target, not yet written.
+struct Pending {
+    target: PathBuf,
+    seg: Segment,
+    warnings: Vec<String>,
+}
+
+struct Designer {
+    /// Loaded shareable segments the user can drag (drag-key → segment).
+    tray: RefCell<HashMap<String, Segment>>,
+    tray_seq: RefCell<u32>,
+    /// Segments dropped onto a target, awaiting Apply.
+    pending: RefCell<Vec<Pending>>,
+    /// Existing segments the user removed, stripped on Apply: (path, id).
     deleted: RefCell<Vec<(PathBuf, String)>>,
-    /// The last-applied manifest's survey questions, if any (`manifest history`)
-    /// — used to show which question fed a segment's `{{id}}` value, if any.
-    survey: Vec<Question>,
-    fixed: gtk::Fixed,
-    canvas: gtk::DrawingArea,
+    /// Where the tray cards + the tree get (re)built.
+    tray_box: gtk::Box,
+    tree_box: gtk::Box,
+    window: adw::ApplicationWindow,
+    toasts: adw::ToastOverlay,
 }
 
 pub fn build(
@@ -78,549 +62,468 @@ pub fn build(
     stack: &Rc<adw::ViewStack>,
     toasts: &adw::ToastOverlay,
 ) {
-    let canvas = gtk::DrawingArea::new();
-    canvas.set_content_width(CANVAS_W);
-    canvas.set_content_height(CANVAS_H);
-    let fixed = gtk::Fixed::new();
-
-    let graph = Rc::new(Graph {
-        nodes: RefCell::new(Vec::new()),
-        edges: RefCell::new(Vec::new()),
+    let d = Rc::new(Designer {
+        tray: RefCell::new(HashMap::new()),
+        tray_seq: RefCell::new(0),
+        pending: RefCell::new(Vec::new()),
         deleted: RefCell::new(Vec::new()),
-        survey: load_survey(),
-        fixed: fixed.clone(),
-        canvas: canvas.clone(),
+        tray_box: gtk::Box::new(gtk::Orientation::Horizontal, 8),
+        tree_box: gtk::Box::new(gtk::Orientation::Vertical, 12),
+        window: window.clone(),
+        toasts: toasts.clone(),
     });
 
-    // Wires underneath, nodes on top.
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&canvas));
-    overlay.add_overlay(&fixed);
-    let scroller = gtk::ScrolledWindow::builder().child(&overlay).vexpand(true).build();
-
-    {
-        let g = graph.clone();
-        canvas.set_draw_func(move |_, cr, _, _| draw_wires(&g, cr));
-    }
-
-    // Toolbar: Add segment / Apply.
+    // Toolbar: open a segment / apply.
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    bar.set_margin_top(8);
-    bar.set_margin_bottom(8);
+    bar.set_margin_top(10);
+    bar.set_margin_bottom(4);
     bar.set_margin_start(12);
     bar.set_margin_end(12);
-    let hint = gtk::Label::new(Some("Drag nodes around. Edit values right on a segment, or Swap one for a downloaded file."));
+    let hint = gtk::Label::new(Some(
+        "Open a segment you downloaded, then drag it onto a matching part of your setup below.",
+    ));
     hint.add_css_class("dim-label");
     hint.set_hexpand(true);
     hint.set_halign(gtk::Align::Start);
     hint.set_wrap(true);
     bar.append(&hint);
-    let add = gtk::Button::with_label("Add a segment");
+    let open = gtk::Button::with_label("Open a segment…");
     let apply = gtk::Button::with_label("Apply changes");
     apply.add_css_class("suggested-action");
-    bar.append(&add);
+    bar.append(&open);
     bar.append(&apply);
+
+    // The segment tray (loaded segments, draggable) + a drop zone for .json files.
+    let tray_frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    tray_frame.set_margin_start(12);
+    tray_frame.set_margin_end(12);
+    let tray_label = gtk::Label::new(Some("Your segments — drag one onto a match below"));
+    tray_label.add_css_class("dim-label");
+    tray_label.set_halign(gtk::Align::Start);
+    tray_frame.append(&tray_label);
+    d.tray_box.add_css_class("card");
+    d.tray_box.set_margin_bottom(4);
+    let tray_scroll = gtk::ScrolledWindow::builder()
+        .child(&d.tray_box)
+        .min_content_height(96)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    tray_frame.append(&tray_scroll);
+    // Drop a .json file straight onto the tray to load it.
+    {
+        let dd = d.clone();
+        let file_drop = gtk::DropTarget::new(gtk::gio::File::static_type(), gdk::DragAction::COPY);
+        file_drop.connect_drop(move |_, value, _, _| {
+            if let Ok(f) = value.get::<gtk::gio::File>() {
+                if let Some(p) = f.path() {
+                    dd.load_segment_file(&p);
+                }
+                return true;
+            }
+            false
+        });
+        d.tray_box.add_controller(file_drop);
+    }
+
+    let scroller = gtk::ScrolledWindow::builder().child(&d.tree_box).vexpand(true).build();
+    d.tree_box.set_margin_top(6);
+    d.tree_box.set_margin_bottom(12);
+    d.tree_box.set_margin_start(12);
+    d.tree_box.set_margin_end(12);
 
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(&bar);
+    page.append(&tray_frame);
     page.append(&scroller);
 
     {
-        let g = graph.clone();
-        let win = window.clone();
-        let t = toasts.clone();
-        add.connect_clicked(move |_| add_dialog(&win, &g, &t));
+        let dd = d.clone();
+        open.connect_clicked(move |_| dd.open_segment_dialog());
     }
     {
-        let g = graph.clone();
-        let t = toasts.clone();
-        apply.connect_clicked(move |_| apply_all(&g, &t));
+        let dd = d.clone();
+        apply.connect_clicked(move |_| dd.apply());
     }
 
-    scan(&graph, window, toasts);
+    d.rebuild_tray();
+    d.rebuild_tree();
 
     stack
         .add_titled(&page, Some("designer"), "Designer")
-        .set_icon_name(Some("view-app-grid-symbolic"));
+        .set_icon_name(Some("view-list-symbolic"));
 }
 
-// ---------------------------------------------------------------------------
-// Building the graph from what's really on disk
-// ---------------------------------------------------------------------------
-
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
-}
-
-fn scan(graph: &Rc<Graph>, window: &adw::ApplicationWindow, toasts: &adw::ToastOverlay) {
-    let mut col_file_y = 60.0;
-    let mut col_snip_y = 60.0;
-    let mut file_nodes: Vec<(Rc<Node>, String, String)> = Vec::new(); // node, keyword, content
-
-    for (title, rel, keyword) in KNOWN {
-        let path = home().join(rel);
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
-        // One node per existing file (skip a second Waybar path if the first matched).
-        if file_nodes.iter().any(|(n, _, _)| n.title == *title) {
-            continue;
-        }
-        let node = make_node(
-            graph,
-            window,
-            toasts,
-            &format!("file:{}", path.display()),
-            title,
-            &path,
-            true,
-            "",
-            "",
-            720.0,
-            col_file_y,
-        );
-        col_file_y += 150.0;
-
-        // Snippet nodes from the file's managed blocks.
-        for (id, inner) in snippets::extract_blocks(&content) {
-            let snode = make_node(
-                graph,
-                window,
-                toasts,
-                &format!("{id}@{}", path.display()),
-                &id,
-                &path,
-                false,
-                &inner,
-                "",
-                140.0,
-                col_snip_y,
-            );
-            col_snip_y += 230.0;
-            graph.edges.borrow_mut().push((snode.key.clone(), node.key.clone()));
-        }
-        file_nodes.push((node, keyword.to_string(), content));
+impl Designer {
+    fn home() -> PathBuf {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
     }
 
-    // Flow wires between files: desktop config mentioning "waybar" → waybar node.
-    let mut flow = Vec::new();
-    for (a, _, content_a) in &file_nodes {
-        for (b, keyword_b, _) in &file_nodes {
-            if a.key != b.key && !keyword_b.is_empty() && content_a.contains(keyword_b.as_str())
-            {
-                flow.push((a.key.clone(), b.key.clone()));
+    /// Every known config file that exists on disk, with its current segments.
+    fn scan_targets(&self) -> Vec<Target> {
+        let mut out: Vec<Target> = Vec::new();
+        for (title, rel, kind) in segment::KNOWN_TARGETS {
+            let path = Self::home().join(rel);
+            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            if out.iter().any(|t| t.path == path) {
+                continue;
             }
-        }
-    }
-    graph.edges.borrow_mut().extend(flow);
-    graph.canvas.queue_draw();
-}
-
-// ---------------------------------------------------------------------------
-// Nodes
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn make_node(
-    graph: &Rc<Graph>,
-    window: &adw::ApplicationWindow,
-    toasts: &adw::ToastOverlay,
-    key: &str,
-    title: &str,
-    path: &PathBuf,
-    is_file: bool,
-    content: &str,
-    section: &str,
-    x: f64,
-    y: f64,
-) -> Rc<Node> {
-    let boxed = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    boxed.add_css_class("card");
-    boxed.set_width_request(NODE_W as i32);
-
-    let inner = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    inner.set_margin_top(10);
-    inner.set_margin_bottom(10);
-    inner.set_margin_start(10);
-    inner.set_margin_end(10);
-    boxed.append(&inner);
-
-    // Header: title + actions. Also the drag handle.
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let label = gtk::Label::new(Some(title));
-    label.add_css_class("heading");
-    label.set_hexpand(true);
-    label.set_halign(gtk::Align::Start);
-    header.append(&label);
-
-    let node = Rc::new(Node {
-        key: key.to_string(),
-        title: title.to_string(),
-        path: path.clone(),
-        is_file,
-        content: RefCell::new(content.to_string()),
-        section: RefCell::new(section.to_string()),
-        x: Cell::new(x),
-        y: Cell::new(y),
-        widget: boxed.clone(),
-    });
-
-    if !is_file {
-        let swap = gtk::Button::from_icon_name("document-open-symbolic");
-        swap.set_tooltip_text(Some("Swap this segment for one from a file"));
-        swap.add_css_class("flat");
-        header.append(&swap);
-        let del = gtk::Button::from_icon_name("user-trash-symbolic");
-        del.set_tooltip_text(Some("Remove this segment"));
-        del.add_css_class("flat");
-        header.append(&del);
-
-        {
-            let n = node.clone();
-            let g = graph.clone();
-            let win = window.clone();
-            let t = toasts.clone();
-            swap.connect_clicked(move |_| swap_dialog(&win, &g, &n, &t));
-        }
-        {
-            let n = node.clone();
-            let g = graph.clone();
-            del.connect_clicked(move |_| {
-                g.deleted.borrow_mut().push((n.path.clone(), n.title.clone()));
-                g.fixed.remove(&n.widget);
-                g.nodes.borrow_mut().retain(|m| m.key != n.key);
-                g.edges.borrow_mut().retain(|(a, b)| *a != n.key && *b != n.key);
-                g.canvas.queue_draw();
+            out.push(Target {
+                title: title.to_string(),
+                path,
+                kind,
+                existing: snippets::extract_blocks(&content),
             });
         }
+        out
     }
-    inner.append(&header);
 
-    if is_file {
-        let sub = gtk::Label::new(Some(&path.display().to_string()));
-        sub.add_css_class("dim-label");
-        sub.set_halign(gtk::Align::Start);
-        sub.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        sub.set_max_width_chars(30);
-        inner.append(&sub);
-    } else {
-        // Section (where in the file it flows into) + the editable values.
-        let sec = gtk::Entry::builder()
-            .placeholder_text("section (optional, e.g. binds)")
-            .text(section)
+    // ---- segment tray -----------------------------------------------------
+
+    fn open_segment_dialog(self: &Rc<Self>) {
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Segment files (*.json)"));
+        filter.add_pattern("*.json");
+        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title("Open a segment")
+            .filters(&filters)
             .build();
-        {
-            let n = node.clone();
-            sec.connect_changed(move |e| *n.section.borrow_mut() = e.text().to_string());
-        }
-        inner.append(&sec);
-
-        let view = gtk::TextView::new();
-        view.set_monospace(true);
-        view.buffer().set_text(content);
-        {
-            let n = node.clone();
-            view.buffer().connect_changed(move |b| {
-                *n.content.borrow_mut() = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
-            });
-        }
-        let sc = gtk::ScrolledWindow::builder().min_content_height(90).max_content_height(150).child(&view).build();
-        sc.add_css_class("view");
-        inner.append(&sc);
-
-        // The survey questions this segment actually uses (its content contains
-        // their `{{id}}` token), if the last-applied manifest declared any.
-        for q in matching_questions(content, &graph.survey) {
-            let badge = gtk::Label::new(Some(&format!("? {} — {}", q.id, q.label)));
-            badge.add_css_class("dim-label");
-            badge.set_halign(gtk::Align::Start);
-            badge.set_wrap(true);
-            inner.append(&badge);
-        }
-
-        let target = gtk::Label::new(Some(&format!("→ {}", short(path))));
-        target.add_css_class("dim-label");
-        target.set_halign(gtk::Align::Start);
-        inner.append(&target);
-    }
-
-    // Drag anywhere on the header.
-    let drag = gtk::GestureDrag::new();
-    {
-        let n = node.clone();
-        let g = graph.clone();
-        let start: Rc<Cell<(f64, f64)>> = Rc::new(Cell::new((0.0, 0.0)));
-        {
-            let n = n.clone();
-            let start = start.clone();
-            drag.connect_drag_begin(move |_, _, _| start.set((n.x.get(), n.y.get())));
-        }
-        drag.connect_drag_update(move |_, dx, dy| {
-            let (sx, sy) = start.get();
-            let nx = (sx + dx).max(0.0);
-            let ny = (sy + dy).max(0.0);
-            n.x.set(nx);
-            n.y.set(ny);
-            g.fixed.move_(&n.widget, nx, ny);
-            g.canvas.queue_draw();
+        let this = self.clone();
+        dialog.open(Some(&self.window), gtk::gio::Cancellable::NONE, move |res| {
+            if let Ok(file) = res {
+                if let Some(p) = file.path() {
+                    this.load_segment_file(&p);
+                }
+            }
         });
     }
-    header.add_controller(drag);
 
-    graph.fixed.put(&boxed, x, y);
-    graph.nodes.borrow_mut().push(node.clone());
-    node
-}
-
-/// The last-applied manifest's survey questions, if they can be read without
-/// interrupting startup. `history::current()` shells out to `sudo git` (the
-/// history repo is root-only); when sudo would stop to ask for a password —
-/// this app runs unprivileged, often from a terminal — skip rather than hang
-/// the launch on a prompt the user never asked for.
-fn load_survey() -> Vec<Question> {
-    let sudo_free = std::process::Command::new("sudo")
-        .args(["-n", "true"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !sudo_free {
-        return Vec::new();
-    }
-    history::current().map(|m| m.survey).unwrap_or_default()
-}
-
-/// Survey questions whose `{{id}}` token appears in a segment's content, in
-/// the order they're declared in the manifest.
-fn matching_questions<'a>(content: &str, survey: &'a [Question]) -> Vec<&'a Question> {
-    survey
-        .iter()
-        .filter(|q| content.contains(&format!("{{{{{}}}}}", q.id)))
-        .collect()
-}
-
-fn short(path: &PathBuf) -> String {
-    path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
-}
-
-// ---------------------------------------------------------------------------
-// Wires
-// ---------------------------------------------------------------------------
-
-fn draw_wires(graph: &Rc<Graph>, cr: &gtk::cairo::Context) {
-    let nodes = graph.nodes.borrow();
-    let pos = |key: &str| -> Option<(f64, f64, f64, f64)> {
-        nodes.iter().find(|n| n.key == key).map(|n| {
-            let w = n.widget.width().max(NODE_W as i32) as f64;
-            let h = n.widget.height().max(80) as f64;
-            (n.x.get(), n.y.get(), w, h)
-        })
-    };
-    cr.set_line_width(2.0);
-    for (from, to) in graph.edges.borrow().iter() {
-        let (Some((fx, fy, fw, fh)), Some((tx, ty, _, th))) = (pos(from), pos(to)) else { continue };
-        let (x1, y1) = (fx + fw, fy + fh / 2.0);
-        let (x2, y2) = (tx, ty + th / 2.0);
-        // Snippet→file wires in accent purple; file→file "launches" in green.
-        if from.starts_with("file:") {
-            cr.set_source_rgba(0.65, 0.89, 0.63, 0.9);
-        } else {
-            cr.set_source_rgba(0.80, 0.65, 0.97, 0.9);
-        }
-        let bend = ((x2 - x1).abs() / 2.0).max(40.0);
-        cr.move_to(x1, y1);
-        cr.curve_to(x1 + bend, y1, x2 - bend, y2, x2, y2);
-        let _ = cr.stroke();
-        // A small dot at each end.
-        for (cx, cy) in [(x1, y1), (x2, y2)] {
-            cr.arc(cx, cy, 4.0, 0.0, std::f64::consts::TAU);
-            let _ = cr.fill();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Swap / Add / Apply
-// ---------------------------------------------------------------------------
-
-/// Replace a segment's values with a snippet .json downloaded from anywhere
-/// (either a single {"content": …} object or a manifest with a "snippets"
-/// list — the first entry is used).
-fn swap_dialog(window: &adw::ApplicationWindow, graph: &Rc<Graph>, node: &Rc<Node>, toasts: &adw::ToastOverlay) {
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some("Snippet files (*.json)"));
-    filter.add_pattern("*.json");
-    let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
-    filters.append(&filter);
-    let dialog = gtk::FileDialog::builder().title("Choose a snippet file").filters(&filters).build();
-
-    let node = node.clone();
-    let graph = graph.clone();
-    let toasts = toasts.clone();
-    let parent = window.clone();
-    dialog.open(Some(&parent), gtk::gio::Cancellable::NONE, move |res| {
-        let Ok(file) = res else { return };
-        let Some(path) = file.path() else { return };
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            toasts.add_toast(adw::Toast::new("Couldn't read that file."));
-            return;
-        };
-        let v: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
+    fn load_segment_file(self: &Rc<Self>, path: &std::path::Path) {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
             Err(_) => {
-                toasts.add_toast(adw::Toast::new("That isn't a valid snippet file."));
+                self.toast("Couldn't read that file.");
                 return;
             }
         };
-        let snippet = v
-            .get("snippets")
-            .and_then(|s| s.as_array())
-            .and_then(|a| a.first())
-            .cloned()
-            .unwrap_or(v);
-        let Some(content) = snippet.get("content").and_then(|c| c.as_str()) else {
-            toasts.add_toast(adw::Toast::new("No \"content\" found in that file."));
-            return;
-        };
-        *node.content.borrow_mut() = content.to_string();
-        if let Some(sec) = snippet.get("section").and_then(|s| s.as_str()) {
-            *node.section.borrow_mut() = sec.to_string();
+        match Segment::from_json(&raw) {
+            Ok(seg) => {
+                let mut seq = self.tray_seq.borrow_mut();
+                *seq += 1;
+                let key = format!("seg-{}", *seq);
+                self.tray.borrow_mut().insert(key, seg);
+                drop(seq);
+                self.rebuild_tray();
+                self.toast("Segment loaded — drag it onto a matching part of your setup.");
+            }
+            Err(e) => self.toast(&format!("Not a usable segment: {e}")),
         }
-        // Refresh the node's text view in place: simplest is rebuild-by-swap
-        // of the buffer through the widget tree — the TextView is the only
-        // ScrolledWindow child inside the node.
-        refresh_text(&node);
-        graph.canvas.queue_draw();
-        toasts.add_toast(adw::Toast::new(&format!("Swapped in {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())));
-    });
-}
+    }
 
-/// Push the node's model content back into its TextView after a swap.
-fn refresh_text(node: &Rc<Node>) {
-    let mut child = node.widget.first_child();
-    while let Some(c) = child {
-        if let Some(found) = find_textview(&c) {
-            found.buffer().set_text(&node.content.borrow());
-            return;
+    fn rebuild_tray(self: &Rc<Self>) {
+        while let Some(c) = self.tray_box.first_child() {
+            self.tray_box.remove(&c);
         }
-        child = c.next_sibling();
-    }
-}
-
-fn find_textview(root: &gtk::Widget) -> Option<gtk::TextView> {
-    if let Ok(tv) = root.clone().downcast::<gtk::TextView>() {
-        return Some(tv);
-    }
-    let mut child = root.first_child();
-    while let Some(c) = child {
-        if let Some(f) = find_textview(&c) {
-            return Some(f);
-        }
-        child = c.next_sibling();
-    }
-    None
-}
-
-/// "Add a segment": name it, point it at a config file, paste the content.
-fn add_dialog(window: &adw::ApplicationWindow, graph: &Rc<Graph>, toasts: &adw::ToastOverlay) {
-    let content_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let id = gtk::Entry::builder().placeholder_text("Name (e.g. waybar-launch)").build();
-    let path = gtk::Entry::builder().placeholder_text("File (e.g. ~/.config/niri/config.kdl)").build();
-    let section = gtk::Entry::builder().placeholder_text("Section (optional, e.g. binds)").build();
-    let view = gtk::TextView::new();
-    view.set_monospace(true);
-    let sc = gtk::ScrolledWindow::builder().min_content_height(110).child(&view).build();
-    sc.add_css_class("view");
-    for w in [&id, &path, &section] {
-        content_box.append(w);
-    }
-    content_box.append(&sc);
-
-    let dialog = adw::MessageDialog::new(Some(window), Some("Add a segment"), None);
-    dialog.set_extra_child(Some(&content_box));
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("add", "Add");
-    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
-
-    let graph = graph.clone();
-    let window = window.clone();
-    let toasts = toasts.clone();
-    dialog.connect_response(None, move |_, resp| {
-        if resp != "add" {
+        let tray = self.tray.borrow();
+        if tray.is_empty() {
+            let empty = gtk::Label::new(Some(
+                "No segments yet. Click “Open a segment…”, or drop a .json here.",
+            ));
+            empty.add_css_class("dim-label");
+            empty.set_margin_top(16);
+            empty.set_margin_bottom(16);
+            empty.set_margin_start(16);
+            empty.set_hexpand(true);
+            empty.set_halign(gtk::Align::Center);
+            self.tray_box.append(&empty);
             return;
         }
-        let name = id.text().trim().to_string();
-        let raw_path = path.text().trim().to_string();
-        if name.is_empty() || raw_path.is_empty() {
-            toasts.add_toast(adw::Toast::new("A segment needs a name and a file."));
-            return;
+        // stable order
+        let mut items: Vec<(&String, &Segment)> = tray.iter().collect();
+        items.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, seg) in items {
+            self.tray_box.append(&self.segment_card(key, seg));
         }
-        let full = if let Some(rest) = raw_path.strip_prefix("~/") {
-            home().join(rest)
+    }
+
+    /// A draggable card for a loaded segment.
+    fn segment_card(self: &Rc<Self>, key: &str, seg: &Segment) -> gtk::Widget {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        card.add_css_class("card");
+        card.set_margin_top(8);
+        card.set_margin_bottom(8);
+        card.set_margin_start(8);
+        card.set_width_request(220);
+        let inner = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        inner.set_margin_top(8);
+        inner.set_margin_bottom(8);
+        inner.set_margin_start(10);
+        inner.set_margin_end(10);
+        card.append(&inner);
+
+        let title = gtk::Label::new(Some(&seg.label));
+        title.add_css_class("heading");
+        title.set_halign(gtk::Align::Start);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        inner.append(&title);
+
+        let fits = if seg.applies_to.trim().is_empty() {
+            "fits: anything (untagged — review)".to_string()
         } else {
-            PathBuf::from(&raw_path)
+            format!("fits: {}", seg.applies_to)
         };
-        let buffer = view.buffer();
-        let content = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
-        let key = format!("{name}@{}", full.display());
-        if graph.nodes.borrow().iter().any(|n| n.key == key) {
-            toasts.add_toast(adw::Toast::new("That segment already exists for this file."));
+        let sub = gtk::Label::new(Some(&fits));
+        sub.add_css_class("dim-label");
+        sub.set_halign(gtk::Align::Start);
+        inner.append(&sub);
+
+        if !seg.description.trim().is_empty() {
+            let desc = gtk::Label::new(Some(&seg.description));
+            desc.add_css_class("dim-label");
+            desc.set_halign(gtk::Align::Start);
+            desc.set_wrap(true);
+            desc.set_max_width_chars(28);
+            inner.append(&desc);
+        }
+        let drag_hint = gtk::Label::new(Some("↧ drag onto your setup"));
+        drag_hint.add_css_class("dim-label");
+        drag_hint.set_halign(gtk::Align::Start);
+        inner.append(&drag_hint);
+
+        // Drag source: carry the tray key.
+        let src = gtk::DragSource::new();
+        src.set_actions(gdk::DragAction::COPY);
+        let k = key.to_string();
+        src.connect_prepare(move |_, _, _| Some(gdk::ContentProvider::for_value(&k.to_value())));
+        card.add_controller(src);
+        card.upcast()
+    }
+
+    // ---- the tree ---------------------------------------------------------
+
+    fn rebuild_tree(self: &Rc<Self>) {
+        while let Some(c) = self.tree_box.first_child() {
+            self.tree_box.remove(&c);
+        }
+        let targets = self.scan_targets();
+        if targets.is_empty() {
+            let empty = gtk::Label::new(Some(
+                "No desktop config found yet. Once you have a window manager or bar set up, \
+                 its parts will appear here to drop segments onto.",
+            ));
+            empty.add_css_class("dim-label");
+            empty.set_wrap(true);
+            empty.set_margin_top(24);
+            self.tree_box.append(&empty);
             return;
         }
-        let node = make_node(
-            &graph, &window, &toasts, &key, &name, &full, false, &content,
-            section.text().trim(), 140.0, 60.0,
-        );
-        // Wire to the file node if it's on the canvas.
-        let file_key = format!("file:{}", full.display());
-        if graph.nodes.borrow().iter().any(|n| n.key == file_key) {
-            graph.edges.borrow_mut().push((node.key.clone(), file_key));
+        let group = adw::PreferencesGroup::builder()
+            .title("Your setup")
+            .description("Drag a segment from above onto the matching part.")
+            .build();
+        for t in &targets {
+            group.add(&self.target_row(t));
         }
-        graph.canvas.queue_draw();
-    });
-    dialog.present();
+        self.tree_box.append(&group);
+    }
+
+    /// One expandable config-file row: a drop target, with its existing +
+    /// pending segments nested inside.
+    fn target_row(self: &Rc<Self>, t: &Target) -> adw::ExpanderRow {
+        let n_pending = self.pending.borrow().iter().filter(|x| x.target == t.path).count();
+        let subtitle = format!(
+            "{}  ·  {} segment(s){}",
+            t.path.display(),
+            t.existing.len(),
+            if n_pending > 0 { format!(", {n_pending} pending") } else { String::new() },
+        );
+        let row = adw::ExpanderRow::builder()
+            .title(&format!("{}  ({})", t.title, t.kind))
+            .subtitle(&subtitle)
+            .build();
+        if n_pending > 0 {
+            row.set_expanded(true);
+        }
+
+        // Drop target: accept a tray key, check compatibility, stage it.
+        let this = self.clone();
+        let kind = t.kind;
+        let path = t.path.clone();
+        let drop = gtk::DropTarget::new(String::static_type(), gdk::DragAction::COPY);
+        drop.connect_drop(move |_, value, _, _| {
+            if let Ok(key) = value.get::<String>() {
+                this.handle_drop(&key, &path, kind);
+                return true;
+            }
+            false
+        });
+        row.add_controller(drop);
+
+        // Existing segments.
+        for (id, inner) in &t.existing {
+            row.add_row(&self.existing_seg_row(&t.path, id, inner));
+        }
+        // Pending segments dropped onto this target.
+        let pending = self.pending.borrow();
+        for (idx, p) in pending.iter().enumerate() {
+            if p.target == t.path {
+                row.add_row(&self.pending_seg_row(idx, p));
+            }
+        }
+        row
+    }
+
+    fn existing_seg_row(self: &Rc<Self>, path: &PathBuf, id: &str, inner: &str) -> adw::ActionRow {
+        let row = adw::ActionRow::builder()
+            .title(id)
+            .subtitle(&one_line(inner, 60))
+            .build();
+        let del = gtk::Button::from_icon_name("user-trash-symbolic");
+        del.set_tooltip_text(Some("Remove this segment"));
+        del.add_css_class("flat");
+        del.set_valign(gtk::Align::Center);
+        let this = self.clone();
+        let p = path.clone();
+        let i = id.to_string();
+        del.connect_clicked(move |_| {
+            this.deleted.borrow_mut().push((p.clone(), i.clone()));
+            this.rebuild_tree();
+            this.toast("Marked for removal on Apply.");
+        });
+        row.add_suffix(&del);
+        row
+    }
+
+    fn pending_seg_row(self: &Rc<Self>, idx: usize, p: &Pending) -> adw::ActionRow {
+        let title = if p.warnings.is_empty() {
+            format!("＋ {}  (pending)", p.seg.label)
+        } else {
+            format!("⚠ {}  (pending — {} warning(s))", p.seg.label, p.warnings.len())
+        };
+        let sub = if p.warnings.is_empty() {
+            one_line(&p.seg.content, 60)
+        } else {
+            p.warnings.join("  •  ")
+        };
+        let row = adw::ActionRow::builder().title(&title).subtitle(&sub).build();
+        row.add_css_class(if p.warnings.is_empty() { "success" } else { "warning" });
+
+        let remove = gtk::Button::from_icon_name("edit-undo-symbolic");
+        remove.set_tooltip_text(Some("Don't add this segment"));
+        remove.add_css_class("flat");
+        remove.set_valign(gtk::Align::Center);
+        let this = self.clone();
+        remove.connect_clicked(move |_| {
+            if idx < this.pending.borrow().len() {
+                this.pending.borrow_mut().remove(idx);
+            }
+            this.rebuild_tree();
+        });
+        row.add_suffix(&remove);
+        row
+    }
+
+    /// A segment was dropped onto a target: check it fits, scan it, stage it.
+    fn handle_drop(self: &Rc<Self>, key: &str, target: &PathBuf, kind: &str) {
+        let seg = match self.tray.borrow().get(key).cloned() {
+            Some(s) => s,
+            None => return,
+        };
+        if !segment::segment_fits(&seg.applies_to, kind) {
+            let want = if seg.applies_to.trim().is_empty() { "anything" } else { &seg.applies_to };
+            self.toast(&format!(
+                "“{}” is a {want} segment — it doesn't fit {kind}. Drop it on a matching part.",
+                seg.label
+            ));
+            return;
+        }
+        let warnings = scan_segment(&seg.content, &seg);
+        self.pending.borrow_mut().push(Pending { target: target.clone(), seg, warnings });
+        self.rebuild_tree();
+        self.toast("Segment staged — review it, then Apply.");
+    }
+
+    // ---- apply ------------------------------------------------------------
+
+    fn apply(self: &Rc<Self>) {
+        let _ = snapshots::save("Before Designer changes");
+        let mut touched = 0usize;
+
+        // Removals first.
+        for (path, id) in self.deleted.borrow_mut().drain(..) {
+            if let Ok(current) = std::fs::read_to_string(&path) {
+                let out = snippets::remove_block(&current, &id);
+                if out != current && std::fs::write(&path, out).is_ok() {
+                    touched += 1;
+                }
+            }
+        }
+        // Then staged segments.
+        for p in self.pending.borrow_mut().drain(..) {
+            let current = std::fs::read_to_string(&p.target).unwrap_or_default();
+            let sn = p.seg.to_snippet(&p.target.display().to_string());
+            let out = snippets::upsert(&current, &sn);
+            if out != current {
+                if let Some(dir) = p.target.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if std::fs::write(&p.target, out).is_ok() {
+                    touched += 1;
+                }
+            }
+        }
+
+        self.rebuild_tree();
+        let msg = if touched == 0 {
+            "Nothing to change — everything already matches.".to_string()
+        } else {
+            format!("Applied — {touched} file update(s). A snapshot was saved first, so you can restore.")
+        };
+        self.toast(&msg);
+    }
+
+    fn toast(&self, msg: &str) {
+        self.toasts.add_toast(adw::Toast::new(msg));
+    }
 }
 
-/// Write every segment back to disk through the marker-block engine, after
-/// saving a snapshot so it's one Restore away from undone. User-owned files
-/// only — no password needed.
-fn apply_all(graph: &Rc<Graph>, toasts: &adw::ToastOverlay) {
-    let _ = snapshots::save("Before Designer changes");
-
-    let mut touched = 0usize;
-    // Removals first.
-    for (path, id) in graph.deleted.borrow_mut().drain(..) {
-        if let Ok(current) = std::fs::read_to_string(&path) {
-            let out = snippets::remove_block(&current, &id);
-            if out != current && std::fs::write(&path, out).is_ok() {
-                touched += 1;
-            }
+/// Lightweight safety scan of a dropped segment's content — enough to warn a
+/// non-technical user before they Apply. The full scanner is `marketplace/`.
+fn scan_segment(content: &str, seg: &Segment) -> Vec<String> {
+    let mut w = Vec::new();
+    let c = content.to_ascii_lowercase();
+    let piped_shell = (c.contains("curl") || c.contains("wget"))
+        && (c.contains("| sh") || c.contains("|sh") || c.contains("| bash") || c.contains("|bash"));
+    if piped_shell {
+        w.push("runs a downloaded script (curl | sh) — high risk".into());
+    }
+    if c.contains("base64 -d") || c.contains("base64 --decode") {
+        w.push("decodes and runs base64 — hidden payload?".into());
+    }
+    if c.contains("rm -rf /") {
+        w.push("contains a destructive delete (rm -rf /)".into());
+    }
+    if content.contains("http://") {
+        w.push("uses an insecure http:// URL".into());
+    }
+    for host in ["github.com", "gist.", "pastebin", "raw.githubusercontent"] {
+        if c.contains(host) {
+            w.push(format!("links to {host} — review the source"));
+            break;
         }
     }
-    // Then upserts.
-    for node in graph.nodes.borrow().iter().filter(|n| !n.is_file) {
-        let current = std::fs::read_to_string(&node.path).unwrap_or_default();
-        let section = node.section.borrow();
-        let s = Snippet {
-            id: node.title.clone(),
-            path: node.path.display().to_string(),
-            section: (!section.trim().is_empty()).then(|| section.trim().to_string()),
-            content: node.content.borrow().clone(),
-        };
-        let out = snippets::upsert(&current, &s);
-        if out != current {
-            if let Some(dir) = node.path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            if std::fs::write(&node.path, out).is_ok() {
-                touched += 1;
-            }
-        }
+    if seg.applies_to.trim().is_empty() {
+        w.push("untagged segment (fits anything) — make sure it belongs here".into());
     }
+    w
+}
 
-    let msg = if touched == 0 {
-        "Nothing to change — everything already matches.".to_string()
+fn one_line(s: &str, n: usize) -> String {
+    let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= n {
+        flat
     } else {
-        format!("Applied — {touched} file update(s). A snapshot was saved first, so you can restore if needed.")
-    };
-    toasts.add_toast(adw::Toast::new(&msg));
+        format!("{}…", flat.chars().take(n).collect::<String>())
+    }
 }
