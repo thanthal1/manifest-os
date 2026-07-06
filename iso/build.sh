@@ -44,6 +44,19 @@ else
     echo "         the ISO will boot straight to the text installer." >&2
 fi
 
+# Bake the System Snapshots app (also --features gui). The installer's
+# stage_desktop_app looks for `manifest-center` NEXT TO the running binary on
+# the live ISO and silently skips the app when absent — so forgetting this
+# means every installed desktop quietly lacks its settings/snapshots GUI.
+center="$repo/target/release/manifest-center"
+[[ -x "$center" ]] || center="$repo/dist/manifest-center"
+if [[ -x "$center" ]]; then
+    install -Dm755 "$center" "$profile/airootfs/usr/local/bin/manifest-center"
+    echo "baked in: $center"
+else
+    echo "WARNING: manifest-center not found — installed systems won't get the System Snapshots app." >&2
+fi
+
 # Ship the example manifests so the TUI can list and install them by name.
 # Refuse to bake an empty/invalid example — a 0-byte bundle installs onto a
 # wiped disk and only fails deep in the chroot ("reading survey block: EOF").

@@ -1655,6 +1655,13 @@ fn stage_desktop_app(plan: &InstallPlan, ctx: &Ctx) {
     if ctx.sudo("install", &["-Dm755", &src, "/mnt/usr/local/bin/manifest-center"]).is_err() {
         return;
     }
+    // The app is GTK4/libadwaita. Full DEs ship those anyway, but a bare
+    // WM target (sway, niri, hyprland without GNOME apps) may not — without
+    // this the launcher shows up and the app just fails to start. Best-effort.
+    let _ = ctx.shell(
+        "arch-chroot /mnt pacman -S --needed --noconfirm gtk4 libadwaita",
+        true,
+    );
     // The "{ }" app icon (matches the app-id so the window + launcher share it).
     let _ = ctx.write_root(
         "/mnt/usr/share/icons/hicolor/scalable/apps/os.manifest.Snapshots.svg",
