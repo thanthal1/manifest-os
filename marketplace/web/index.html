@@ -63,6 +63,17 @@
   .muted { color:var(--dim); }
   code { background:var(--panel2); padding:1px 5px; border-radius:5px; font-size:12px; }
   .foot { margin-top:34px; padding-top:16px; border-top:1px solid var(--line); color:var(--dim); font-size:12.5px; }
+  /* live backend bits */
+  #cache { margin-top:10px; font-size:12.5px; color:var(--dim); }
+  #cache b { color:var(--fg); }
+  #cache button { font-size:11.5px; padding:2px 8px; margin-left:8px; }
+  .verify { margin:10px 0; padding:8px 12px; border-radius:8px; font-size:13px; background:var(--panel2); }
+  .verify.ok { border-left:3px solid var(--ok); }
+  .verify.bad { border-left:3px solid var(--crit); }
+  .bootbox { background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:8px; }
+  #bootlog { height:300px; overflow:auto; background:#0c0e13; border-radius:8px; padding:10px;
+             font-size:12px; line-height:1.45; white-space:pre-wrap; margin:8px 0; }
+  #bootstep { font-size:13.5px; }
 </style>
 </head>
 <body>
@@ -71,6 +82,7 @@
   <p>Paste or drop a <code>manifest.json</code> to statically scan it for the ways a shared
      setup can do harm — before it ever runs on someone's machine. This is the first gate;
      a full install + boot in a throwaway VM is the second (see the repo's <code>DESIGN.md</code>).</p>
+  <div id="cache"></div>
 </header>
 <main>
   <div class="row">
@@ -84,10 +96,14 @@
   </div>
   <div class="controls">
     <button id="scan">Scan submission</button>
+    <button id="bootbtn" hidden>Boot test in a VM</button>
+    <label id="keepwrap" class="muted" hidden style="font-size:12.5px;align-self:center;user-select:none;cursor:pointer">
+      <input type="checkbox" id="keep" style="vertical-align:middle;margin-right:4px"> keep the VM so I can open it afterwards</label>
     <button class="ghost" id="sample">Load a risky sample</button>
     <button class="ghost" id="clear">Clear</button>
   </div>
   <div id="out"></div>
+  <div id="boot"></div>
   <div class="foot">
     Static analysis only — it flags patterns, it doesn't run anything. A clean scan is
     necessary but <b>not sufficient</b> for marketplace approval: the dynamic boot-test stage
@@ -223,14 +239,16 @@ function verdict(F){
   return ["LOOKS CLEAN","var(--ok)","No risky patterns — still needs a boot test."];
 }
 
-function render(res, name){
+function render(res, name, verify, live){
   const out=document.getElementById("out");
   const {F} = res;
   const [label,color,note]=verdict(F);
   const counts={}; F.forEach(f=>counts[f.sev]=(counts[f.sev]||0)+1);
   const order=[...F].sort((a,b)=>SEV.indexOf(b.sev)-SEV.indexOf(a.sev));
   let h=`<div class="verdict"><span class="badge" style="background:${color};color:#12141b">${label}</span>
-    <div><b>${escapeHtml(name)}</b><br><small>${note}</small></div></div>`;
+    <div><b>${escapeHtml(name)}</b>${live?` <span class="tag ok">server scan + package check</span>`:""}<br><small>${note}</small></div></div>`;
+  if(verify && verify.ran)
+    h+=`<div class="verify ${verify.ok?"ok":"bad"}">${verify.ok?"✓":"✗"} <b>manifest verify</b> — ${escapeHtml(verify.output)}</div>`;
   h+=`<div class="counts">`+SEV.slice().reverse().filter(s=>counts[s]).map(s=>`<span class="pill sev-${s}">${counts[s]} ${s}</span>`).join("")+`</div>`;
   h+=`<h2>Findings</h2>`;
   h+= order.length? order.map(f=>`
@@ -254,12 +272,86 @@ function render(res, name){
 function escapeHtml(s){ return (""+s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function escapeAttr(s){ return escapeHtml(s).replace(/'/g,"&#39;"); }
 
+// ---- live backend (server.py) ----------------------------------------------
+// When server.py is running this page upgrades itself: the scan runs
+// server-side (scan.py --check-packages + `manifest verify`), the package
+// cache is shown, and a scanned submission can be installed in a throwaway VM.
+let BACKEND=false, JOB=null, POLL=null, lastText="";
+const cacheEl=document.getElementById("cache"), bootBtn=document.getElementById("bootbtn"),
+      bootPanel=document.getElementById("boot");
+
+async function refreshCache(){
+  try{
+    const c=await (await fetch("/api/cache/status",{cache:"no-store"})).json();
+    BACKEND=true;
+    cacheEl.innerHTML=`package cache: <b>${c.running?"running":"down"}</b> — `+
+      `${c.cached_packages} packages, ${escapeHtml(c.cache_size)} `+
+      `<span class="muted">(first boot test downloads once; re-tests are served from disk)</span>`;
+  }catch(e){ BACKEND=false; cacheEl.innerHTML=""; }
+}
+refreshCache();
+
+function showBoot(F){
+  const keepwrap=document.getElementById("keepwrap");
+  if(!BACKEND){ bootBtn.hidden=true; keepwrap.hidden=true; return; }
+  bootBtn.hidden=false; keepwrap.hidden=false;
+  const blocked=F.some(f=>f.sev==="CRITICAL");
+  bootBtn.disabled=blocked;
+  bootBtn.title=blocked?"BLOCK verdict — fix the critical findings first":"";
+}
+
+async function startBoot(){
+  bootBtn.disabled=true;
+  bootPanel.innerHTML=`<h2>VM boot test</h2><div class="bootbox">
+    <div id="bootstep">⏳ starting…</div><pre id="bootlog"></pre>
+    <button class="ghost" id="bootstop">Stop &amp; tear down</button></div>`;
+  document.getElementById("bootstop").onclick=async()=>{
+    if(JOB) await fetch("/api/boot-test/stop",{method:"POST",body:JSON.stringify({job:JOB})});
+  };
+  const keep=document.getElementById("keep").checked;
+  const d=await (await fetch("/api/boot-test"+(keep?"?keep=1":""),{method:"POST",body:lastText})).json();
+  if(d.error && !d.job){ document.getElementById("bootstep").textContent="✗ "+d.error; bootBtn.disabled=false; return; }
+  JOB=d.job;
+  POLL=setInterval(async()=>{
+    let d; try{ d=await (await fetch("/api/boot-test?job="+JOB)).json(); }catch(e){ return; }
+    const lg=document.getElementById("bootlog");
+    lg.textContent=(d.log||[]).join("\n"); lg.scrollTop=lg.scrollHeight;
+    const st=document.getElementById("bootstep");
+    if(d.status==="running"){ st.textContent="⏳ "+(d.step||"working…"); return; }
+    clearInterval(POLL); bootBtn.disabled=false; refreshCache();
+    if(d.status==="passed")
+      st.innerHTML = d.kept_vm
+        ? `✓ PASSED — kept as <code>${escapeHtml(d.kept_vm)}</code>. Open VirtualBox, start it, log in <b>niri / niri</b>.`
+        : "✓ PASSED — installed cleanly in a throwaway VM";
+    else
+      st.innerHTML = d.kept_vm
+        ? `✗ FAILED (exit ${d.exit ?? "?"}) — kept as <code>${escapeHtml(d.kept_vm)}</code> in the live env for inspection.`
+        : `✗ FAILED (exit ${d.exit ?? "?"}) — see log`;
+  },3000);
+}
+bootBtn.onclick=startBoot;
+
 // ---- wiring ---------------------------------------------------------------
 const input=document.getElementById("input"), out=document.getElementById("out");
-function run(){
+async function run(){
   let m; try{ m=JSON.parse(input.value); }
-  catch(e){ out.innerHTML=`<div class="verdict"><span class="badge" style="background:var(--crit);color:#12141b">INVALID</span><div>Not valid JSON<br><small>${escapeHtml(e.message)}</small></div></div>`; return; }
-  render(scan(m), (m.meta&&m.meta.name)||"(unnamed submission)");
+  catch(e){ out.innerHTML=`<div class="verdict"><span class="badge" style="background:var(--crit);color:#12141b">INVALID</span><div>Not valid JSON<br><small>${escapeHtml(e.message)}</small></div></div>`; bootBtn.hidden=true; return; }
+  lastText=input.value;
+  const name=(m.meta&&m.meta.name)||"(unnamed submission)";
+  const local=scan(m);              // client rules also feed the URL panel
+  if(BACKEND){
+    try{
+      const d=await (await fetch("/api/scan",{method:"POST",body:input.value})).json();
+      if(d.findings){
+        const F=d.findings.map(f=>({sev:f.severity,title:f.title,detail:f.detail,where:f.where}));
+        render({F,res:local.res}, d.name||name, d.verify, true);
+        showBoot(F);
+        return;
+      }
+    }catch(e){ /* backend hiccup — fall back to the client-side mirror */ }
+  }
+  render(local, name, null, false);
+  showBoot(local.F);
 }
 document.getElementById("scan").onclick=run;
 document.getElementById("clear").onclick=()=>{ input.value=""; out.innerHTML=""; };

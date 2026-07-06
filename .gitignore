@@ -3,6 +3,15 @@
 # scripts/audit-vms.sh output: throwaway VM disks + per-run logs/screenshots,
 # fully reproducible — never commit (the .vdi files are multi-GB each).
 /audit-results/
+
+# marketplace/cache-proxy.py: the package cache (multi-GB) and its log
+/marketplace/pkg-cache/
+/marketplace/cache-proxy.log
+# boot-test / server.py throwaway + kept VM disks (multi-GB, reproducible)
+/marketplace/*.vdi
+# server.py per-job temp submission files (written + reaped at runtime)
+/marketplace/.review-*.json
+__pycache__/
 **/*.rs.bk
 *.pdb
 Cargo.lock.bak

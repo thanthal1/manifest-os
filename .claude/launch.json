@@ -4,8 +4,8 @@
     {
       "name": "marketplace-web",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "marketplace/web"],
-      "port": 8765
+      "runtimeArgs": ["marketplace/server.py"],
+      "port": 8770
     }
   ]
 }

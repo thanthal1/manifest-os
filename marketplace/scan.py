@@ -311,28 +311,73 @@ def scan_repos_boot(m, rep):
                     "Changing init / security / module params can alter what boots.", "boot.cmdline")
 
 
+def _pkgs_via_pacman(pkgs):
+    """On an Arch box: classify each name via pacman -Si / paru -Si."""
+    import subprocess
+    out = {}
+    for p in pkgs:
+        if subprocess.run(["pacman", "-Si", p], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0:
+            out[p] = "repo"
+        elif subprocess.run(["paru", "-Si", p], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL).returncode == 0:
+            out[p] = "aur"
+        else:
+            out[p] = "missing"
+    return out
+
+
+def _pkgs_via_web(pkgs):
+    """No pacman on this host (the scan also runs on the Windows dev box):
+    ask the Arch web APIs instead — archlinux.org per name for the official
+    repos, then one batched AUR RPC call for whatever's left."""
+    import urllib.parse
+    import urllib.request
+
+    def get(url):
+        req = urllib.request.Request(url, headers={"User-Agent": "manifestos-scan/1"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+
+    out = {}
+    for p in pkgs:
+        hit = get("https://archlinux.org/packages/search/json/?name=" + urllib.parse.quote(p))
+        out[p] = "repo" if hit.get("results") else "missing"
+    rest = [p for p, v in out.items() if v == "missing"]
+    if rest:
+        q = "&".join("arg[]=" + urllib.parse.quote(p) for p in rest)
+        found = {r["Name"] for r in get("https://aur.archlinux.org/rpc/v5/info?" + q).get("results", [])}
+        for p in rest:
+            if p in found:
+                out[p] = "aur"
+    return out
+
+
 def scan_packages(m, rep, check=False):
     pkgs = m.get("packages", []) or []
-    if not check:
-        if pkgs:
-            rep.add("INFO", "packages", f"{len(pkgs)} package(s) declared",
-                    "Review the list; AUR packages run arbitrary build scripts. "
-                    "Re-run with --check-packages on an Arch box to flag AUR/unknown names.",
-                    ", ".join(pkgs[:12]) + (" …" if len(pkgs) > 12 else ""))
+    if not pkgs:
         return
-    import subprocess
-    for p in pkgs:
-        repo_hit = subprocess.run(["pacman", "-Si", p], stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL).returncode == 0
-        if repo_hit:
-            continue
-        aur = subprocess.run(["paru", "-Si", p], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL).returncode == 0
-        if aur:
+    status = None
+    if check:
+        import shutil
+        try:
+            status = _pkgs_via_pacman(pkgs) if shutil.which("pacman") else _pkgs_via_web(pkgs)
+        except OSError as e:
+            rep.add("INFO", "packages", "package check skipped",
+                    "No pacman on this host and the Arch web APIs were unreachable, "
+                    "so package names could not be verified this run.", shorten(e))
+    if status is None:
+        rep.add("INFO", "packages", f"{len(pkgs)} package(s) declared",
+                "Review the list; AUR packages run arbitrary build scripts. "
+                "Re-run with --check-packages to flag AUR/unknown names.",
+                ", ".join(pkgs[:12]) + (" …" if len(pkgs) > 12 else ""))
+        return
+    for p, st in status.items():
+        if st == "aur":
             rep.add("MEDIUM", "AUR package", f"`{p}` is an AUR package",
                     "AUR packages build from an author-supplied PKGBUILD that runs "
                     "arbitrary code at build time. Review it.", "packages")
-        else:
+        elif st == "missing":
             rep.add("HIGH", "unknown package", f"`{p}` not found in repos or AUR",
                     "A package name that resolves to nothing will break the install — "
                     "or, worse, could be a typosquat target.", "packages")

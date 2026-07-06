@@ -9,22 +9,24 @@ install a submission **using the package cache**, and keeps that cache fresh.
 
 Environment (all optional — sensible defaults):
     VBOX        path to VBoxManage           (default: the standard Windows path)
-    CACHE_VM    VM that runs the pacoloco cache        (default: manifest-build)
-    NATNET      VBox NAT Network name shared by cache + test VMs (default: manifestnet)
     ISO         install ISO for boot tests   (default: newest dist/manifestos-*.iso)
-    PACOLOCO_PORT                             (default: 9129)
+    CACHE_PORT  port of the host package-cache proxy    (default: 9129)
 
-The heavy lifting (VBox lifecycle, guestcontrol) mirrors scripts/audit-vms.sh
-and marketplace/boot-test.sh; this keeps it in one process so the UI can stream
-progress and drive the cache. Endpoints:
+The package cache is marketplace/cache-proxy.py running on THIS host —
+auto-started on demand. Test VMs stay on plain NAT and reach it at 10.0.2.2
+(needs `--nat-localhostreachable1 on`, set at VM creation; VBox ≥6.1.28
+refuses guest→host-loopback traffic without it). The VM-side plumbing mirrors
+marketplace/boot-test.sh, which is verified end-to-end. Endpoints:
 
     POST /api/scan            body = manifest JSON  -> scanner findings (JSON)
-    GET  /api/cache/status    -> pacoloco up? cache size, package count, cache host
-    POST /api/cache/refresh   -> refresh repo DBs so version resolution is current
+    GET  /api/cache/status    -> proxy up? cache size, package count, cache URL
+    POST /api/cache/refresh   -> no-op for compat (proxy refetches DBs live)
     POST /api/boot-test       body = manifest JSON  -> {job} (starts a VM install)
     GET  /api/boot-test?job=  -> {status, exit, log}   (poll for progress)
     POST /api/boot-test/stop  body = {job}            -> cancel + tear the VM down
 """
+import base64
+import hashlib
 import http.server
 import json
 import os
@@ -32,18 +34,19 @@ import re
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import time
+import urllib.request
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 WEB = os.path.join(HERE, "web")
 
 VBOX = os.environ.get("VBOX", r"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe")
-CACHE_VM = os.environ.get("CACHE_VM", "manifest-build")
-NATNET = os.environ.get("NATNET", "manifestnet")
-PORT_CACHE = int(os.environ.get("PACOLOCO_PORT", "9129"))
+PORT_CACHE = int(os.environ.get("CACHE_PORT", "9129"))
 PY = shutil.which("python") or "python"
 
 
@@ -76,48 +79,54 @@ def guest_up(vm):
 
 
 # ---------------------------------------------------------------------------
-# Package cache (pacoloco on CACHE_VM). pacoloco is installed in the VM's
-# disk-backed Arch (/mnt); we run it from the live env pointing at that binary +
-# config so it survives, with the cache on disk at /mnt/var/cache/pacoloco.
+# Package cache: cache-proxy.py on THIS host (see that file for the design).
+# VMs reach it at http://10.0.2.2:PORT_CACHE over plain NAT.
 # ---------------------------------------------------------------------------
-CACHE_CFG = "/mnt/etc/pacoloco.yaml"
-CACHE_DIR = "/mnt/var/cache/pacoloco"
+CACHE_DIR = os.path.join(HERE, "pkg-cache")
+CACHE_URL_GUEST = f"http://10.0.2.2:{PORT_CACHE}/repo/archlinux"
+
+
+def _cache_ping():
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT_CACHE}/ping", timeout=3) as r:
+            return r.status == 200
+    except OSError:
+        return False
 
 
 def cache_ensure_running():
-    if not guest_up(CACHE_VM):
-        return False, "cache VM is not reachable (is it running?)"
-    r = guest(CACHE_VM, f"ss -tlnp 2>/dev/null | grep -q ':{PORT_CACHE}' && echo UP || echo DOWN")
-    if "UP" in r.stdout:
+    if _cache_ping():
         return True, "already running"
-    # start pacoloco from the live env (setsid so it survives this call)
-    guest(CACHE_VM, f"setsid /mnt/usr/bin/pacoloco -config {CACHE_CFG} "
-                    f">/tmp/pacoloco.log 2>&1 </dev/null & disown; sleep 2; true")
-    r = guest(CACHE_VM, f"ss -tlnp 2>/dev/null | grep -q ':{PORT_CACHE}' && echo UP || echo DOWN")
-    return ("UP" in r.stdout), ("started" if "UP" in r.stdout else "failed to start")
-
-
-def cache_host_ip():
-    # the CACHE_VM's address on the shared NAT network (10.0.2.0/24)
-    r = guest(CACHE_VM, "ip -4 -o addr show | awk '{print $4}' | grep -E '^10\\.0\\.2\\.' | cut -d/ -f1 | head -1")
-    return (r.stdout or "").strip()
+    logf = open(os.path.join(HERE, "cache-proxy.log"), "ab")
+    kwargs = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+              if os.name == "nt" else {"start_new_session": True})
+    subprocess.Popen([sys.executable, os.path.join(HERE, "cache-proxy.py"),
+                      "--port", str(PORT_CACHE)],
+                     stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, **kwargs)
+    time.sleep(2)
+    return (_cache_ping(), "started") if _cache_ping() else (False, "failed to start")
 
 
 def cache_status():
     up, msg = cache_ensure_running()
-    size = guest(CACHE_VM, f"du -sh {CACHE_DIR} 2>/dev/null | cut -f1").stdout.strip() or "0"
-    count = guest(CACHE_VM, f"find {CACHE_DIR} -name '*.pkg.tar.zst' 2>/dev/null | wc -l").stdout.strip() or "0"
-    return {"running": up, "message": msg, "host": CACHE_VM, "ip": cache_host_ip(),
-            "port": PORT_CACHE, "cache_size": size, "cached_packages": int(count or 0),
-            "url": f"http://{cache_host_ip() or '<cache-ip>'}:{PORT_CACHE}/repo/archlinux/$repo/os/$arch"}
+    size = n = 0
+    for root, _, files in os.walk(CACHE_DIR):
+        for f in files:
+            try:
+                size += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                continue
+            if ".pkg.tar." in f:
+                n += 1
+    return {"running": up, "message": msg, "host": "this machine (cache-proxy.py)",
+            "port": PORT_CACHE, "cache_size": f"{size / 1e9:.1f} GB" if size >= 1e8 else f"{size / 1e6:.0f} MB",
+            "cached_packages": n, "url": f"{CACHE_URL_GUEST}/$repo/os/$arch"}
 
 
 def cache_refresh():
-    """Refresh the repo databases so package version resolution is current.
-    (Package *files* self-update on a cache miss; this updates the indexes.)"""
-    r = guest(CACHE_VM, "arch-chroot /mnt /usr/bin/bash -lc 'pacman -Sy --noconfirm >/dev/null 2>&1 && echo OK || echo FAIL'", timeout=180)
-    ok = "OK" in r.stdout
-    return {"ok": ok, "message": "repo databases refreshed" if ok else "refresh failed",
+    """Kept for UI compat: the proxy refetches repo databases live (60s TTL),
+    so there is nothing to refresh by hand."""
+    return {"ok": True, "message": "repo databases are fetched live by the proxy — always current",
             **cache_status()}
 
 
@@ -127,39 +136,63 @@ def cache_refresh():
 JOBS = {}  # id -> {status, log[], exit, vm, thread}
 
 
-def ensure_natnet():
-    r = vbox("natnetwork", "list")
-    if NATNET not in (r.stdout or ""):
-        vbox("natnetwork", "add", "--netname", NATNET, "--network", "10.0.2.0/24", "--enable", "--dhcp", "on")
-    # make sure the cache VM is on it (so the test VM can reach the cache)
-    info = vbox("showvminfo", CACHE_VM, "--machinereadable").stdout
-    if f'natnet1="{NATNET}"' not in info:
-        st = "poweroff" in info
-        if st:  # only when powered off; a live switch is possible but risky
-            vbox("modifyvm", CACHE_VM, "--nic1", "natnetwork", "--nat-network", NATNET)
+def reap_stale_vms():
+    """Delete review-* VMs left behind by a killed server (they're throwaway)."""
+    out = vbox("list", "vms").stdout or ""
+    for name in re.findall(r'"(review-[0-9a-f]+)"', out):
+        vbox("controlvm", name, "poweroff")
+        time.sleep(1)
+        vbox("unregistervm", name, "--delete")
+        print(f"  reaped stale VM {name}")
+    # Loose review-* files, but NOT ones a still-registered VM uses — a kept VM
+    # (renamed to kept-*) keeps its original review-*.vdi, which must survive.
+    inuse = (vbox("list", "hdds").stdout or "").lower()
+    for f in os.listdir(HERE):
+        if re.match(r"\.?review-[0-9a-f]+\.(json|vdi)$", f) and f.lower() not in inuse:
+            try:
+                os.remove(os.path.join(HERE, f))
+            except OSError:
+                pass
+
+
+def _kept_name(manifest_text, jid):
+    """A friendly, reaper-safe VM name derived from the manifest's meta.name."""
+    try:
+        name = (json.loads(manifest_text).get("meta") or {}).get("name") or "manifest"
+    except Exception:
+        name = "manifest"
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:32] or "manifest"
+    return f"kept-{slug}-{jid[:6]}"
 
 
 def boot_test(job_id, manifest_text):
     j = JOBS[job_id]
-    def log(m): j["log"].append(m); j["log"][:] = j["log"][-400:]
+    head, inst = [], []          # harness lines / cleaned install-log lines
+    def rebuild(): j["log"] = (head + inst)[-500:]
+    def log(m): head.append(m); rebuild()
     vm = f"review-{job_id[:8]}"
     j["vm"] = vm
     iso = _iso()
     try:
         if not iso or not os.path.exists(iso):
-            log("ERROR: no install ISO found in dist/"); j["status"] = "failed"; j["exit"] = 2; return
-        ensure_natnet()
+            log("ERROR: no install ISO found in dist/"); j["result"] = "failed"; j["exit"] = 2; return
         up, msg = cache_ensure_running()
-        cache_ip = cache_host_ip()
-        log(f"[cache] pacoloco {msg}; host {cache_ip or '?'}:{PORT_CACHE}")
+        log(f"[cache] proxy {msg} on :{PORT_CACHE}" if up
+            else f"[cache] WARNING: proxy {msg} — install will use real mirrors")
         mfile = os.path.join(HERE, f".{vm}.json")
-        open(mfile, "w", encoding="utf-8").write(manifest_text)
+        # newline="": Windows text mode would write \r\n, and the sha256
+        # arrival check below compares against the *original* bytes
+        with open(mfile, "w", encoding="utf-8", newline="") as fh:
+            fh.write(manifest_text)
 
-        log(f"[vm] creating {vm} (fresh UEFI, NAT network {NATNET})")
+        log(f"[vm] creating {vm} (fresh UEFI, NAT)")
         vdi = os.path.join(HERE, f"{vm}.vdi")
         vbox("createvm", "--name", vm, "--ostype", "ArchLinux_64", "--register")
+        # --nat-localhostreachable1: VBox >=6.1.28 NAT refuses guest traffic to
+        # 10.0.2.2 (host loopback) by default — without it the cache is
+        # unreachable from the VM (instant "connection refused").
         vbox("modifyvm", vm, "--memory", "6144", "--cpus", "4", "--firmware", "efi",
-             "--nic1", "natnetwork", "--nat-network", NATNET,
+             "--nic1", "nat", "--nat-localhostreachable1", "on",
              "--graphicscontroller", "vmsvga", "--vram", "64", "--boot1", "dvd", "--boot2", "disk")
         vbox("createmedium", "disk", "--filename", vdi, "--size", "25000")
         vbox("storagectl", vm, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci")
@@ -175,49 +208,141 @@ def boot_test(job_id, manifest_text):
                 j["status"] = "failed"; j["exit"] = 1; return
             time.sleep(8)
 
-        if cache_ip:
-            guest(vm, f"echo 'Server = http://{cache_ip}:{PORT_CACHE}/repo/archlinux/$repo/os/$arch' > /etc/pacman.d/mirrorlist")
-            log(f"[vm] mirrorlist -> cache http://{cache_ip}:{PORT_CACHE}  (installs pull from cache)")
+        if up:
+            # Pin the mirrorlist to the cache with a READ-ONLY BIND MOUNT: the
+            # installer's rank_mirrors() overwrites /etc/pacman.d/mirrorlist
+            # early in every provision, which would silently bypass the cache.
+            # The RO mount makes that overwrite fail harmlessly (rank_mirrors
+            # is best-effort), and pacstrap copies the pinned mirrorlist into
+            # the target so the chrooted installs are cached too.
+            pin = guest(vm, f"echo 'Server = {CACHE_URL_GUEST}/$repo/os/$arch' > /root/mirrorlist.cache"
+                            " && cp /root/mirrorlist.cache /etc/pacman.d/mirrorlist"
+                            " && mount --bind /root/mirrorlist.cache /etc/pacman.d/mirrorlist"
+                            " && mount -o remount,ro,bind /etc/pacman.d/mirrorlist && echo PINNED").stdout
+            if "PINNED" in pin:
+                log("[vm] mirrorlist pinned to the package cache")
+            # Preflight from inside the guest; fall back to real mirrors now
+            # rather than dying 10 minutes into pacstrap.
+            if "ok" not in guest(vm, f"curl -sf -m 5 http://10.0.2.2:{PORT_CACHE}/ping").stdout:
+                log("[vm] WARNING: cache unreachable from the guest — using real mirrors")
+                guest(vm, "umount /etc/pacman.d/mirrorlist 2>/dev/null;"
+                          " printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\\n'"
+                          " > /etc/pacman.d/mirrorlist")
+
+        # Get the submission in and PROVE it arrived (a silent copy failure
+        # makes provision mis-resolve the path as a catalog name): copyto,
+        # base64 fallback over guestcontrol, then sha256 compare.
         subprocess.run([VBOX, "guestcontrol", vm, "copyto", mfile, "/root/submission.json",
                         "--username", "root", "--password", ""], capture_output=True, text=True)
+        want = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+        got = guest(vm, "sha256sum /root/submission.json 2>/dev/null | cut -d' ' -f1").stdout.strip()
+        if got != want:
+            log(f"[vm] copyto failed (sha {got[:12] or '(no file)'} != {want[:12]}) — pushing base64 through guestcontrol")
+            b64 = base64.b64encode(manifest_text.encode("utf-8")).decode()
+            guest(vm, ": > /root/submission.b64")
+            # small chunks: guestcontrol rejects args of a few KB and up with
+            # VERR_NOT_SUPPORTED (verified — 5.5 KB already fails)
+            for i in range(0, len(b64), 2000):
+                r = guest(vm, f"printf %s '{b64[i:i + 2000]}' >> /root/submission.b64")
+                if r.returncode != 0:
+                    log(f"ERROR: base64 push failed at offset {i}: {r.stderr.strip()[:150]}")
+                    j["result"] = "failed"; j["exit"] = 1; return
+            guest(vm, "base64 -d /root/submission.b64 > /root/submission.json && rm -f /root/submission.b64")
+            got = guest(vm, "sha256sum /root/submission.json 2>/dev/null | cut -d' ' -f1").stdout.strip()
+        if got != want:
+            log("ERROR: submission never arrived intact in the VM")
+            j["result"] = "failed"; j["exit"] = 1; return
+        log("[vm] submission copied in (sha256 verified)")
 
         log("[install] manifest provision (this is the real thing — minutes)…")
         guest(vm, "rm -f /tmp/prov.exit; setsid bash -c 'manifest provision /root/submission.json "
                   "--disk /dev/sda --user reviewer --password review1234 --no-reboot "
-                  ">/tmp/manifest-install.log 2>&1; echo $? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched")
-        seen = 0
+                  ">/root/install.log 2>&1; echo $? >/tmp/prov.exit' </dev/null >/dev/null 2>&1 & echo launched")
         while True:
-            if j.get("cancel"): log("cancelled"); j["status"] = "failed"; j["exit"] = 1; return
+            if j.get("cancel"): log("cancelled"); j["result"] = "cancelled"; j["exit"] = 1; return
             raw = guest(vm, "cat /tmp/prov.exit 2>/dev/null").stdout.strip()
-            tail = guest(vm, "tail -n 3 /tmp/manifest-install.log 2>/dev/null").stdout.splitlines()
-            for line in tail[seen:] if len(tail) > seen else []:
-                log("  " + line)
-            seen = len(tail)
-            # surface the phase headers as they happen
-            step = guest(vm, "grep -E '^\\[' /tmp/manifest-install.log 2>/dev/null | tail -1").stdout.strip()
+            # Faithful stream: read the whole (small) log, normalise \r-redraws,
+            # and drop curl's progress-meter noise (the "0  0  0 …" lines — curl
+            # in the resilient XferCommand isn't silent). Rebuild rather than
+            # append, so the panel always matches the real /root/install.log.
+            raw_log = guest(vm, "cat /root/install.log 2>/dev/null").stdout
+            cleaned = []
+            for ln in raw_log.replace("\r", "\n").split("\n"):
+                s = ln.rstrip()
+                if re.match(r"^\s*\d[\d.%]*\s+\d", s) or "% Total" in s or "Dload" in s:
+                    continue                       # curl progress meter — skip
+                if not s and cleaned and not cleaned[-1]:
+                    continue                       # collapse blank runs
+                cleaned.append(s)
+            inst[:] = cleaned; rebuild()
+            step = guest(vm, "grep -aE '^\\[' /root/install.log 2>/dev/null | tail -1").stdout.strip()
             if step: j["step"] = step
             if raw.isdigit():
                 j["exit"] = int(raw)
-                if raw == "0":
-                    hits = guest(vm, "grep -c 'serving cached file' /tmp/manifest-install.log 2>/dev/null").stdout.strip()
-                    log(f"[install] OK — completed."); j["status"] = "passed"
-                else:
-                    log(f"[install] FAILED (exit {raw})."); j["status"] = "failed"
+                j["result"] = "passed" if raw == "0" else "failed"
+                log("[install] OK — completed." if raw == "0" else f"[install] FAILED (exit {raw}).")
                 return
             time.sleep(12)
     except Exception as e:
-        log(f"ERROR: {e}"); j["status"] = "failed"; j["exit"] = 1
+        log(f"ERROR: {e}"); j["result"] = "failed"; j["exit"] = j.get("exit") or 1
     finally:
-        if j.get("status") in ("passed", "failed"):
-            log("[vm] tearing down.")
+        result = j.get("result") or "failed"
+        keep = bool(j.get("keep")) and not j.get("cancel") and result in ("passed", "failed")
+        try: os.remove(os.path.join(HERE, f".{vm}.json"))
+        except OSError: pass
+        if keep:
+            j["step"] = "saving the VM…"
+            try: guest(vm, "sync", timeout=30)   # flush ext4 before power-off
+            except Exception: pass
+            if result == "passed":
+                # drop the install ISO so it boots into the installed system
+                vbox("storageattach", vm, "--storagectl", "SATA", "--port", "1",
+                     "--device", "0", "--type", "dvddrive", "--medium", "none")
+            vbox("controlvm", vm, "poweroff", timeout=30); time.sleep(2)
+            newname = _kept_name(manifest_text, job_id)
+            vbox("modifyvm", vm, "--name", newname)   # out of the review-* reap namespace
+            j["kept_vm"] = newname
+            log(f"[vm] KEPT as '{newname}' (powered off).")
+            if result == "passed":
+                log("      Open VirtualBox → start it → log in as  niri / niri  (or reviewer / review1234).")
+            else:
+                log("      Install FAILED — kept in the live environment; read /root/install.log inside it.")
+        else:
+            if result in ("passed", "failed"):
+                log("[vm] tearing down.")
+            try:
+                vbox("controlvm", vm, "poweroff", timeout=30)
+                time.sleep(1)
+                vbox("unregistervm", vm, "--delete", timeout=60)
+            except Exception:
+                pass
+        # publish the terminal status last, so a poll never sees "passed"
+        # before the kept-VM rename/kept_vm field is in place
+        j["step"] = ""
+        j["status"] = result
+
+
+def _manifest_verify(manifest_text):
+    """Run the real schema validator (`manifest verify`) if a host build of the
+    binary exists. Returns {ran, ok, output}."""
+    exe = next((p for p in (os.path.join(REPO, "target", "release", "manifest.exe"),
+                            os.path.join(REPO, "target", "debug", "manifest.exe"),
+                            os.path.join(REPO, "target", "release", "manifest"))
+                if os.path.isfile(p)), None)
+    if not exe:
+        return {"ran": False, "ok": None, "output": "no built manifest binary (cargo build --release)"}
+    tmp = os.path.join(HERE, f".verify-{uuid.uuid4().hex[:8]}.json")
+    try:
+        open(tmp, "w", encoding="utf-8").write(manifest_text)
+        p = subprocess.run([exe, "verify", tmp], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        return {"ran": True, "ok": p.returncode == 0,
+                "output": (p.stdout + p.stderr).strip()}
+    except Exception as e:
+        return {"ran": True, "ok": False, "output": str(e)}
+    finally:
         try:
-            vbox("controlvm", vm, "poweroff", timeout=30)
-            time.sleep(1)
-            vbox("unregistervm", vm, "--delete", timeout=60)
-        except Exception:
-            pass
-        try:
-            os.remove(os.path.join(HERE, f".{vm}.json"))
+            os.remove(tmp)
         except OSError:
             pass
 
@@ -250,18 +375,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not j:
                 return self._json({"error": "no such job"}, 404)
             return self._json({"status": j["status"], "exit": j.get("exit"),
-                               "step": j.get("step", ""), "log": j["log"], "vm": j.get("vm")})
+                               "step": j.get("step", ""), "log": j.get("log", []),
+                               "vm": j.get("vm"), "kept_vm": j.get("kept_vm")})
         return super().do_GET()
 
     def do_POST(self):
         body = self._body()
         if self.path.startswith("/api/scan"):
-            p = subprocess.run([PY, os.path.join(HERE, "scan.py"), "-", "--json"],
-                               input=body, capture_output=True, text=True)
+            p = subprocess.run([PY, os.path.join(HERE, "scan.py"), "-", "--json", "--check-packages"],
+                               input=body, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
             try:
-                return self._json(json.loads(p.stdout))
+                out = json.loads(p.stdout)
             except Exception:
                 return self._json({"error": p.stderr or "scan failed", "findings": []}, 500)
+            out["verify"] = _manifest_verify(body)
+            return self._json(out)
         if self.path.startswith("/api/cache/refresh"):
             return self._json(cache_refresh())
         if self.path.startswith("/api/boot-test/stop"):
@@ -274,8 +403,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 json.loads(body)  # validate it's JSON
             except Exception as e:
                 return self._json({"error": f"invalid JSON: {e}"}, 400)
+            # one at a time: each test is a 6 GB VM; two at once overcommits
+            # the host (RCU stalls, blown provisioning timeouts)
+            running = [k for k, v in JOBS.items() if v["status"] == "running"]
+            if running:
+                return self._json({"error": "a boot test is already running — wait or stop it",
+                                   "job": running[0]}, 409)
+            keep = parse_qs(urlparse(self.path).query).get("keep", ["0"])[0] in ("1", "true", "yes")
             jid = uuid.uuid4().hex
-            JOBS[jid] = {"status": "running", "log": [], "exit": None}
+            JOBS[jid] = {"status": "running", "log": [], "exit": None, "keep": keep}
             t = threading.Thread(target=boot_test, args=(jid, body), daemon=True)
             JOBS[jid]["thread"] = t
             t.start()
@@ -292,6 +428,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8770"))
+    reap_stale_vms()
     print(f"Marketplace review console: http://localhost:{port}")
-    print(f"  cache VM: {CACHE_VM}   NAT network: {NATNET}   ISO: {os.path.basename(_iso()) or '(none)'}")
+    print(f"  cache: cache-proxy.py :{PORT_CACHE} ({CACHE_DIR})   ISO: {os.path.basename(_iso()) or '(none)'}")
     Server(("127.0.0.1", port), Handler).serve_forever()

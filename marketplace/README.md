@@ -13,9 +13,11 @@ This README is how to *use* what's here.
 | File | What it is | State |
 |---|---|---|
 | [`scan.py`](scan.py) | Static security + sanity scanner (CLI). The source of truth. | ✅ works |
-| [`web/index.html`](web/index.html) | Self-contained web UI — paste/drop a manifest, see findings + flagged sources. | ✅ works |
-| [`boot-test.sh`](boot-test.sh) | Review one submission: static scan, then (opt) a real VM install + boot. | ✅ scan gate; ⏳ boot stage |
-| [`cache-setup.sh`](cache-setup.sh) | Stand up the pacoloco package cache for the boot-test farm (62× warm speedup). | ✅ works |
+| [`web/index.html`](web/index.html) | Web UI — paste/drop a manifest, see findings + flagged sources; with server.py running it adds `manifest verify`, the real `--check-packages` scan, and a **Boot test in a VM** button with live log. | ✅ works |
+| [`server.py`](server.py) | Backend for the web UI: server-side scan + verify, cache status, VM boot tests. `python marketplace/server.py` → :8770. | ✅ verified end-to-end |
+| [`boot-test.sh`](boot-test.sh) | Review one submission: static scan, then (opt) a real VM install + boot. | ✅ verified end-to-end (niri-rice, 2026-07-05) |
+| [`cache-proxy.py`](cache-proxy.py) | Package cache that runs on the (Windows) host — auto-started by boot-test.sh. | ✅ works |
+| [`cache-setup.sh`](cache-setup.sh) | Alternative: pacoloco cache on an Arch cache host (62× warm speedup). | ✅ works |
 | [`DESIGN.md`](DESIGN.md) | The full pipeline: static → boot test → sign-off, package cache, signing. | design |
 
 ## The scanner (`scan.py`)
@@ -42,7 +44,7 @@ can do harm, ranked CRITICAL → INFO:
 ```bash
 python marketplace/scan.py submission.json              # human report
 python marketplace/scan.py submission.json --json       # for the web UI / CI
-python marketplace/scan.py submission.json --check-packages   # + AUR/typosquat (Arch only)
+python marketplace/scan.py submission.json --check-packages   # + AUR/typosquat (pacman, or the Arch web APIs)
 cat submission.json | python marketplace/scan.py -      # from stdin
 ```
 
@@ -72,7 +74,11 @@ marketplace/boot-test.sh submission.json --boot -i dist/manifestos-*.iso   # + f
 
 Stage 1 (static scan) runs everywhere. Stage 2 (`--boot`) does a real
 `manifest provision` install in a throwaway VirtualBox VM and needs the runner
-host; a package cache makes it fast (`PACOLOCO_URL`, see DESIGN.md). The
+host. Every package the VM downloads goes through a caching proxy
+(`cache-proxy.py`, auto-started on the host; or set `PACOLOCO_URL` to a real
+pacoloco — see cache-setup.sh), so only the first test downloads from the
+mirrors and re-tests are served from `pkg-cache/`. To check *your own* manifest
+end-to-end in one command, use `scripts/check-manifest.sh <file.json>`. The
 behavioural capture (outbound connections, new listeners, fs diff, compositor
 config errors on login) is the stage-2 work still to build.
 
