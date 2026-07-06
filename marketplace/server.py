@@ -191,9 +191,14 @@ def boot_test(job_id, manifest_text):
         # --nat-localhostreachable1: VBox >=6.1.28 NAT refuses guest traffic to
         # 10.0.2.2 (host loopback) by default — without it the cache is
         # unreachable from the VM (instant "connection refused").
+        # --accelerate3d on + 128MB VRAM: Wayland compositors (Hyprland/niri/
+        # sway) use wlroots' GLES renderer, which has NO software fallback — with
+        # 3D off they crash on login and bounce back to the greeter. Needed for a
+        # kept VM's desktop to actually render.
         vbox("modifyvm", vm, "--memory", "6144", "--cpus", "4", "--firmware", "efi",
              "--nic1", "nat", "--nat-localhostreachable1", "on",
-             "--graphicscontroller", "vmsvga", "--vram", "64", "--boot1", "dvd", "--boot2", "disk")
+             "--graphicscontroller", "vmsvga", "--accelerate3d", "on", "--vram", "128",
+             "--boot1", "dvd", "--boot2", "disk")
         vbox("createmedium", "disk", "--filename", vdi, "--size", "25000")
         vbox("storagectl", vm, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci")
         vbox("storageattach", vm, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", vdi)
@@ -304,7 +309,10 @@ def boot_test(job_id, manifest_text):
             j["kept_vm"] = newname
             log(f"[vm] KEPT as '{newname}' (powered off).")
             if result == "passed":
-                log("      Open VirtualBox → start it → log in as  niri / niri  (or reviewer / review1234).")
+                # provision renames the manifest's primary user to the install
+                # account (--user reviewer) and moves the rice onto it, so THAT
+                # is the only login — not the manifest's original user.
+                log("      Open VirtualBox → start it → log in as  reviewer / review1234  (has the desktop).")
             else:
                 log("      Install FAILED — kept in the live environment; read /root/install.log inside it.")
         else:

@@ -321,7 +321,7 @@ async function startBoot(){
     clearInterval(POLL); bootBtn.disabled=false; refreshCache();
     if(d.status==="passed")
       st.innerHTML = d.kept_vm
-        ? `✓ PASSED — kept as <code>${escapeHtml(d.kept_vm)}</code>. Open VirtualBox, start it, log in <b>niri / niri</b>.`
+        ? `✓ PASSED — kept as <code>${escapeHtml(d.kept_vm)}</code>. Open VirtualBox, start it, log in <b>reviewer / review1234</b> (has the desktop).`
         : "✓ PASSED — installed cleanly in a throwaway VM";
     else
       st.innerHTML = d.kept_vm
