@@ -75,6 +75,7 @@ for spec in "${SCENARIOS[@]}"; do
   echo "[$vm] waiting for live env guestcontrol..." | tee -a "$log"
   if ! wait_for_guestcontrol "$vm" 40; then
     echo "[$vm] FAIL — guestcontrol never came up (see $vm-boot.png)" | tee -a "$log"
+    vb controlvm "$vm" poweroff >>"$log" 2>&1
     continue
   fi
 
@@ -90,6 +91,7 @@ for spec in "${SCENARIOS[@]}"; do
   if [ "$provision_rc" -ne 0 ] || ! grep -q 'INSTALL_EXIT=0' "$log"; then
     echo "[$vm] FAIL — provisioning did not complete cleanly (rc=$provision_rc), skipping boot/login" | tee -a "$log"
     shot "$vm" "$out/$vm-install-fail.png" >>"$log" 2>&1
+    vb controlvm "$vm" poweroff >>"$log" 2>&1
     continue
   fi
 
@@ -125,6 +127,11 @@ for spec in "${SCENARIOS[@]}"; do
   desktop_shot="$out/$vm-desktop.png"
   shot "$vm" "$desktop_shot" >>"$log" 2>&1
   echo "[$vm] screenshot -> $desktop_shot" | tee -a "$log"
+
+  # Don't leave finished VMs running — each one competes for host CPU with
+  # whichever scenario runs next (this starved a later VM's `paru` build badly
+  # enough to blow through the 60-min provisioning timeout).
+  vb controlvm "$vm" poweroff >>"$log" 2>&1
 done
 
 echo "ALL DONE — results in $out" | tee -a "$out/SUMMARY.txt"
