@@ -79,6 +79,17 @@ const DESKTOP_BASE: &[&str] = &[
     "noto-fonts",
     "noto-fonts-emoji",
     "ttf-dejavu",
+    // Graphics with a software-rendering safety net, so a machine with a weak,
+    // missing, or half-broken GPU (a VM's virtual GPU, a headless server, a
+    // laptop before its driver loads) still runs apps instead of crashing them.
+    // `mesa` provides hardware GL *and* the llvmpipe software GL fallback;
+    // `vulkan-swrast` (lavapipe) is a software Vulkan device, which is what lets
+    // Vulkan-first toolkits like GTK4/libadwaita fall back to the CPU when no
+    // usable GPU Vulkan exists. On real hardware these are no-ops — the hardware
+    // driver is preferred; they only kick in when the GPU can't do the job.
+    "mesa",
+    "vulkan-icd-loader",
+    "vulkan-swrast",
 ];
 
 /// System services every graphical system wants enabled.
