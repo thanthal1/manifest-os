@@ -125,7 +125,7 @@
     {
       "path": "/home/dev/.config/fastfetch/config.jsonc",
       "owner": "dev:dev",
-      "content": "{\n  \"logo\": { \"type\": \"builtin\", \"source\": \"arch\", \"padding\": { \"top\": 1, \"left\": 2 } },\n  \"display\": { \"separator\": \"  \" },\n  \"modules\": [\n    \"title\", \"separator\",\n    { \"type\": \"os\", \"key\": \"󰣇 os\" },\n    { \"type\": \"kernel\", \"key\": \" kernel\" },\n    { \"type\": \"wm\", \"key\": \" wm\" },\n    { \"type\": \"packages\", \"key\": \"󰏖 pkgs\" },\n    { \"type\": \"shell\", \"key\": \" shell\" },\n    { \"type\": \"terminal\", \"key\": \" term\" },\n    { \"type\": \"memory\", \"key\": \" mem\" },\n    \"break\", \"colors\"\n  ]\n}\n"
+      "content": "{\n  \"logo\": { \"type\": \"file\", \"source\": \"/usr/share/manifest-os/logo.txt\", \"padding\": { \"top\": 1, \"left\": 2 } },\n  \"display\": { \"separator\": \"  \" },\n  \"modules\": [\n    \"title\", \"separator\",\n    { \"type\": \"os\", \"key\": \"󰣇 os\" },\n    { \"type\": \"kernel\", \"key\": \" kernel\" },\n    { \"type\": \"wm\", \"key\": \" wm\" },\n    { \"type\": \"packages\", \"key\": \"󰏖 pkgs\" },\n    { \"type\": \"shell\", \"key\": \" shell\" },\n    { \"type\": \"terminal\", \"key\": \" term\" },\n    { \"type\": \"memory\", \"key\": \" mem\" },\n    \"break\", \"colors\"\n  ]\n}\n"
     },
     {
       "path": "/home/dev/.config/starship.toml",

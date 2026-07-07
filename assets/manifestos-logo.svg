@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Manifest OS logo: the "{ }" manifest braces (matches the ASCII logo and
+       the System Snapshots app icon). Referenced by os-release LOGO=manifestos,
+       so GNOME About, KDE Info Center and friends can show it. -->
+  <g fill="none" stroke="#cba6f7" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M50 16 c-14 0 -17 11 -17 26 c0 14 -3 19 -14 22 c11 3 14 8 14 22 c0 15 3 26 17 26"/>
+    <path d="M78 16 c14 0 17 11 17 26 c0 14 3 19 14 22 c-11 3 -14 8 -14 22 c0 15 -3 26 -17 26"/>
+  </g>
+</svg>

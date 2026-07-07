@@ -39,6 +39,11 @@ const FASTFETCH_CONF: &str = r#"{
 /// The Manifest OS logo, embedded at build time.
 const LOGO: &str = include_str!("logo.txt");
 
+/// The SVG logo icon backing os-release's `LOGO=manifestos` — without an icon
+/// by that name on disk, GNOME About / KDE Info Center and anything else that
+/// resolves the os-release logo falls back to upstream (Arch) art.
+const LOGO_SVG: &str = include_str!("../assets/manifestos-logo.svg");
+
 /// Run the install, then save the log regardless of outcome. `save_install_log`
 /// exists specifically to survive a *failure* (its whole point is a crash
 /// forensics trail), so it must not live inside the fallible step sequence —
@@ -1484,6 +1489,15 @@ fn brand_system(ctx: &Ctx) -> Result<()> {
     ctx.write_root("/mnt/usr/lib/os-release", OS_RELEASE)?;
     ctx.write_root("/mnt/usr/share/manifest-os/logo.txt", LOGO)?;
     ctx.write_root("/mnt/etc/xdg/fastfetch/config.jsonc", FASTFETCH_CONF)?;
+    // The icon os-release's LOGO= names, in both places tools look: the
+    // hicolor fallback theme (QIcon/GTK theme lookups) and pixmaps (direct
+    // path lookups). The later desktop install's pacman hooks refresh the
+    // hicolor cache, so no explicit gtk-update-icon-cache is needed here.
+    ctx.write_root(
+        "/mnt/usr/share/icons/hicolor/scalable/apps/manifestos.svg",
+        LOGO_SVG,
+    )?;
+    ctx.write_root("/mnt/usr/share/pixmaps/manifestos.svg", LOGO_SVG)?;
     Ok(())
 }
 
