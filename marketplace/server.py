@@ -191,13 +191,14 @@ def boot_test(job_id, manifest_text):
         # --nat-localhostreachable1: VBox >=6.1.28 NAT refuses guest traffic to
         # 10.0.2.2 (host loopback) by default — without it the cache is
         # unreachable from the VM (instant "connection refused").
-        # --accelerate3d on + 128MB VRAM: Wayland compositors (Hyprland/niri/
-        # sway) use wlroots' GLES renderer, which has NO software fallback — with
-        # 3D off they crash on login and bounce back to the greeter. Needed for a
-        # kept VM's desktop to actually render.
+        # NOTE: 3D acceleration is NOT set here. It's only needed for the desktop
+        # to render *after* install (Wayland compositors need it), and enabling it
+        # on a freshly-created VM can block on host 3D init / VBox session locks —
+        # a hang there would fail the whole install (and a killed modifyvm wedges
+        # VBox's lock state). So 3D is enabled best-effort at keep time instead.
         vbox("modifyvm", vm, "--memory", "6144", "--cpus", "4", "--firmware", "efi",
              "--nic1", "nat", "--nat-localhostreachable1", "on",
-             "--graphicscontroller", "vmsvga", "--accelerate3d", "on", "--vram", "128",
+             "--graphicscontroller", "vmsvga", "--vram", "128",
              "--boot1", "dvd", "--boot2", "disk")
         vbox("createmedium", "disk", "--filename", vdi, "--size", "25000")
         vbox("storagectl", vm, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci")
@@ -307,12 +308,22 @@ def boot_test(job_id, manifest_text):
             newname = _kept_name(manifest_text, job_id)
             vbox("modifyvm", vm, "--name", newname)   # out of the review-* reap namespace
             j["kept_vm"] = newname
+            # Enable 3D now (VM powered off) so the Wayland desktop renders when
+            # opened. Best-effort with a generous timeout: if the host wedges on
+            # it, the install still succeeded — just tell the user to enable it.
+            three_d = False
+            try:
+                three_d = vbox("modifyvm", newname, "--accelerate3d", "on", timeout=180).returncode == 0
+            except Exception:
+                three_d = False
             log(f"[vm] KEPT as '{newname}' (powered off).")
             if result == "passed":
                 # provision renames the manifest's primary user to the install
                 # account (--user reviewer) and moves the rice onto it, so THAT
                 # is the only login — not the manifest's original user.
                 log("      Open VirtualBox → start it → log in as  reviewer / review1234  (has the desktop).")
+                if not three_d:
+                    log(f"      NB: enable 3D for the desktop to render — VBoxManage modifyvm \"{newname}\" --accelerate3d on")
             else:
                 log("      Install FAILED — kept in the live environment; read /root/install.log inside it.")
         else:

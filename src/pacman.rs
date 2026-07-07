@@ -118,16 +118,18 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
     )?;
 
     println!("  · building paru from the AUR");
-    // Parallelism sized to the machine: rustc comfortably eats ~1.5 GB per
-    // job, so allow one job per 1.5 GB of available RAM, capped at nproc,
-    // never below 1. A 16 GB desktop builds -j$(nproc); a 2 GB VM still gets
-    // the old safe -j1 instead of OOM-killing cargo mid-install.
+    // Parallelism sized to the machine, but CONSERVATIVELY: rustc can spike to
+    // ~2 GB+ per job at link time, and this runs mid-install with the live env /
+    // makepkg / chroot all using memory. Being too eager OOM-kills the build
+    // AND takes down the VM's guest daemon. So reserve 2 GB for the system, then
+    // one job per 2.5 GB of what's left, capped at nproc. A 6 GB VM stays at the
+    // safe -j1; a 16 GB+ machine gets real parallelism.
     let build = format!(
         "cd \"$(mktemp -d)\" && \
          git clone --depth 1 {PARU_AUR} && \
          cd paru && \
          mem_kb=$(awk '/MemAvailable/ {{print $2}}' /proc/meminfo); \
-         jobs=$(( ${{mem_kb:-0}} / 1572864 )); \
+         jobs=$(( (${{mem_kb:-0}} - 2097152) / 2621440 )); \
          [ \"$jobs\" -lt 1 ] && jobs=1; \
          [ \"$jobs\" -gt \"$(nproc)\" ] && jobs=$(nproc); \
          echo \"  · building with $jobs parallel job(s)\"; \

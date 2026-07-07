@@ -80,12 +80,13 @@ echo "[$vm] fresh UEFI VM from $(basename "$ISO")"
 # --nat-localhostreachable1: since VBox 6.1.28 NAT *refuses* guest traffic to
 # 10.0.2.2 (host loopback) by default — without this flag the package cache is
 # unreachable from the VM (instant "connection refused", not a firewall issue).
-# --accelerate3d on + 128MB VRAM: Wayland compositors (Hyprland/niri/sway) use
-# wlroots' GLES renderer with no software fallback — with 3D off they crash on
-# login. Needed for a kept VM (--keep) to render its desktop.
+# 3D accel is NOT set here — it's only needed for the desktop to render after
+# install, and enabling it on a fresh VM can block on host 3D init / VBox locks
+# (a hang there fails the install and a killed modifyvm wedges VBox). It's
+# enabled best-effort at keep time (keep_vm) instead.
 "$VBOX" modifyvm "$vm" --memory 6144 --cpus 4 --firmware efi --nic1 nat \
    --nat-localhostreachable1 on \
-   --graphicscontroller vmsvga --accelerate3d on --vram 128 --boot1 dvd --boot2 disk >/dev/null
+   --graphicscontroller vmsvga --vram 128 --boot1 dvd --boot2 disk >/dev/null
 "$VBOX" createmedium disk --filename "$vdi" --size 25000 >/dev/null
 "$VBOX" storagectl "$vm" --name SATA --add sata --controller IntelAhci >/dev/null
 "$VBOX" storageattach "$vm" --storagectl SATA --port 0 --device 0 --type hdd --medium "$vdi" >/dev/null
@@ -173,7 +174,10 @@ keep_vm() {
   newname="kept-${slug:-manifest}-$(date +%s | tail -c 5)"
   "$VBOX" modifyvm "$vm" --name "$newname" >/dev/null 2>&1 && vm="$newname"
   KEPT=1
+  # Best-effort 3D so the Wayland desktop renders; install already succeeded.
+  three_d=0; "$VBOX" modifyvm "$vm" --accelerate3d on >/dev/null 2>&1 && three_d=1
   echo ">>> KEPT VM '$vm' (powered off). Open VirtualBox, start it$([ "$1" = ok ] && echo ', log in as reviewer / review1234 (has the desktop)')."
+  [ "$1" = ok ] && [ "$three_d" = 0 ] && echo "    NB: enable 3D to render the desktop — VBoxManage modifyvm \"$vm\" --accelerate3d on"
 }
 
 if [ "$code" = "0" ]; then
