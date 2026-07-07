@@ -84,7 +84,9 @@ echo "[$vm] fresh UEFI VM from $(basename "$ISO")"
 # install, and enabling it on a fresh VM can block on host 3D init / VBox locks
 # (a hang there fails the install and a killed modifyvm wedges VBox). It's
 # enabled best-effort at keep time (keep_vm) instead.
-"$VBOX" modifyvm "$vm" --memory 6144 --cpus 4 --firmware efi --nic1 nat \
+# 10GB RAM: lets the memory-scaled paru build use -j2+ (faster) while staying
+# OOM-safe. One boot test runs at a time, so the host (63GB) has room.
+"$VBOX" modifyvm "$vm" --memory 10240 --cpus 4 --firmware efi --nic1 nat \
    --nat-localhostreachable1 on \
    --graphicscontroller vmsvga --vram 128 --boot1 dvd --boot2 disk >/dev/null
 "$VBOX" createmedium disk --filename "$vdi" --size 25000 >/dev/null

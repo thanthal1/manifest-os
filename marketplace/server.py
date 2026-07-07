@@ -196,7 +196,10 @@ def boot_test(job_id, manifest_text):
         # on a freshly-created VM can block on host 3D init / VBox session locks —
         # a hang there would fail the whole install (and a killed modifyvm wedges
         # VBox's lock state). So 3D is enabled best-effort at keep time instead.
-        vbox("modifyvm", vm, "--memory", "6144", "--cpus", "4", "--firmware", "efi",
+        # 10GB RAM (not 6): the paru build parallelism scales with memory, so
+        # more RAM = -j2+ (faster) while staying within the conservative,
+        # OOM-safe heuristic. Host runs one boot test at a time, so this is fine.
+        vbox("modifyvm", vm, "--memory", "10240", "--cpus", "4", "--firmware", "efi",
              "--nic1", "nat", "--nat-localhostreachable1", "on",
              "--graphicscontroller", "vmsvga", "--vram", "128",
              "--boot1", "dvd", "--boot2", "disk")
