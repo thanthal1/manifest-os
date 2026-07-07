@@ -105,11 +105,11 @@ de=$(printf '%s' "${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-}" | tr 'A-Z' 'a-z'
 
 # Per-tool option for the chosen fit mode.
 case "$MODE" in
-  fit)     gopt=scaled;    xfs=4; feh=--bg-max;    sway=fit ;;
-  stretch) gopt=stretched; xfs=3; feh=--bg-scale;  sway=stretch ;;
-  center)  gopt=centered;  xfs=1; feh=--bg-center; sway=center ;;
-  tile)    gopt=wallpaper; xfs=2; feh=--bg-tile;   sway=tile ;;
-  *)       gopt=zoom;      xfs=5; feh=--bg-fill;   sway=fill ;;
+  fit)     gopt=scaled;    xfs=4; feh=--bg-max;    sway=fit;     lxqt=fit;     lxde=fit ;;
+  stretch) gopt=stretched; xfs=3; feh=--bg-scale;  sway=stretch; lxqt=stretch; lxde=stretch ;;
+  center)  gopt=centered;  xfs=1; feh=--bg-center; sway=center;  lxqt=center;  lxde=center ;;
+  tile)    gopt=wallpaper; xfs=2; feh=--bg-tile;   sway=tile;    lxqt=tile;    lxde=tile ;;
+  *)       gopt=zoom;      xfs=5; feh=--bg-fill;   sway=fill;    lxqt=zoom;    lxde=crop ;;
 esac
 
 marker="${XDG_CONFIG_HOME:-$HOME/.config}/manifest-wallpaper.set"
@@ -142,10 +142,10 @@ case "$de" in
     done ;;
   *lxqt*)
     once
-    pcmanfm-qt --set-wallpaper "$IMG" --wallpaper-mode=stretch 2>/dev/null ;;
+    pcmanfm-qt --set-wallpaper "$IMG" --wallpaper-mode="$lxqt" 2>/dev/null ;;
   *lxde*)
     once
-    pcmanfm --set-wallpaper="$IMG" 2>/dev/null ;;
+    pcmanfm --set-wallpaper="$IMG" --wallpaper-mode="$lxde" 2>/dev/null ;;
   *)
     # Bare window manager / unknown — run a wallpaper daemon for this session.
     # (Call this from the WM config; it has no persistent setter to mark.)
@@ -166,4 +166,4 @@ Name=Manifest OS wallpaper\n\
 Exec=/usr/local/bin/manifest-wallpaper\n\
 NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\
-OnlyShowIn=GNOME;KDE;XFCE;Cinnamon;MATE;Budgie;LXQt;LXDE;Unity;Deepin;COSMIC;\n";
+OnlyShowIn=GNOME;KDE;XFCE;Cinnamon;X-Cinnamon;MATE;Budgie;LXQt;LXDE;Unity;Deepin;COSMIC;\n";

@@ -27,6 +27,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// One instance, parsed once at startup — the size gap between `Provision` and
+// the small variants doesn't matter, and boxing would clutter the flag structs.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Install from a local manifest file (catalog-by-name comes later).
     Install {
@@ -398,24 +401,33 @@ fn run() -> Result<()> {
                         username: u,
                         password: pw,
                     }),
-                    _ => None,
+                    (None, None) => None,
+                    // Don't silently finish an install missing its admin account.
+                    _ => anyhow::bail!("--user and --password must be given together"),
                 };
                 // "name:password[:sudo]"
-                let extra_users: Vec<ExtraUser> = extra_user
-                    .iter()
-                    .filter_map(|s| {
-                        let mut parts = s.splitn(3, ':');
-                        let username = parts.next()?.to_string();
-                        let password = parts.next()?.to_string();
-                        let sudo = parts.next() == Some("sudo");
-                        Some(ExtraUser { username, password, sudo })
-                    })
-                    .collect();
+                let mut extra_users: Vec<ExtraUser> = Vec::new();
+                for s in &extra_user {
+                    let mut parts = s.splitn(3, ':');
+                    match (parts.next(), parts.next()) {
+                        (Some(username), Some(password)) if !username.is_empty() => {
+                            extra_users.push(ExtraUser {
+                                username: username.to_string(),
+                                password: password.to_string(),
+                                sudo: parts.next() == Some("sudo"),
+                            });
+                        }
+                        _ => anyhow::bail!(
+                            "bad --extra-user `{s}` (expected name:password or name:password:sudo)"
+                        ),
+                    }
+                }
                 let static_ip = match (static_ip, gateway) {
                     (Some(address), Some(gw)) => {
                         Some(StaticIp { address, gateway: gw, dns: dns.unwrap_or_default() })
                     }
-                    _ => None,
+                    (None, None) => None,
+                    _ => anyhow::bail!("--static-ip and --gateway must be given together"),
                 };
                 InstallPlan {
                     disk,

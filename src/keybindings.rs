@@ -549,7 +549,7 @@ Name=Manifest OS keybindings\n\
 Exec=/usr/local/bin/manifest-keybindings\n\
 NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\
-OnlyShowIn=GNOME;Cinnamon;MATE;XFCE;\n";
+OnlyShowIn=GNOME;Cinnamon;X-Cinnamon;MATE;XFCE;\n";
 
 /// `<Super>`/`<Primary>`/`<Alt>`/`<Shift>` GTK accelerator syntax, used by
 /// GNOME, Cinnamon, MATE and Xfce alike (all built on the same GTK parser).

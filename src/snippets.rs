@@ -187,8 +187,19 @@ pub fn upsert(current: &str, s: &Snippet) -> String {
 
     // 2/3) Section anchor.
     if let Some(section) = s.section.as_deref() {
-        if let Some(at) = brace_section_close(current, section) {
-            return insert_at_line(current, at, &indent_block(&block, current, at));
+        if let Some((open, close)) = brace_section_bounds(current, section) {
+            if open != close {
+                return insert_at_line(current, close, &indent_block(&block, current, close));
+            }
+            // Inline `section { … }`: open and close braces share a line, so
+            // "insert before the close line" would drop the snippet *before*
+            // the whole section — outside the braces. Expand it to a
+            // multi-line block first, then insert inside as usual.
+            if let Some(expanded) = expand_inline_section(current, open) {
+                if let Some((_, close)) = brace_section_bounds(&expanded, section) {
+                    return insert_at_line(&expanded, close, &indent_block(&block, &expanded, close));
+                }
+            }
         }
         if let Some(at) = ini_section_end(current, section) {
             return insert_at_line(current, at, &block);
@@ -211,10 +222,11 @@ fn find_line(hay: &str, needle: &str) -> Option<usize> {
     hay.lines().position(|l| l.trim() == needle)
 }
 
-/// For a brace config, the line index of the closing `}` of the block opened
-/// by a line like `section {` (depth-tracked, so nested braces inside are
-/// fine). The snippet gets inserted *before* that line.
-fn brace_section_close(content: &str, section: &str) -> Option<usize> {
+/// For a brace config, the line indexes of the opening line (`section {`) and
+/// of the closing `}` of that block (depth-tracked, so nested braces inside
+/// are fine). The snippet gets inserted *before* the closing line. Equal
+/// indexes mean an inline `section { … }`.
+fn brace_section_bounds(content: &str, section: &str) -> Option<(usize, usize)> {
     let lines: Vec<&str> = content.lines().collect();
     let open_re = |l: &str| {
         let t = l.trim();
@@ -227,11 +239,46 @@ fn brace_section_close(content: &str, section: &str) -> Option<usize> {
     for (i, l) in lines.iter().enumerate().skip(start) {
         depth += l.matches('{').count() as i32;
         depth -= l.matches('}').count() as i32;
-        if depth == 0 && i >= start {
-            return Some(i);
+        if depth == 0 {
+            return Some((start, i));
         }
     }
     None
+}
+
+/// Rewrite the one-line `section { … }` at line `at` into a multi-line block
+/// (`section {` / indented inner content / `}`), so an insertion "before the
+/// closing brace" has a line to land on. Preserves anything after the close.
+fn expand_inline_section(content: &str, at: usize) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let line = lines.get(at)?;
+    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let open = line.find('{')?;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, c) in line.char_indices().skip(open) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let inner = line[open + 1..close].trim();
+    let mut out: Vec<String> = lines[..at].iter().map(|l| l.to_string()).collect();
+    out.push(line[..=open].trim_end().to_string());
+    if !inner.is_empty() {
+        out.push(format!("{indent}    {inner}"));
+    }
+    out.push(format!("{indent}{}", line[close..].trim_end()));
+    out.extend(lines[at + 1..].iter().map(|l| l.to_string()));
+    Some(join(out))
 }
 
 /// For an INI config, the line index just past the end of `[section]`'s body
@@ -367,9 +414,36 @@ mod tests {
     #[test]
     fn nested_braces_do_not_confuse_the_close_finder() {
         let kdl = "binds {\n    Mod+T { spawn \"x\"; }\n    Mod+Y { spawn \"y\"; }\n}\nafter { }\n";
-        let close = brace_section_close(kdl, "binds").unwrap();
+        let (open, close) = brace_section_bounds(kdl, "binds").unwrap();
         // Closing brace of binds is line 3 (0-indexed), not one of the inline pairs.
+        assert_eq!(open, 0);
         assert_eq!(close, 3);
+    }
+
+    #[test]
+    fn inline_empty_section_gets_the_snippet_inside_the_braces() {
+        // A fresh config with a one-line `binds { }` — the snippet must land
+        // *inside* the braces, not before the section.
+        let kdl = "input {\n    keyboard { }\n}\nbinds { }\n";
+        let s = snip("waybar", "config.kdl", Some("binds"), "Mod+W { spawn \"waybar\"; }");
+        let out = upsert(kdl, &s);
+        let open = out.find("binds {").unwrap();
+        let new_bind = out.find("Mod+W").unwrap();
+        let close = out.rfind('}').unwrap();
+        assert!(open < new_bind && new_bind < close, "snippet outside binds:\n{out}");
+        // The other inline block is untouched.
+        assert!(out.contains("keyboard { }"));
+    }
+
+    #[test]
+    fn inline_section_with_content_keeps_that_content() {
+        let kdl = "binds { Mod+T { spawn \"x\"; } }\n";
+        let s = snip("w", "config.kdl", Some("binds"), "Mod+W { spawn \"waybar\"; }");
+        let out = upsert(kdl, &s);
+        let existing = out.find("Mod+T").unwrap();
+        let added = out.find("Mod+W").unwrap();
+        let close = out.rfind('}').unwrap();
+        assert!(existing < added && added < close, "bad layout:\n{out}");
     }
 
     #[test]

@@ -195,7 +195,7 @@ pub fn resolve(manifest: &Manifest) -> Result<Option<Resolved>> {
     let dm_key = manifest.display_manager.as_deref().or(r.default_dm);
     let dm = match dm_key {
         Some(k) => Some(display_manager(k).ok_or_else(|| {
-            anyhow::anyhow!("unknown display_manager `{k}` (gdm|sddm|lightdm|greetd|ly)")
+            anyhow::anyhow!("unknown display_manager `{k}` (gdm|sddm|lightdm|greetd|ly|cosmic-greeter)")
         })?),
         None => None,
     };
@@ -274,8 +274,51 @@ pub fn apply(d: &Resolved, ctx: &Ctx) -> Result<()> {
     if !d.env.is_empty() {
         write_env(&d.env, ctx)?;
     }
+
+    // Software-rendering fallback for virtual / 3D-less GPUs. DESKTOP_BASE
+    // makes llvmpipe/lavapipe *available*, but availability isn't selection: a
+    // VM's virtual GPU still advertises a real-looking GL driver that tops out
+    // at GL 2.1 (VirtualBox VMSVGA) or has no 3D at all (QXL/bochs), so
+    // GL-3.3+ clients — GTK4/libadwaita apps like System Snapshots, kitty —
+    // try the hardware path and fail to start instead of falling back, while
+    // CPU-rendered apps (foot, Firefox's own fallback) run fine. The drop-in
+    // detects those GPUs at login and forces the software path; real GPUs are
+    // untouched.
+    ctx.write_root(GPU_FALLBACK_PATH, GPU_FALLBACK)?;
     Ok(())
 }
+
+const GPU_FALLBACK_PATH: &str = "/etc/profile.d/manifest-gpu-fallback.sh";
+
+const GPU_FALLBACK: &str = r#"# Managed by Manifest OS — software rendering on virtual / 3D-less GPUs.
+# VirtualBox (vboxvideo/vmwgfx), VMware (vmwgfx) and QEMU (qxl/bochs/cirrus)
+# expose GL drivers too old (or absent) for GTK4 apps and GL-3.3 terminals,
+# which then fail to start instead of falling back. Force Mesa's llvmpipe
+# (full OpenGL in software) there. Real GPUs — and virtio-gpu with virgl —
+# are left alone.
+manifest_gpu_needs_software() {
+    _found=""
+    for _drv in /sys/class/drm/card*/device/driver; do
+        [ -e "$_drv" ] || continue
+        _found=1
+        case "$(basename "$(readlink -f "$_drv")")" in
+            vmwgfx|vboxvideo|qxl|bochs|bochs-drm|cirrus) return 0 ;;
+        esac
+    done
+    # A DRM card but no render node can't do hardware 3D either.
+    if [ -n "$_found" ] && ls /dev/dri/renderD* >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+if manifest_gpu_needs_software; then
+    export LIBGL_ALWAYS_SOFTWARE=1   # Mesa llvmpipe: full GL, on the CPU
+    export GSK_RENDERER=cairo        # GTK4: skip the GL/Vulkan probe entirely
+    export WLR_NO_HARDWARE_CURSORS=1 # visible cursor on wlroots compositors
+    export AQ_NO_HARDWARE_CURSORS=1  # ... and on Hyprland's aquamarine backend
+fi
+unset -f manifest_gpu_needs_software
+"#;
 
 /// The display-manager unit currently set to start at boot — the target of the
 /// `/etc/systemd/system/display-manager.service` alias symlink, e.g.
@@ -760,6 +803,28 @@ mod tests {
         let m = Manifest::from_str(json).unwrap();
         let r = resolve(&m).unwrap().unwrap();
         assert_eq!(r.dm.as_ref().unwrap().service, "greetd.service");
+    }
+
+    #[test]
+    fn gpu_fallback_dropin_covers_the_virtual_gpu_traps() {
+        // The login-time fallback must handle every no-3D virtual driver and
+        // force both the GL and GTK software paths (see the VM boot-test trap:
+        // GTK4 apps + kitty fail on Hyprland while foot/Firefox run fine).
+        for needle in [
+            "vmwgfx",
+            "vboxvideo",
+            "qxl",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "GSK_RENDERER=cairo",
+            "WLR_NO_HARDWARE_CURSORS=1",
+            "AQ_NO_HARDWARE_CURSORS=1",
+        ] {
+            assert!(GPU_FALLBACK.contains(needle), "gpu fallback missing: {needle}");
+        }
+        // virtio-gpu can do real 3D via virgl — it must NOT be in the driver
+        // match list (the prose comment may mention it; the case arm may not).
+        assert!(GPU_FALLBACK.contains("vmwgfx|vboxvideo|qxl|bochs|bochs-drm|cirrus)"));
+        assert!(!GPU_FALLBACK.contains("virtio)") && !GPU_FALLBACK.contains("|virtio"));
     }
 
     #[test]

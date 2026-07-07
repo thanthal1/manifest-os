@@ -159,7 +159,7 @@ Name=Manifest OS theme\n\
 Exec=/usr/local/bin/manifest-theme\n\
 NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\
-OnlyShowIn=GNOME;KDE;XFCE;Cinnamon;MATE;Budgie;LXQt;Unity;Deepin;COSMIC;\n";
+OnlyShowIn=GNOME;KDE;XFCE;Cinnamon;X-Cinnamon;MATE;Budgie;LXQt;Unity;Deepin;COSMIC;\n";
 
 /// Single-quote `s` for safe embedding in a POSIX shell command line.
 /// (Same helper as keybindings.rs — small enough to keep local.)

@@ -156,9 +156,6 @@ pub fn install_packages(
         }
     }
 
-    if pkgs.is_empty() {
-        return Ok(());
-    }
     println!("  installing {} package(s)", pkgs.len());
 
     let mut args = vec![

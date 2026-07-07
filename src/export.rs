@@ -245,19 +245,12 @@ fn pacman_conf_has(section: &str) -> bool {
 /// exports no `kernel` field — it's the default). Prefers a non-`linux`
 /// kernel when several are present.
 fn detect_kernel(installed: &[String]) -> Option<String> {
-    let mut fallback = None;
-    for k in kernel::catalog() {
-        if installed.iter().any(|p| p == k.package) {
-            if k.key == kernel::DEFAULT_KEY {
-                fallback = Some(k.key.to_string());
-            } else {
-                return Some(k.key.to_string());
-            }
-        }
-    }
-    // Only stock `linux` installed → default, omit.
-    let _ = fallback;
-    None
+    // Only stock `linux` installed → it's the default, omit the field.
+    kernel::catalog()
+        .iter()
+        .filter(|k| k.key != kernel::DEFAULT_KEY)
+        .find(|k| installed.iter().any(|p| p == k.package))
+        .map(|k| k.key.to_string())
 }
 
 fn pacman(args: &[&str]) -> String {
@@ -266,6 +259,10 @@ fn pacman(args: &[&str]) -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default()
+}
+
+fn lines_of(s: &str) -> Vec<String> {
+    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +417,4 @@ mod tests {
             assert!(base.iter().any(|b| b == p), "missing {p}");
         }
     }
-}
-
-fn lines_of(s: &str) -> Vec<String> {
-    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }

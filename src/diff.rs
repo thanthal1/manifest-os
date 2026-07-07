@@ -44,11 +44,8 @@ pub fn compute(new: &Manifest, current: Option<&Manifest>) -> Vec<Change> {
     value_change(&mut out, "Time zone", old.system.timezone.as_deref(), new.system.timezone.as_deref());
     value_change(&mut out, "Keyboard", old.system.keymap.as_deref(), new.system.keymap.as_deref());
 
-    if let (Some(o), Some(n)) = wall_pair(old, new) {
-        if o != n {
-            out.push(changed("Wallpaper", &format!("{o} → {n}")));
-        }
-    }
+    let (wall_old, wall_new) = wall_pair(old, new);
+    value_change(&mut out, "Wallpaper", wall_old.as_deref(), wall_new.as_deref());
 
     theme_changes(&mut out, old.theme.as_ref(), new.theme.as_ref());
 
@@ -131,7 +128,11 @@ fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>
     value_change(out, "App theme", o.gtk.as_deref(), n.gtk.as_deref());
     value_change(out, "Icons", o.icons.as_deref(), n.icons.as_deref());
     value_change(out, "Cursor", o.cursor.as_deref(), n.cursor.as_deref());
+    let os = o.cursor_size.map(|s| s.to_string());
+    let ns = n.cursor_size.map(|s| s.to_string());
+    value_change(out, "Cursor size", os.as_deref(), ns.as_deref());
     value_change(out, "Font", o.font.as_deref(), n.font.as_deref());
+    value_change(out, "Monospace font", o.monospace_font.as_deref(), n.monospace_font.as_deref());
     let od = o.dark.map(yesno);
     let nd = n.dark.map(yesno);
     value_change(out, "Dark mode", od, nd);

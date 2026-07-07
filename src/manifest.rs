@@ -42,7 +42,7 @@ pub struct Manifest {
     pub desktop: Option<String>,
 
     /// Override the display manager the desktop recipe picks by default.
-    /// One of: "gdm", "sddm", "lightdm", "greetd", "ly".
+    /// One of: "gdm", "sddm", "lightdm", "greetd", "ly", "cosmic-greeter".
     pub display_manager: Option<String>,
 
     /// Bootloader installation + configuration. When present, the installer
@@ -385,6 +385,9 @@ impl Manifest {
     }
 
     /// Parse a manifest from a JSON string.
+    // Not the `FromStr` trait: that would force every caller to import the
+    // trait, and our error handling is anyhow-based anyway.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(raw: &str) -> Result<Self> {
         let manifest: Manifest =
             serde_json::from_str(raw).context("manifest is not valid JSON for schema v1.0.0")?;

@@ -208,10 +208,8 @@ fn back(app: &mut App) {
 fn network_keys(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Up => app.net_sel = app.net_sel.saturating_sub(1),
-        KeyCode::Down => {
-            if !app.networks.is_empty() {
-                app.net_sel = (app.net_sel + 1).min(app.networks.len() - 1);
-            }
+        KeyCode::Down if !app.networks.is_empty() => {
+            app.net_sel = (app.net_sel + 1).min(app.networks.len() - 1);
         }
         KeyCode::Char('s') => {
             if let Some(dev) = &app.wifi_dev {
@@ -219,11 +217,9 @@ fn network_keys(app: &mut App, key: KeyCode) {
                 app.net_sel = 0;
             }
         }
-        KeyCode::Char('p') => {
-            if !app.networks.is_empty() {
-                app.pass_focus = true;
-                app.wifi_pass.clear();
-            }
+        KeyCode::Char('p') if !app.networks.is_empty() => {
+            app.pass_focus = true;
+            app.wifi_pass.clear();
         }
         KeyCode::Enter => {
             // Online or chose to proceed -> next.
@@ -240,21 +236,15 @@ fn disk_keys(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Down => {
             let dir_down = key == KeyCode::Down;
             match app.disk_field {
-                0 => {
-                    if !app.disks.is_empty() {
-                        app.disk_sel = move_sel(app.disk_sel, app.disks.len(), dir_down);
-                    }
+                0 if !app.disks.is_empty() => {
+                    app.disk_sel = move_sel(app.disk_sel, app.disks.len(), dir_down);
                 }
                 1 => app.fs_idx ^= 1,
                 2 => app.swap_idx ^= 1,
                 _ => {}
             }
         }
-        KeyCode::Enter => {
-            if !app.disks.is_empty() {
-                app.screen = Screen::Manifest;
-            }
-        }
+        KeyCode::Enter if !app.disks.is_empty() => app.screen = Screen::Manifest,
         _ => {}
     }
 }

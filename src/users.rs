@@ -47,9 +47,15 @@ fn create(u: &UserSpec, ctx: &Ctx) -> Result<()> {
 fn grant_sudo(name: &str, ctx: &Ctx) -> Result<()> {
     println!("  · granting sudo to {name}");
     let path = format!("/etc/sudoers.d/10-{name}");
-    ctx.write_root(&path, &format!("{name} ALL=(ALL:ALL) ALL\n"))?;
-    ctx.sudo("chmod", &["0440", &path])?;
-    // Reject a syntactically invalid sudoers file rather than break sudo.
-    ctx.sudo("visudo", &["-cf", &path])?;
-    Ok(())
+    // Stage under a dot-suffixed name first — sudo ignores files whose name
+    // contains a '.', so a file that fails validation never becomes live
+    // sudoers config (a broken live drop-in disables sudo system-wide).
+    let staged = format!("{path}.tmp");
+    ctx.write_root(&staged, &format!("{name} ALL=(ALL:ALL) ALL\n"))?;
+    ctx.sudo("chmod", &["0440", &staged])?;
+    if let Err(e) = ctx.sudo("visudo", &["-cf", &staged]) {
+        let _ = ctx.sudo("rm", &["-f", &staged]);
+        return Err(e);
+    }
+    ctx.sudo("mv", &[staged.as_str(), path.as_str()])
 }
