@@ -1,7 +1,7 @@
 //! Cross-desktop wallpaper.
 //!
 //! Setting "the wallpaper" is wildly inconsistent across environments — GNOME
-//! uses gsettings, KDE has `plasma-apply-wallpaper`, Xfce uses xfconf, MATE a
+//! uses gsettings, KDE has `plasma-apply-wallpaperimage`, Xfce uses xfconf, MATE a
 //! different gsettings schema, and bare window managers need a daemon (swaybg on
 //! Wayland, feh on X11). None of that can run during install, because there is
 //! no graphical session yet.
@@ -131,7 +131,10 @@ case "$de" in
     gsettings set org.mate.background picture-options "$gopt" 2>/dev/null ;;
   *kde*|*plasma*)
     once
-    plasma-apply-wallpaper "$IMG" 2>/dev/null ;;
+    # The Plasma CLI setter is `plasma-apply-wallpaperimage` (there is no
+    # `plasma-apply-wallpaper`). It needs a running plasmashell, which is up by
+    # the time XDG autostart fires.
+    plasma-apply-wallpaperimage "$IMG" 2>/dev/null ;;
   *xfce*)
     once
     for p in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep 'last-image$'); do
@@ -167,3 +170,31 @@ Exec=/usr/local/bin/manifest-wallpaper\n\
 NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\
 OnlyShowIn=GNOME;KDE;XFCE;Cinnamon;X-Cinnamon;MATE;Budgie;LXQt;LXDE;Unity;Deepin;COSMIC;\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plasma_uses_the_real_cli_setter() {
+        // Regression: the KDE setter is `plasma-apply-wallpaperimage`; a bare
+        // `plasma-apply-wallpaper` silently no-ops (command doesn't exist) and
+        // the wallpaper never applies on Plasma.
+        assert!(SCRIPT.contains("plasma-apply-wallpaperimage"));
+        assert!(!SCRIPT.contains("plasma-apply-wallpaper \""));
+    }
+
+    #[test]
+    fn every_desktop_case_has_a_setter() {
+        for de in ["gnome", "cinnamon", "mate", "kde", "plasma", "xfce", "lxqt", "lxde"] {
+            assert!(SCRIPT.contains(de), "no wallpaper branch for {de}");
+        }
+    }
+
+    #[test]
+    fn extension_falls_back_to_jpg_for_unknown() {
+        assert_eq!(extension_of("https://x/bg.png?v=2"), "png");
+        assert_eq!(extension_of("/path/pic.WEBP"), "webp");
+        assert_eq!(extension_of("https://x/download?id=7"), "jpg");
+    }
+}
