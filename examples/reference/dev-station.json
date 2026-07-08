@@ -3,7 +3,7 @@
   "meta": {
     "name": "Dev Station (dotfiles)",
     "author": "Manifest OS",
-    "description": "A developer Hyprland setup whose look comes from a cloned dotfiles repo, with machine-specific bits layered on via `snippets`. Two shell hooks remain (Flatpak + default browser) — both tracked in examples/HOOKS-TO-PROMOTE.md as candidates for first-class blocks. Point `dotfiles.source` at your own repo.",
+    "description": "A developer Hyprland setup whose look comes from a cloned dotfiles repo, with machine-specific bits layered on via `snippets`, `flatpak`, and `defaults`. Point `dotfiles.source` at your own repo.",
     "tags": [
       "hyprland",
       "dotfiles",
@@ -62,7 +62,6 @@
     "fastfetch",
     "docker",
     "docker-compose",
-    "flatpak",
     "grim",
     "slurp",
     "wl-clipboard",
@@ -82,6 +81,20 @@
     "system": [
       "docker"
     ]
+  },
+  "flatpak": {
+    "remotes": [
+      {
+        "name": "flathub",
+        "url": "https://flathub.org/repo/flathub.flatpakrepo"
+      }
+    ],
+    "apps": [
+      "com.visualstudio.code"
+    ]
+  },
+  "defaults": {
+    "browser": "firefox.desktop"
   },
   "dotfiles": {
     "source": "https://github.com/you/dotfiles",
@@ -115,10 +128,5 @@
   "wallpaper": {
     "source": "https://raw.githubusercontent.com/zhichaoh/catppuccin-wallpapers/main/os/arch-black-4k.png",
     "mode": "fill"
-  },
-  "post_install": [
-    "flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo",
-    "flatpak install -y --noninteractive flathub com.visualstudio.code || true",
-    "sudo -u dev xdg-settings set default-web-browser firefox.desktop || true"
-  ]
+  }
 }

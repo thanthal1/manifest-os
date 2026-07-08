@@ -48,6 +48,8 @@ pub fn compute(new: &Manifest, current: Option<&Manifest>) -> Vec<Change> {
     value_change(&mut out, "Wallpaper", wall_old.as_deref(), wall_new.as_deref());
 
     theme_changes(&mut out, old.theme.as_ref(), new.theme.as_ref());
+    flatpak_changes(&mut out, old, new);
+    defaults_changes(&mut out, old, new);
 
     if old.keybindings.len() != new.keybindings.len() {
         out.push(changed(
@@ -138,6 +140,41 @@ fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>
     value_change(out, "Dark mode", od, nd);
 }
 
+fn flatpak_changes(out: &mut Vec<Change>, old: &Manifest, new: &Manifest) {
+    let old_apps = old.flatpak.as_ref().map(|f| f.apps.clone()).unwrap_or_default();
+    let new_apps = new.flatpak.as_ref().map(|f| f.apps.clone()).unwrap_or_default();
+    list_changes(out, "Flatpak apps", &old_apps, &new_apps);
+
+    let old_remotes: Vec<String> = old
+        .flatpak
+        .as_ref()
+        .map(|f| f.remotes.iter().map(|r| r.name.clone()).collect())
+        .unwrap_or_default();
+    let new_remotes: Vec<String> = new
+        .flatpak
+        .as_ref()
+        .map(|f| f.remotes.iter().map(|r| r.name.clone()).collect())
+        .unwrap_or_default();
+    list_changes(out, "Flatpak remotes", &old_remotes, &new_remotes);
+}
+
+fn defaults_changes(out: &mut Vec<Change>, old: &Manifest, new: &Manifest) {
+    value_change(
+        out,
+        "Default browser",
+        old.defaults.as_ref().and_then(|d| d.browser.as_deref()),
+        new.defaults.as_ref().and_then(|d| d.browser.as_deref()),
+    );
+    let old_mime = old.defaults.as_ref().map(|d| d.mime.len()).unwrap_or(0);
+    let new_mime = new.defaults.as_ref().map(|d| d.mime.len()).unwrap_or(0);
+    if old_mime != new_mime {
+        out.push(changed(
+            "Default apps",
+            &format!("{old_mime} -> {new_mime} MIME association(s)"),
+        ));
+    }
+}
+
 fn wall_pair(old: &Manifest, new: &Manifest) -> (Option<String>, Option<String>) {
     (old.wallpaper.as_ref().map(wallpaper_src), new.wallpaper.as_ref().map(wallpaper_src))
 }
@@ -197,5 +234,28 @@ mod tests {
         run(&new, None);
         let old = parse(r#"{"schema_version":"1.0.0","desktop":"niri"}"#);
         run(&new, Some(&old));
+    }
+
+    #[test]
+    fn flatpak_and_defaults_changes() {
+        let old = parse(r#"{"schema_version":"1.0.0"}"#);
+        let new = parse(
+            r#"{
+                "schema_version":"1.0.0",
+                "flatpak":{
+                    "remotes":[{"name":"flathub","url":"https://flathub.org/repo/flathub.flatpakrepo"}],
+                    "apps":["com.visualstudio.code"]
+                },
+                "defaults":{
+                    "browser":"firefox.desktop",
+                    "mime":{"application/pdf":"org.gnome.Evince.desktop"}
+                }
+            }"#,
+        );
+        let changes = compute(&new, Some(&old));
+        assert!(changes.iter().any(|c| c.category == "Flatpak apps" && c.detail == "com.visualstudio.code"));
+        assert!(changes.iter().any(|c| c.category == "Flatpak remotes" && c.detail == "flathub"));
+        assert!(changes.iter().any(|c| c.category == "Default browser" && c.detail.contains("firefox.desktop")));
+        assert!(changes.iter().any(|c| c.category == "Default apps" && c.detail == "0 -> 1 MIME association(s)"));
     }
 }

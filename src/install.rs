@@ -11,11 +11,13 @@
 //! here — those belong to the ISO's TUI layer, never the manifest.
 
 use crate::boot;
+use crate::defaults;
 use crate::desktop;
 use crate::dotfiles;
 use crate::exec::Ctx;
 use crate::export;
 use crate::files;
+use crate::flatpak;
 use crate::keybindings;
 use crate::kernel;
 use crate::manifest::Manifest;
@@ -90,6 +92,11 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     }
     pacman::install_packages(manifest, kernel, &desktop_pkgs, ctx)?;
 
+    if let Some(fp) = &manifest.flatpak {
+        step("Installing Flatpak apps");
+        flatpak::apply(fp, ctx)?;
+    }
+
     if !manifest.system.is_empty() {
         step("Configuring system");
         system::apply(&manifest.system, ctx)?;
@@ -159,6 +166,11 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     if !manifest.snippets.is_empty() {
         step("Inserting config snippets");
         snippets::apply(&manifest.snippets, primary_user, ctx)?;
+    }
+
+    if let Some(defaults_cfg) = &manifest.defaults {
+        step("Setting default applications");
+        defaults::apply(defaults_cfg, primary_user, ctx)?;
     }
 
     enable_services(manifest, ctx)?;

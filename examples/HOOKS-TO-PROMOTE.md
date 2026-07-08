@@ -1,33 +1,32 @@
-# Hooks to promote to first-class blocks
+# Hooks Promoted To First-Class Blocks
 
 The manifest prefers **declared state** over shell (see the README's
 "Declarative config (instead of hooks)"). The bundled examples try to use *zero*
-`pre_install` / `post_install` hooks — everything goes through `files`,
-`snippets`, `theme`, `wallpaper`, `keybindings`, `desktop`, `users`, `system`,
-`services`.
+`pre_install` / `post_install` hooks. Everything should go through declarative
+blocks such as `files`, `snippets`, `theme`, `wallpaper`, `keybindings`,
+`desktop`, `users`, `system`, `services`, `flatpak`, and `defaults`.
 
-When an example still needs a shell hook, it's recorded here so the capability
-can later become a first-class manifest block (the same way `files`, `snippets`,
-`theme`, `wallpaper`, and `keybindings` each replaced a class of hook).
+When an example needs a shell hook, record it here so the capability can later
+become a first-class manifest block.
 
 | Status | Example uses zero hooks? |
 |---|---|
-| `hyprland-pro.json` | ✅ zero |
-| `sway-pro.json` | ✅ zero |
-| `dev-station.json` | ⚠️ 3 hook lines (2 features below) |
+| `hyprland-pro.json` | yes |
+| `sway-pro.json` | yes |
+| `dev-station.json` | yes |
 
 ---
 
-## 1. Flatpak / Flathub apps  → proposed `flatpak` block
+## 1. Flatpak / Flathub Apps -> `flatpak`
 
-**Hook used today** (`dev-station.json` `post_install`):
+Former hook in `dev-station.json`:
 
 ```sh
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install -y --noninteractive flathub com.visualstudio.code || true
 ```
 
-**Proposed schema:**
+Schema:
 
 ```json
 "flatpak": {
@@ -38,21 +37,25 @@ flatpak install -y --noninteractive flathub com.visualstudio.code || true
 }
 ```
 
-**Behavior:** ensure `flatpak` is installed, add each remote
-(`--if-not-exists`), install each app id (`-y --noninteractive`). Idempotent —
-safe to re-run on sync. `flathub` could be the implicit default remote so
-`"apps": [...]` alone works. New module `flatpak.rs`, wired into `install::apply`
-after packages; add a `Flatpak` field to `Manifest`.
+Implemented behavior:
 
-## 2. Default applications / MIME associations  → proposed `defaults` block
+- Ensures `flatpak` is installed.
+- Adds each remote with `remote-add --system --if-not-exists`.
+- Installs or updates each app id system-wide with `install --system -y --noninteractive --or-update`.
+- Adds Flathub implicitly when apps are declared without remotes.
 
-**Hook used today** (`dev-station.json` `post_install`):
+Implementation: `src/flatpak.rs`, wired into `install::apply` after package
+installation.
+
+## 2. Default Applications / MIME Associations -> `defaults`
+
+Former hook in `dev-station.json`:
 
 ```sh
 sudo -u dev xdg-settings set default-web-browser firefox.desktop
 ```
 
-**Proposed schema:**
+Schema:
 
 ```json
 "defaults": {
@@ -64,22 +67,22 @@ sudo -u dev xdg-settings set default-web-browser firefox.desktop
 }
 ```
 
-**Behavior:** run as the primary user (like `theme`/`keybindings` do): `browser`
-→ `xdg-settings set default-web-browser`; each `mime` pair →
-`xdg-mime default <app> <type>`. Writes `~/.config/mimeapps.list`, so it could
-alternatively be implemented as a generated `files` entry (no shell at all) —
-worth doing, since that removes the last hook from `dev-station.json`. New
-module `defaults.rs` (or fold into `files`), `Defaults` field on `Manifest`,
-applied at user level after `files`.
+Implemented behavior:
+
+- Writes the primary user's `~/.config/mimeapps.list` directly.
+- Expands `browser` to standard browser handlers.
+- Adds every `mime` pair as a `[Default Applications]` entry.
+
+Implementation: `src/defaults.rs`, wired into `install::apply` after `files`
+and `snippets`.
 
 ---
 
-### Notes / non-candidates
+## Notes / Non-Candidates
 
 - **Dotfiles** are already first-class (`dotfiles` block, `dev-station.json`).
-- **git global config**, **shell prompt**, **aliases** need no hook — they're
-  plain `files` writes (`~/.gitconfig`, `~/.config/starship.toml`, `~/.zshrc`).
-- **Default shell** is `users[].shell` (no `chsh` hook).
+- **Git global config**, **shell prompt**, and **aliases** need no hook; they
+  are plain `files` writes.
+- **Default shell** is `users[].shell`.
 - **Wallpaper** is the `wallpaper` block; on window managers the WM config calls
-  `manifest-wallpaper` (see `hyprland-pro.json` / the `snippets` in
-  `dev-station.json`).
+  `manifest-wallpaper`.

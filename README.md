@@ -86,7 +86,13 @@ otherwise be `post_install` commands have first-class blocks the CLI executes:
 "files": [
   { "path": "/etc/sysctl.d/99-swappiness.conf", "content": "vm.swappiness=10\n", "mode": "644" },
   { "path": "~/.config/foo/bar.conf", "content": "..." }
-]
+],
+"flatpak": {
+  "apps": ["com.visualstudio.code"]
+},
+"defaults": {
+  "browser": "firefox.desktop"
+}
 ```
 
 - **`users`** — creates accounts (idempotent), sets groups/shell, drops a
@@ -95,6 +101,10 @@ otherwise be `post_install` commands have first-class blocks the CLI executes:
 - **`files`** — writes a file verbatim: `~/...` as the user, absolute paths as
   root, creating parent dirs and applying `mode`/`owner`. Replaces
   `mkdir`/`echo >`/`cat >` hooks.
+- **`flatpak`** - installs Flatpak if needed, adds remotes such as Flathub, and
+  installs or updates declared app ids.
+- **`defaults`** - writes the primary user's `mimeapps.list` for browser and
+  MIME defaults without needing a desktop session.
 
 `pre_install` / `post_install` remain only as an escape hatch for the genuinely
 one-off.

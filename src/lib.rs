@@ -4,12 +4,14 @@
 //! is the orchestration of standard Arch tools (pacman, paru, systemctl, …).
 
 pub mod boot;
+pub mod defaults;
 pub mod desktop;
 pub mod diff;
 pub mod dotfiles;
 pub mod exec;
 pub mod export;
 pub mod files;
+pub mod flatpak;
 pub mod history;
 pub mod install;
 pub mod installer;

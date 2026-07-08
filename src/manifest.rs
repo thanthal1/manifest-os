@@ -74,6 +74,12 @@ pub struct Manifest {
     #[serde(default)]
     pub snippets: Vec<Snippet>,
 
+    /// Flatpak remotes and apps to install system-wide.
+    pub flatpak: Option<Flatpak>,
+
+    /// Default applications and MIME associations for the primary user.
+    pub defaults: Option<Defaults>,
+
     /// Desktop wallpaper, applied across whatever environment the manifest sets
     /// up (GNOME, KDE, Xfce, a window manager, …). Either a bare string source
     /// (`"wallpaper": "https://…/bg.jpg"`) or an object with a fit mode
@@ -180,6 +186,43 @@ pub struct Snippet {
     /// Optional section to insert into (brace block or INI `[section]`).
     pub section: Option<String>,
     pub content: String,
+}
+
+/// Flatpak setup: add remotes, then install app ids.
+#[derive(Debug, Deserialize)]
+pub struct Flatpak {
+    #[serde(default)]
+    pub remotes: Vec<FlatpakRemote>,
+    #[serde(default)]
+    pub apps: Vec<String>,
+}
+
+impl Flatpak {
+    pub fn is_empty(&self) -> bool {
+        self.remotes.is_empty() && self.apps.is_empty()
+    }
+}
+
+/// A Flatpak remote, e.g. Flathub.
+#[derive(Debug, Deserialize)]
+pub struct FlatpakRemote {
+    pub name: String,
+    pub url: String,
+}
+
+/// User-level default app choices. `browser` expands to the standard browser
+/// MIME handlers; `mime` maps arbitrary MIME types to desktop file ids.
+#[derive(Debug, Deserialize)]
+pub struct Defaults {
+    pub browser: Option<String>,
+    #[serde(default)]
+    pub mime: std::collections::BTreeMap<String, String>,
+}
+
+impl Defaults {
+    pub fn is_empty(&self) -> bool {
+        self.browser.is_none() && self.mime.is_empty()
+    }
 }
 
 /// A wallpaper source, accepted as either a bare string or an object with a
