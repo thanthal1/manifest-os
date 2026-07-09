@@ -371,18 +371,57 @@ impl Designer {
 
     fn desktop_group(self: &Rc<Self>) -> adw::PreferencesGroup {
         let g = adw::PreferencesGroup::builder().title("Desktop").build();
-        let doc = self.doc.borrow();
-        let mut desktops: Vec<(String, String)> = vec![(String::new(), "(none)".into())];
-        desktops.extend(
-            manifest::desktop::catalog()
-                .iter()
-                .map(|r| (r.key.to_string(), r.display_name.to_string())),
-        );
-        let cur = jstr(&doc, &["desktop"]);
-        g.add(&self.combo_row("Desktop / window manager", &desktops, &cur, vec!["desktop".into()]));
+        let cur = jstr(&self.doc.borrow(), &["desktop"]);
+
+        // Complete desktop environments first, then bare window managers. The
+        // distinction is load-bearing: a full DE boots to a usable desktop,
+        // but a WM installs with no panel, launcher or keybindings — you need
+        // a matching config (a Segment, or Designer/`files` edits) or you land
+        // on a blank screen. WM entries are labelled so the split is obvious.
+        let mut options: Vec<(String, String)> = vec![(String::new(), "(none)".into())];
+        for r in manifest::desktop::catalog().iter().filter(|r| !r.is_wm()) {
+            options.push((r.key.to_string(), r.display_name.to_string()));
+        }
+        for r in manifest::desktop::catalog().iter().filter(|r| r.is_wm()) {
+            options.push((r.key.to_string(), format!("{} — window manager", r.display_name)));
+        }
+
+        // Warning shown only while a window manager is the current choice.
+        let warn = adw::ActionRow::builder()
+            .title("Window managers need their own setup")
+            .subtitle(
+                "A bare window manager has no panel, launcher or keybindings on its own. \
+                 Add a matching setup from the Segments library — or drop config files onto \
+                 the Designer targets below — so it's usable the first time you log in.",
+            )
+            .build();
+        warn.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+        warn.set_visible(manifest::desktop::is_window_manager(&cur));
+
+        // The combo, built inline (not via combo_row) so its change handler can
+        // also toggle the warning row above.
+        let names: Vec<&str> = options.iter().map(|(_, d)| d.as_str()).collect();
+        let model = gtk::StringList::new(&names);
+        let combo = adw::ComboRow::builder().title("Desktop / window manager").model(&model).build();
+        let keys: Vec<String> = options.iter().map(|(k, _)| k.clone()).collect();
+        let sel = keys.iter().position(|k| *k == cur).unwrap_or(0);
+        combo.set_selected(sel as u32); // set before connecting so it doesn't fire
+        {
+            let this = self.clone();
+            let warn = warn.clone();
+            combo.connect_selected_notify(move |r| {
+                if let Some(k) = keys.get(r.selected() as usize) {
+                    jset_str(&mut this.doc.borrow_mut(), &["desktop"], k);
+                    warn.set_visible(manifest::desktop::is_window_manager(k));
+                }
+            });
+        }
+
+        g.add(&combo);
+        g.add(&warn);
         g.add(&self.entry_row(
             "Display manager (optional)",
-            &jstr(&doc, &["display_manager"]),
+            &jstr(&self.doc.borrow(), &["display_manager"]),
             vec!["display_manager".into()],
         ));
         g

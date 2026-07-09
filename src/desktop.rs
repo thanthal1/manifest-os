@@ -95,6 +95,34 @@ const DESKTOP_BASE: &[&str] = &[
 /// System services every graphical system wants enabled.
 const DESKTOP_BASE_SERVICES: &[&str] = &["NetworkManager"];
 
+/// The catalog keys that are **bare window managers** — a compositor/WM with
+/// no panel, launcher, notification daemon or keybindings of its own, so it
+/// needs a user-provided config (a Segment, or Designer/`files` edits) to be
+/// usable. Everything else in the catalog is a **complete desktop
+/// environment**. This is the single source of truth for the DE↔WM split
+/// (the wallpaper daemon logic and the Snapshots app both consult it).
+pub const WINDOW_MANAGERS: &[&str] = &[
+    // Wayland
+    "hyprland", "sway", "niri", "river", "labwc", "wayfire",
+    // X11
+    "i3", "bspwm", "awesome", "qtile", "openbox", "xmonad",
+    "herbstluftwm", "fluxbox", "icewm",
+];
+
+/// Whether a desktop key names a bare window manager (vs. a complete DE).
+/// Case-insensitive. Unknown keys are treated as not-a-WM.
+pub fn is_window_manager(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    WINDOW_MANAGERS.contains(&k.as_str())
+}
+
+impl Recipe {
+    /// Whether this recipe is a bare window manager (see [`is_window_manager`]).
+    pub fn is_wm(&self) -> bool {
+        is_window_manager(self.key)
+    }
+}
+
 /// Look up a recipe by key (case-insensitive).
 pub fn recipe(key: &str) -> Option<&'static Recipe> {
     let k = key.to_ascii_lowercase();
@@ -825,6 +853,23 @@ mod tests {
         // match list (the prose comment may mention it; the case arm may not).
         assert!(GPU_FALLBACK.contains("vmwgfx|vboxvideo|qxl|bochs|bochs-drm|cirrus)"));
         assert!(!GPU_FALLBACK.contains("virtio)") && !GPU_FALLBACK.contains("|virtio"));
+    }
+
+    #[test]
+    fn every_catalog_entry_is_classified_de_or_wm() {
+        // The Snapshots app splits the picker into complete DEs vs. bare WMs;
+        // a new catalog entry that no one classified would land in the wrong
+        // bucket. Sanity-check the split covers the whole catalog.
+        let wms = CATALOG.iter().filter(|r| r.is_wm()).count();
+        let des = CATALOG.iter().filter(|r| !r.is_wm()).count();
+        assert_eq!(wms, WINDOW_MANAGERS.len(), "a WINDOW_MANAGERS key isn't in the catalog (or vice-versa)");
+        assert!(des >= 8, "expected the full DEs (gnome, plasma, xfce, …) to outnumber this");
+        assert_eq!(wms + des, CATALOG.len());
+        // Spot-check the split lands where humans expect.
+        assert!(is_window_manager("hyprland") && is_window_manager("niri"));
+        assert!(!is_window_manager("gnome") && !is_window_manager("plasma"));
+        assert!(!is_window_manager("cosmic")); // a full DE, not a WM
+        assert!(!is_window_manager("unknown-thing"));
     }
 
     #[test]

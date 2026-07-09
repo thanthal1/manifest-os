@@ -28,13 +28,6 @@ const DIR: &str = "/usr/share/backgrounds/manifest";
 const SCRIPT_PATH: &str = "/usr/local/bin/manifest-wallpaper";
 const AUTOSTART_PATH: &str = "/etc/xdg/autostart/manifest-wallpaper.desktop";
 
-/// Window-manager desktop keys (no XDG-autostart processing of their own; they
-/// rely on a wallpaper daemon launched from their config).
-const WM_KEYS: &[&str] = &[
-    "hyprland", "sway", "niri", "river", "labwc", "wayfire", "i3", "bspwm",
-    "awesome", "qtile", "openbox", "xmonad", "herbstluftwm", "fluxbox", "icewm",
-];
-
 pub fn apply(w: &Wallpaper, desktop: Option<&str>, ctx: &Ctx) -> Result<()> {
     let src = w.source();
     let mode = w.mode();
@@ -65,7 +58,7 @@ pub fn apply(w: &Wallpaper, desktop: Option<&str>, ctx: &Ctx) -> Result<()> {
     //    config will call (`manifest-wallpaper` → swaybg/feh) is present.
     //    Best-effort: a missing daemon shouldn't fail the whole install.
     if let Some(key) = desktop {
-        if WM_KEYS.contains(&key) {
+        if crate::desktop::is_window_manager(key) {
             let wayland = matches!(
                 crate::desktop::recipe(key).map(|r| r.session),
                 Some(crate::desktop::Session::Wayland)
