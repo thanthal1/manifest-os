@@ -14,6 +14,9 @@
     "version": "1.0.0",
     "license": "free"
   },
+  "variables": {
+    "accent": "#cba6f7"
+  },
   "system": {
     "hostname": "sway-station",
     "locale": "en_US.UTF-8",
@@ -49,6 +52,7 @@
   "display_manager": "greetd",
   "packages": [
     "firefox",
+    "fuzzel",
     "zsh",
     "starship",
     "eza",
@@ -82,7 +86,7 @@
     {
       "path": "/home/dev/.config/sway/config",
       "owner": "dev:dev",
-      "content": "# Managed by Manifest OS — Sway\nset $mod Mod4\nset $term foot\nset $menu wmenu-run\n\noutput * bg #1e1e2e solid_color\n\n# Autostart (waybar is launched by the bar block below - do not exec it too)\nexec mako\nexec manifest-wallpaper\nexec nm-applet --indicator\nexec swayidle -w timeout 300 'swaylock -f' timeout 600 'swaymsg \"output * dpms off\"' resume 'swaymsg \"output * dpms on\"'\n\ninput \"type:touchpad\" {\n    tap enabled\n    natural_scroll enabled\n}\n\n# Look & feel\ngaps inner 8\ngaps outer 4\ndefault_border pixel 2\nclient.focused #cba6f7 #cba6f7 #1e1e2e #89b4fa #cba6f7\nfont pango:JetBrainsMono Nerd Font 10\n\n# Apps\nbindsym $mod+Return exec $term\nbindsym $mod+d exec $menu\nbindsym $mod+b exec firefox\nbindsym $mod+q kill\nbindsym $mod+Shift+e exit\nbindsym $mod+f fullscreen\nbindsym $mod+space floating toggle\nbindsym $mod+l exec swaylock -f\n\n# Focus\nbindsym $mod+Left focus left\nbindsym $mod+Right focus right\nbindsym $mod+Up focus up\nbindsym $mod+Down focus down\n\n# Move\nbindsym $mod+Shift+Left move left\nbindsym $mod+Shift+Right move right\nbindsym $mod+Shift+Up move up\nbindsym $mod+Shift+Down move down\n\n# Workspaces\nbindsym $mod+1 workspace number 1\nbindsym $mod+2 workspace number 2\nbindsym $mod+3 workspace number 3\nbindsym $mod+4 workspace number 4\nbindsym $mod+Shift+1 move container to workspace number 1\nbindsym $mod+Shift+2 move container to workspace number 2\nbindsym $mod+Shift+3 move container to workspace number 3\nbindsym $mod+Shift+4 move container to workspace number 4\n\n# Screenshots + media keys\nbindsym Print exec grim -g \"$(slurp)\" ~/Pictures/screenshot-$(date +%s).png\nbindsym XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\nbindsym XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\nbindsym XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\nbindsym XF86MonBrightnessUp exec brightnessctl set +5%\nbindsym XF86MonBrightnessDown exec brightnessctl set 5%-\n\nbar {\n    swaybar_command waybar\n}\n"
+      "content": "# Managed by Manifest OS — Sway\nset $mod Mod4\nset $term foot\nset $menu fuzzel\n\noutput * bg #1e1e2e solid_color\n\n# Autostart (waybar is launched by the bar block below - do not exec it too)\nexec mako\nexec manifest-wallpaper\nexec nm-applet --indicator\nexec swayidle -w timeout 300 'swaylock -f' timeout 600 'swaymsg \"output * dpms off\"' resume 'swaymsg \"output * dpms on\"'\n\ninput \"type:touchpad\" {\n    tap enabled\n    natural_scroll enabled\n}\n\n# Look & feel\ngaps inner 8\ngaps outer 4\ndefault_border pixel 2\nclient.focused {{accent}} {{accent}} #1e1e2e #89b4fa {{accent}}\nfont pango:JetBrainsMono Nerd Font 10\n\n# Apps\nbindsym $mod+Return exec $term\nbindsym $mod+d exec $menu\nbindsym $mod+b exec firefox\nbindsym $mod+q kill\nbindsym $mod+Shift+e exit\nbindsym $mod+f fullscreen\nbindsym $mod+space floating toggle\nbindsym $mod+l exec swaylock -f\n\n# Focus\nbindsym $mod+Left focus left\nbindsym $mod+Right focus right\nbindsym $mod+Up focus up\nbindsym $mod+Down focus down\n\n# Move\nbindsym $mod+Shift+Left move left\nbindsym $mod+Shift+Right move right\nbindsym $mod+Shift+Up move up\nbindsym $mod+Shift+Down move down\n\n# Workspaces\nbindsym $mod+1 workspace number 1\nbindsym $mod+2 workspace number 2\nbindsym $mod+3 workspace number 3\nbindsym $mod+4 workspace number 4\nbindsym $mod+Shift+1 move container to workspace number 1\nbindsym $mod+Shift+2 move container to workspace number 2\nbindsym $mod+Shift+3 move container to workspace number 3\nbindsym $mod+Shift+4 move container to workspace number 4\n\n# Screenshots + media keys\nbindsym Print exec grim -g \"$(slurp)\" ~/Pictures/screenshot-$(date +%s).png\nbindsym XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\nbindsym XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\nbindsym XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\nbindsym XF86MonBrightnessUp exec brightnessctl set +5%\nbindsym XF86MonBrightnessDown exec brightnessctl set 5%-\n\nbar {\n    swaybar_command waybar\n}\n"
     },
     {
       "path": "/home/dev/.config/waybar/config.jsonc",
@@ -92,12 +96,12 @@
     {
       "path": "/home/dev/.config/waybar/style.css",
       "owner": "dev:dev",
-      "content": "/* Managed by Manifest OS — waybar (Catppuccin Mocha) */\n* {\n  font-family: \"JetBrainsMono Nerd Font\", monospace;\n  font-size: 13px;\n  border: none;\n  border-radius: 0;\n  min-height: 0;\n}\nwindow#waybar {\n  background: rgba(30, 30, 46, 0.92);\n  color: #cdd6f4;\n}\n#workspaces button {\n  padding: 0 8px;\n  color: #6c7086;\n  background: transparent;\n}\n#workspaces button.active {\n  color: #cba6f7;\n}\n#workspaces button:hover {\n  color: #cdd6f4;\n  background: rgba(203, 166, 247, 0.15);\n}\n#clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray, #window {\n  padding: 0 10px;\n}\n#clock { color: #89b4fa; font-weight: bold; }\n#battery.warning { color: #f9e2af; }\n#battery.critical { color: #f38ba8; }\n#network.disconnected { color: #f38ba8; }\n"
+      "content": "/* Managed by Manifest OS — waybar (Catppuccin Mocha) */\n* {\n  font-family: \"JetBrainsMono Nerd Font\", monospace;\n  font-size: 13px;\n  border: none;\n  border-radius: 0;\n  min-height: 0;\n}\nwindow#waybar {\n  background: rgba(30, 30, 46, 0.92);\n  color: #cdd6f4;\n}\n#workspaces button {\n  padding: 0 8px;\n  color: #6c7086;\n  background: transparent;\n}\n#workspaces button.active {\n  color: {{accent}};\n}\n#workspaces button:hover {\n  color: #cdd6f4;\n  background: rgba(203, 166, 247, 0.15);\n}\n#clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray, #window {\n  padding: 0 10px;\n}\n#clock { color: #89b4fa; font-weight: bold; }\n#battery.warning { color: #f9e2af; }\n#battery.critical { color: #f38ba8; }\n#network.disconnected { color: #f38ba8; }\n"
     },
     {
       "path": "/home/dev/.config/mako/config",
       "owner": "dev:dev",
-      "content": "# Managed by Manifest OS — mako\nfont=JetBrainsMono Nerd Font 10\nbackground-color=#1e1e2e\ntext-color=#cdd6f4\nborder-color=#cba6f7\nborder-size=2\nborder-radius=10\npadding=12\ndefault-timeout=6000\nmax-visible=5\n\n[urgency=critical]\nborder-color=#f38ba8\ndefault-timeout=0\n"
+      "content": "# Managed by Manifest OS — mako\nfont=JetBrainsMono Nerd Font 10\nbackground-color=#1e1e2e\ntext-color=#cdd6f4\nborder-color={{accent}}\nborder-size=2\nborder-radius=10\npadding=12\ndefault-timeout=6000\nmax-visible=5\n\n[urgency=critical]\nborder-color=#f38ba8\ndefault-timeout=0\n"
     },
     {
       "path": "/home/dev/.config/foot/foot.ini",
@@ -113,6 +117,24 @@
       "path": "/home/dev/.zshrc",
       "owner": "dev:dev",
       "content": "# Managed by Manifest OS\nsetopt AUTO_CD INTERACTIVE_COMMENTS\nHISTFILE=~/.zsh_history\nHISTSIZE=10000\nSAVEHIST=10000\nsetopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS\n\n# Sensible aliases (eza/bat are installed in packages)\nalias ls='eza --group-directories-first --icons'\nalias ll='eza -lah --group-directories-first --icons'\nalias tree='eza --tree'\nalias cat='bat --paging=never'\nalias grep='grep --color=auto'\nalias ..='cd ..'\nalias ...='cd ../..'\n\nautoload -Uz compinit && compinit\nzstyle ':completion:*' menu select\n\n# Prompt (starship is installed in packages)\neval \"$(starship init zsh)\"\n"
+    }
+  ],
+  "conditional": [
+    {
+      "when": {
+        "gpu": "nvidia"
+      },
+      "packages": [
+        "nvidia-dkms",
+        "nvidia-utils",
+        "egl-wayland"
+      ],
+      "files": [
+        {
+          "path": "/etc/modprobe.d/nvidia.conf",
+          "content": "options nvidia_drm modeset=1\n"
+        }
+      ]
     }
   ]
 }
