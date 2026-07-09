@@ -65,6 +65,9 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
   # The four flagship desktops (in the installer picker) get first-class DE
   # coverage; feature-demo + workhorse manifests now live under examples/
   # reference/ on the ISO, so scenarios point at `reference/<name>`.
+  # NOTE: reference manifests are opt-in on the ISO now — build the audit ISO
+  # with `MANIFEST_BUNDLE_REFERENCE=1 sudo ./iso/build.sh` or these
+  # `reference/<name>` scenarios won't find their manifest on the image.
   SCENARIOS=(
     minimal:reference/minimal:erase
     bootstrap:reference/bootstrap:erase

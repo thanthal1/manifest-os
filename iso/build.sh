@@ -75,12 +75,19 @@ echo "bundled $(ls "$repo"/examples/*.json | wc -l) example manifest(s)"
 # `bundled_manifests()` reads the examples dir non-recursively, so these stay
 # OUT of the installer picker — but they're still on the ISO and installable by
 # an explicit path (e.g. the audit-vms.sh feature scenarios point at them).
-if compgen -G "$repo/examples/reference/*.json" >/dev/null; then
+#
+# OPT-IN for now: ship ONLY the 4 curated examples by default so the shipped
+# image carries just the polished set. Build with MANIFEST_BUNDLE_REFERENCE=1
+# to also bake the reference manifests (required for audit-vms.sh, whose
+# feature scenarios stage `reference/<name>` from the ISO).
+if [[ "${MANIFEST_BUNDLE_REFERENCE:-0}" == 1 ]] && compgen -G "$repo/examples/reference/*.json" >/dev/null; then
     for m in "$repo"/examples/reference/*.json; do
         [[ -s "$m" ]] || { echo "ERROR: reference $(basename "$m") is empty — aborting build" >&2; exit 1; }
         install -Dm644 "$m" "$profile/airootfs/usr/share/manifest-os/examples/reference/$(basename "$m")"
     done
     echo "bundled $(ls "$repo"/examples/reference/*.json | wc -l) reference manifest(s) (not shown in picker)"
+else
+    echo "reference manifests NOT bundled (set MANIFEST_BUNDLE_REFERENCE=1 to include them)"
 fi
 
 # Normalize line endings — a Windows checkout may carry CRLF, which makes
