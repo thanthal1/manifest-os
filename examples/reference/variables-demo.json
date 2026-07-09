@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Variables demo",
+    "author": "Manifest OS",
+    "description": "Author-defined {{variables}} written once and reused across users, packages, theme and files.",
+    "tags": ["demo", "variables"],
+    "license": "free"
+  },
+  "variables": {
+    "username": "matt",
+    "accent": "#cba6f7",
+    "editor": "nano"
+  },
+  "system": { "hostname": "vars-demo" },
+  "users": [
+    { "name": "{{username}}", "groups": ["wheel"], "sudo": true }
+  ],
+  "packages": ["{{editor}}", "git"],
+  "theme": { "gtk": "Adwaita-dark", "dark": true },
+  "files": [
+    {
+      "path": "/home/{{username}}/.config/manifest/colors.conf",
+      "owner": "{{username}}:{{username}}",
+      "content": "# One accent, reused everywhere.\naccent = {{accent}}\n"
+    },
+    {
+      "path": "/home/{{username}}/.config/shell/env",
+      "owner": "{{username}}:{{username}}",
+      "content": "export EDITOR={{editor}}\n"
+    }
+  ]
+}

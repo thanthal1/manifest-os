@@ -50,6 +50,14 @@ pub struct Manifest {
     /// boots. Designed to run in the ISO's chroot context.
     pub boot: Option<Boot>,
 
+    /// Author-defined constants injected wherever `{{id}}` appears — a fixed
+    /// accent colour, a username, a repeated path. Unlike `survey`, they need
+    /// no prompting; unlike a hardcoded literal, they're written once and reused
+    /// everywhere. A survey answer with the same id overrides its variable. See
+    /// [`crate::survey`].
+    #[serde(default)]
+    pub variables: std::collections::BTreeMap<String, serde_json::Value>,
+
     /// First-run questions a manifest author defines. Answers are injected
     /// wherever `{{id}}` appears and drive `conditional_packages`.
     #[serde(default)]

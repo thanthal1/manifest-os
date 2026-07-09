@@ -31,17 +31,23 @@ impl Answers {
     }
 }
 
-/// Parse just the `survey` out of the raw manifest (ignoring everything else),
-/// then resolve every answer.
+/// Parse the `variables` and `survey` blocks out of the raw manifest (ignoring
+/// everything else), then resolve every value.
+///
+/// `variables` are author-defined constants — a fixed accent colour, a
+/// username — that fill the same `{{id}}` slots as survey answers but need no
+/// prompting. They seed the substitution map first; a survey answer with the
+/// same id overrides its variable (interactive input beats a static default).
 pub fn collect(raw: &str, answers_path: Option<&Path>) -> Result<Answers> {
     #[derive(serde::Deserialize)]
-    struct SurveyOnly {
+    struct Blocks {
         #[serde(default)]
         survey: Vec<Question>,
+        #[serde(default)]
+        variables: std::collections::BTreeMap<String, serde_json::Value>,
     }
-    let survey = serde_json::from_str::<SurveyOnly>(raw)
-        .context("reading survey block")?
-        .survey;
+    let blocks = serde_json::from_str::<Blocks>(raw).context("reading variables/survey blocks")?;
+    let survey = blocks.survey;
 
     let provided: HashMap<String, serde_json::Value> = match answers_path {
         Some(p) => {
@@ -55,6 +61,11 @@ pub fn collect(raw: &str, answers_path: Option<&Path>) -> Result<Answers> {
     let interactive = std::io::stdin().is_terminal();
     let mut values = HashMap::new();
     let mut secrets = Vec::new();
+
+    // Variables first, so a like-named survey answer (resolved below) wins.
+    for (id, v) in &blocks.variables {
+        values.insert(id.clone(), value_to_string(v));
+    }
 
     for q in &survey {
         if q.qtype == "secret" {
@@ -150,4 +161,62 @@ fn value_to_string(v: &serde_json::Value) -> String {
 fn json_escape_inner(s: &str) -> String {
     let quoted = serde_json::Value::String(s.to_string()).to_string();
     quoted[1..quoted.len() - 1].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::ConditionalPackages;
+
+    #[test]
+    fn variables_fill_substitution_tokens() {
+        let raw = r##"{"schema_version":"1.0.0",
+            "variables":{"accent":"#ff5d5d","username":"matt"},
+            "meta":{"name":"{{username}}'s rice"},
+            "files":[{"path":"~/.config/x","content":"color={{accent}}"}]}"##;
+        let ans = collect(raw, None).unwrap();
+        let out = substitute(raw, &ans);
+        assert!(out.contains("matt's rice"), "{out}");
+        assert!(out.contains("color=#ff5d5d"), "{out}");
+        assert!(!out.contains("{{accent}}") && !out.contains("{{username}}"));
+        // The substituted manifest still parses.
+        assert!(crate::manifest::Manifest::from_str(&out).is_ok());
+    }
+
+    #[test]
+    fn survey_answer_overrides_like_named_variable() {
+        // variable user=matt, but a survey default resolves the same id — the
+        // survey answer (interactive/default) wins over the static variable.
+        let raw = r#"{"schema_version":"1.0.0",
+            "variables":{"user":"matt"},
+            "survey":[{"id":"user","type":"text","label":"User","default":"alice"}]}"#;
+        let ans = collect(raw, None).unwrap();
+        assert_eq!(substitute("{{user}}", &ans), "alice");
+    }
+
+    #[test]
+    fn variables_drive_conditional_packages() {
+        // A variable can gate conditional packages just like a survey answer.
+        let raw = r#"{"schema_version":"1.0.0","variables":{"gpu":"nvidia"}}"#;
+        let ans = collect(raw, None).unwrap();
+        let conds = vec![ConditionalPackages {
+            condition: "gpu == nvidia".into(),
+            packages: vec!["nvidia-dkms".into()],
+        }];
+        assert_eq!(conditional_packages(&conds, &ans), vec!["nvidia-dkms".to_string()]);
+    }
+
+    #[test]
+    fn number_and_bool_variables_inject_as_bare_literals() {
+        let raw = r#"{"schema_version":"1.0.0","variables":{"gaps":8,"blur":true}}"#;
+        let ans = collect(raw, None).unwrap();
+        // Bare (unquoted) in a JSON numeric/boolean slot.
+        assert_eq!(substitute(r#"{"n":{{gaps}},"b":{{blur}}}"#, &ans), r#"{"n":8,"b":true}"#);
+    }
+
+    #[test]
+    fn no_variables_block_is_fine() {
+        let ans = collect(r#"{"schema_version":"1.0.0"}"#, None).unwrap();
+        assert_eq!(substitute("nothing to do", &ans), "nothing to do");
+    }
 }
