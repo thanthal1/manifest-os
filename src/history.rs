@@ -77,10 +77,14 @@ pub fn rollback(reference: Option<&str>, dry_run: bool) -> Result<()> {
     let json = capture_git(&["show", &format!("{refspec}:{FILE}")]).with_context(|| {
         format!("no recorded manifest at `{refspec}` — run `manifest history` to see what's available")
     })?;
-    let manifest = Manifest::from_str(&json)?;
+    let mut manifest = Manifest::from_str(&json)?;
     let label = if manifest.meta.name.is_empty() { "(unnamed)".into() } else { manifest.meta.name.clone() };
 
     println!("↩ Rolling back to {refspec}: \"{label}\"\n");
+    // Re-evaluate `when` conditions against *this* machine's hardware (survey
+    // answers were already baked into the recorded manifest at apply time).
+    let facts = crate::conditions::Facts::detect(&manifest.detect);
+    crate::conditions::resolve(&mut manifest, &facts);
     let ctx = Ctx::new(dry_run);
     install::sync(&manifest, &ctx)?;
 

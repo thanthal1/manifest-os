@@ -29,6 +29,13 @@ impl Answers {
     pub fn is_secret(&self, id: &str) -> bool {
         self.secrets.iter().any(|s| s == id)
     }
+
+    /// Every resolved (id, value) — survey answers and variables — as owned
+    /// pairs, for seeding the [`crate::conditions::Facts`] a `when` evaluates
+    /// against.
+    pub fn pairs(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.values.iter().map(|(k, v)| (k.clone(), v.clone()))
+    }
 }
 
 /// Parse the `variables` and `survey` blocks out of the raw manifest (ignoring
@@ -72,11 +79,15 @@ pub fn collect(raw: &str, answers_path: Option<&Path>) -> Result<Answers> {
             secrets.push(q.id.clone());
         }
         let answer = if let Some(v) = provided.get(&q.id) {
-            value_to_string(v)
+            let a = value_to_string(v);
+            validate(q, &a).with_context(|| format!("answer for `{}` (from --answers)", q.id))?;
+            a
         } else if let Some(d) = &q.default {
-            value_to_string(d)
+            let a = value_to_string(d);
+            validate(q, &a).with_context(|| format!("default for `{}`", q.id))?;
+            a
         } else if interactive {
-            prompt(q)?
+            prompt_valid(q)?
         } else if q.required {
             bail!(
                 "survey question `{}` is required but unanswered (provide --answers or a default)",
@@ -134,8 +145,92 @@ fn prompt(q: &Question) -> Result<String> {
     print!("{}{hint}: ", q.label);
     std::io::stdout().flush().ok();
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    // read_line returning 0 means EOF — bail rather than loop forever on a
+    // closed stdin (a required question with no more input).
+    if std::io::stdin().read_line(&mut line)? == 0 {
+        bail!("input closed before `{}` was answered", q.id);
+    }
     Ok(line.trim().to_string())
+}
+
+/// Prompt until the answer validates (or is an accepted empty for an optional
+/// question). Re-prompts with the reason on invalid input.
+fn prompt_valid(q: &Question) -> Result<String> {
+    loop {
+        let a = prompt(q)?;
+        if a.is_empty() {
+            if q.required {
+                println!("  · this one is required — please enter a value");
+                continue;
+            }
+            return Ok(a);
+        }
+        match validate(q, &a) {
+            Ok(()) => return Ok(a),
+            Err(e) => println!("  · {e}"),
+        }
+    }
+}
+
+/// Check an answer against the question's declared validation — type, `min`/
+/// `max` (numeric range or text length), `options` (enum) and `pattern`
+/// (anchored regex). An empty answer to an optional question is fine.
+fn validate(q: &Question, answer: &str) -> Result<()> {
+    if answer.is_empty() {
+        return Ok(());
+    }
+    match q.qtype.as_str() {
+        "number" => {
+            let n: f64 = answer
+                .parse()
+                .map_err(|_| anyhow::anyhow!("`{answer}` is not a number"))?;
+            if let Some(min) = q.min {
+                if n < min {
+                    bail!("must be at least {min}");
+                }
+            }
+            if let Some(max) = q.max {
+                if n > max {
+                    bail!("must be at most {max}");
+                }
+            }
+        }
+        "select" => enum_check(q, answer)?,
+        "multiselect" => {
+            for item in answer.split_whitespace() {
+                enum_check(q, item)?;
+            }
+        }
+        _ => {
+            // text / secret / path / boolean — bound the length.
+            let len = answer.chars().count() as f64;
+            if let Some(min) = q.min {
+                if len < min {
+                    bail!("must be at least {} character(s)", min as u64);
+                }
+            }
+            if let Some(max) = q.max {
+                if len > max {
+                    bail!("must be at most {} character(s)", max as u64);
+                }
+            }
+        }
+    }
+    if let Some(pat) = &q.pattern {
+        let re = regex::Regex::new(&format!("^(?:{pat})$"))
+            .map_err(|e| anyhow::anyhow!("invalid pattern for `{}`: {e}", q.id))?;
+        if !re.is_match(answer) {
+            bail!("doesn't match the required format ({pat})");
+        }
+    }
+    Ok(())
+}
+
+fn enum_check(q: &Question, item: &str) -> Result<()> {
+    if !q.options.is_empty() && !q.options.iter().any(|o| o == item) {
+        bail!("`{item}` must be one of: {}", q.options.join(", "));
+    }
+    Ok(())
 }
 
 /// Render a JSON value as the string to inject (bool/number → bare literal,
@@ -218,5 +313,51 @@ mod tests {
     fn no_variables_block_is_fine() {
         let ans = collect(r#"{"schema_version":"1.0.0"}"#, None).unwrap();
         assert_eq!(substitute("nothing to do", &ans), "nothing to do");
+    }
+
+    fn q(json: &str) -> Question {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn number_range_is_enforced() {
+        let port = q(r#"{"id":"port","type":"number","label":"Port","min":1,"max":65535}"#);
+        assert!(validate(&port, "8080").is_ok());
+        assert!(validate(&port, "0").is_err());
+        assert!(validate(&port, "70000").is_err());
+        assert!(validate(&port, "notnum").is_err());
+    }
+
+    #[test]
+    fn text_length_and_pattern_are_enforced() {
+        let user = q(r#"{"id":"user","type":"text","label":"User","min":2,"max":32,"pattern":"[a-z_][a-z0-9_-]*"}"#);
+        assert!(validate(&user, "matt").is_ok());
+        assert!(validate(&user, "a").is_err()); // too short
+        assert!(validate(&user, "1bad").is_err()); // pattern (must start lowercase/_)
+        assert!(validate(&user, "has space").is_err()); // anchored: space not allowed
+    }
+
+    #[test]
+    fn select_answer_must_be_an_option() {
+        let de = q(r#"{"id":"de","type":"select","label":"DE","options":["gnome","plasma","niri"]}"#);
+        assert!(validate(&de, "plasma").is_ok());
+        assert!(validate(&de, "xfce").is_err());
+        let multi = q(r#"{"id":"apps","type":"multiselect","label":"Apps","options":["firefox","kitty"]}"#);
+        assert!(validate(&multi, "firefox kitty").is_ok());
+        assert!(validate(&multi, "firefox chrome").is_err());
+    }
+
+    #[test]
+    fn empty_optional_answer_skips_validation() {
+        let opt = q(r#"{"id":"x","type":"text","label":"X","min":5}"#);
+        assert!(validate(&opt, "").is_ok());
+    }
+
+    #[test]
+    fn collect_rejects_an_invalid_default() {
+        // A default that violates its own validation fails fast at load time.
+        let raw = r#"{"schema_version":"1.0.0","survey":[
+            {"id":"port","type":"number","label":"Port","default":99999,"max":65535}]}"#;
+        assert!(collect(raw, None).is_err());
     }
 }

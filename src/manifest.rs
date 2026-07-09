@@ -63,9 +63,24 @@ pub struct Manifest {
     #[serde(default)]
     pub survey: Vec<Question>,
 
-    /// Package lists gated on survey answers.
+    /// Package lists gated on survey answers (the original, string-condition
+    /// form). Prefer `conditional` for anything beyond packages.
     #[serde(default)]
     pub conditional_packages: Vec<ConditionalPackages>,
+
+    /// Conditional overlays — slices of manifest (packages, files, services,
+    /// flatpaks, hooks, desktop, theme) each applied only when their `when`
+    /// holds. This is the general `when` mechanism. See [`Conditional`] and
+    /// [`crate::conditions`].
+    #[serde(default)]
+    pub conditional: Vec<Conditional>,
+
+    /// Hardware-fact overrides for `when`/`{{}}`. Standard facts (`gpu`, `cpu`,
+    /// `virt`, `is_vm`, `firmware`) are auto-detected with no config; an entry
+    /// here pins one to a literal (anything but `"auto"`) — handy for testing a
+    /// manifest as if on other hardware. `"auto"` just means "detect it".
+    #[serde(default)]
+    pub detect: std::collections::BTreeMap<String, String>,
 
     /// Users to create (declarative — no useradd/sudoers shell needed).
     #[serde(default)]
@@ -129,9 +144,19 @@ pub struct Question {
     pub required: bool,
     /// Default answer (any JSON scalar). Used when unattended.
     pub default: Option<serde_json::Value>,
-    /// Choices for select / multiselect.
+    /// Choices for select / multiselect (also enforced as an enum: a select
+    /// answer must be one of these).
     #[serde(default)]
     pub options: Vec<String>,
+
+    // ---- validation (all optional) ------------------------------------
+    /// A regex the answer must fully match (anchored). Applies to text/secret/
+    /// path answers, e.g. `"^[a-z_][a-z0-9_-]*$"` for a username.
+    pub pattern: Option<String>,
+    /// Lower bound: a `number` answer's value, or a text answer's length.
+    pub min: Option<f64>,
+    /// Upper bound: a `number` answer's value, or a text answer's length.
+    pub max: Option<f64>,
 }
 
 /// A package list applied only when its condition holds.
@@ -160,7 +185,7 @@ pub struct UserSpec {
 }
 
 /// A file to write verbatim.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FileSpec {
     /// Destination. `~/...` writes to the invoking user's home; an absolute
     /// path (e.g. /etc/...) is written as root.
@@ -171,6 +196,55 @@ pub struct FileSpec {
     pub mode: Option<String>,
     /// chown target, e.g. "root:root" or "alice". Implies a root-owned write.
     pub owner: Option<String>,
+    /// Only write this file when the condition holds — e.g. an nvidia Xorg
+    /// snippet gated on `{ "gpu": "nvidia" }`. See [`Condition`].
+    pub when: Option<Condition>,
+}
+
+/// A `when` condition, evaluated against the run's [facts](crate::conditions)
+/// (survey answers, `variables`, and auto-detected hardware: `gpu`, `cpu`,
+/// `virt`, `is_vm`, `firmware`). Two forms:
+/// ```json
+/// "when": { "gpu": "nvidia" }                 // object: every key must match
+/// "when": { "gpu": ["nvidia", "amd"] }        // array value: match any
+/// "when": "install_gaming == true"            // legacy string expression
+/// ```
+/// An object with several keys is an AND; an array value is an OR for that key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Condition {
+    /// `{ "gpu": "nvidia", "is_vm": false }` — all keys must match.
+    Match(std::collections::BTreeMap<String, serde_json::Value>),
+    /// `"gpu == nvidia"` / `"gpu != nvidia"` — legacy expression form.
+    Expr(String),
+}
+
+/// A conditional overlay: a slice of manifest applied only when `when` holds.
+/// This is how `when` reaches list-shaped sections (packages, services,
+/// flatpak apps, hooks) that can't carry a per-item condition, plus a place to
+/// gate a whole bundle of related config at once.
+#[derive(Debug, Deserialize)]
+pub struct Conditional {
+    pub when: Condition,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<FileSpec>,
+    #[serde(default)]
+    pub services: Services,
+    #[serde(default)]
+    pub snippets: Vec<Snippet>,
+    #[serde(default)]
+    pub keybindings: Vec<Keybinding>,
+    #[serde(default)]
+    pub pre_install: Vec<String>,
+    #[serde(default)]
+    pub post_install: Vec<String>,
+    pub flatpak: Option<Flatpak>,
+    /// Set the desktop only if the base manifest didn't already choose one.
+    pub desktop: Option<String>,
+    /// Set the theme only if the base manifest didn't already choose one.
+    pub theme: Option<Theme>,
 }
 
 /// A config fragment to insert into an existing file:

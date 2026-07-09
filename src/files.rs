@@ -21,7 +21,7 @@ pub fn home_spec(primary_user: Option<&str>, rel_path: &str, content: String) ->
         Some(user) => (format!("/home/{user}/{rel_path}"), Some(format!("{user}:{user}"))),
         None => (format!("~/{rel_path}"), None),
     };
-    FileSpec { path, content, mode: None, owner }
+    FileSpec { path, content, mode: None, owner, when: None }
 }
 
 pub fn apply(files: &[FileSpec], ctx: &Ctx) -> Result<()> {

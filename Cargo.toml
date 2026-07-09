@@ -35,6 +35,9 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# Survey field validation (`pattern`). Trimmed to the features we use to keep
+# the installer binary small.
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 ratatui = "0.29"
 crossterm = "0.28"
 # v4_10 enables gtk::FileDialog (the modern async file picker) used by the

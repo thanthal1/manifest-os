@@ -50,6 +50,7 @@ pub fn apply(snippets: &[Snippet], primary_user: Option<&str>, ctx: &Ctx) -> Res
                 content,
                 mode: None,
                 owner: None,
+                when: None,
             },
         };
         let path = out_spec(String::new()).path;

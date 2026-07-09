@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Conditions demo",
+    "author": "Manifest OS",
+    "description": "Machine detection + `when`: pin gpu=nvidia, gate packages/files on it.",
+    "license": "free"
+  },
+  "detect": { "gpu": "nvidia" },
+  "packages": ["base-devel"],
+  "files": [
+    { "path": "/etc/manifest/always.conf", "content": "always here\n" },
+    {
+      "path": "/etc/modprobe.d/nvidia.conf",
+      "content": "options nvidia_drm modeset=1\n",
+      "when": { "gpu": "nvidia" }
+    },
+    {
+      "path": "/etc/X11/xorg.conf.d/20-amdgpu.conf",
+      "content": "# amd only\n",
+      "when": { "gpu": "amd" }
+    }
+  ],
+  "conditional": [
+    {
+      "when": { "gpu": "nvidia" },
+      "packages": ["nvidia-dkms", "nvidia-utils"],
+      "post_install": ["nvidia-xconfig || true"]
+    },
+    {
+      "when": { "gpu": ["amd", "intel"] },
+      "packages": ["mesa"]
+    }
+  ]
+}

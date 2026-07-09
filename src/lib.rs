@@ -4,6 +4,7 @@
 //! is the orchestration of standard Arch tools (pacman, paru, systemctl, …).
 
 pub mod boot;
+pub mod conditions;
 pub mod defaults;
 pub mod desktop;
 pub mod diff;

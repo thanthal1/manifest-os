@@ -496,6 +496,15 @@ fn load_manifest(
         // restores the exact package set without re-running the survey.
         recorded = merge_conditional_packages(&substituted, &extra).unwrap_or(substituted);
     }
+
+    // Resolve `when` conditions: fold matching `conditional` overlays in and
+    // drop `when`-gated files that don't apply, evaluated against survey/
+    // variable answers plus auto-detected hardware (gpu/cpu/virt/firmware). The
+    // recorded JSON keeps the raw conditionals so a rollback re-evaluates them.
+    let mut facts = manifest::conditions::Facts::detect(&manifest.detect);
+    facts.overlay(answered.pairs());
+    manifest::conditions::resolve(&mut manifest, &facts);
+
     Ok((manifest, recorded))
 }
 
