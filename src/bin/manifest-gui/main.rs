@@ -475,19 +475,29 @@ fn add_network(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefC
     {
         let net_list = net_list.clone();
         let scan_btn = scan.clone();
+        let scan_status = status.clone();
         scan.connect_clicked(move |_| {
             let Some(dev) = probe::wifi_device() else { return };
             scan_btn.set_label(&t("network.scanning"));
             scan_btn.set_sensitive(false);
             let net_list = net_list.clone();
             let scan_btn = scan_btn.clone();
+            let scan_status = scan_status.clone();
             run_async(
-                move || probe::scan_wifi(&dev),
-                move |nets| {
+                // Unblock the radio first (laptops ship Wi-Fi rfkill-blocked),
+                // then scan — returning any hard-block note to show.
+                move || {
+                    let note = probe::prepare_wifi(&dev);
+                    (note, probe::scan_wifi(&dev))
+                },
+                move |(note, nets)| {
                     let refs: Vec<&str> = nets.iter().map(|s| s.as_str()).collect();
                     net_list.set_model(Some(&gtk::StringList::new(&refs)));
                     scan_btn.set_label(&t("network.scan"));
                     scan_btn.set_sensitive(true);
+                    if let Some(msg) = note {
+                        scan_status.set_text(&msg);
+                    }
                 },
             );
         });

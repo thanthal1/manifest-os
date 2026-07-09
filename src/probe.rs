@@ -266,6 +266,44 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Ready a wireless device for scanning. Many laptops ship Wi-Fi **rfkill
+/// soft-blocked** (the radio is off by default) — the symptom is iwd finding
+/// "no stations," even though the interface exists. So clear soft-blocks, make
+/// sure iwd is running, and bring the link up. Returns a human note when the
+/// radio is *hard*-blocked (a physical switch or an Fn key) — the one case
+/// software can't clear, so the user has to flip it themselves. Idempotent and
+/// best-effort: every command is safe to re-run and its failure is ignored.
+pub fn prepare_wifi(dev: &str) -> Option<String> {
+    // iwd must be running to present the device as a station.
+    let _ = Command::new("systemctl").args(["start", "iwd"]).output();
+    // Clear soft rfkill blocks (both the `wlan` type name and the `wifi` alias,
+    // for portability across rfkill versions).
+    let _ = Command::new("rfkill").args(["unblock", "wlan"]).output();
+    let _ = Command::new("rfkill").args(["unblock", "wifi"]).output();
+    // Bring the interface up (harmless if it already is).
+    let _ = Command::new("ip").args(["link", "set", dev, "up"]).output();
+    // Give iwd a moment to register the now-unblocked device.
+    std::thread::sleep(Duration::from_millis(800));
+    wifi_hard_blocked().then(|| {
+        "Wi-Fi is hard-blocked — flip the laptop's wireless switch (or press the \
+         Fn Wi-Fi key), then scan again."
+            .to_string()
+    })
+}
+
+/// Whether any wireless radio reports a *hard* rfkill block (a physical switch
+/// / Fn key), which `rfkill unblock` cannot clear.
+fn wifi_hard_blocked() -> bool {
+    Command::new("rfkill")
+        .args(["list", "wifi"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("hard blocked: yes"))
+        .unwrap_or(false)
+}
+
+/// Scan for networks. Call [`prepare_wifi`] first (both front-ends do) so a
+/// laptop whose radio ships rfkill-blocked finds networks instead of reporting
+/// "no stations."
 pub fn scan_wifi(dev: &str) -> Vec<String> {
     let _ = Command::new("iwctl").args(["station", dev, "scan"]).output();
     // iwd's scan takes a few seconds to populate all networks.

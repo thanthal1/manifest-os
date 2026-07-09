@@ -213,8 +213,17 @@ fn network_keys(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('s') => {
             if let Some(dev) = &app.wifi_dev {
+                // Unblock the radio first (laptops ship Wi-Fi rfkill-blocked).
+                let note = probe::prepare_wifi(dev);
                 app.networks = probe::scan_wifi(dev);
                 app.net_sel = 0;
+                app.net_status = note.unwrap_or_else(|| {
+                    if app.networks.is_empty() {
+                        "No networks found — move closer, or check the adapter.".to_string()
+                    } else {
+                        String::new()
+                    }
+                });
             }
         }
         KeyCode::Char('p') if !app.networks.is_empty() => {
