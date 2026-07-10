@@ -14,7 +14,8 @@
     "license": "free"
   },
   "variables": {
-    "accent": "#cba6f7"
+    "accent": "#cba6f7",
+    "opacity": "0.94"
   },
   "settings": [
     {
@@ -28,6 +29,14 @@
       "type": "color",
       "label": "Accent colour",
       "description": "The focus-ring / highlight colour."
+    },
+    {
+      "id": "opacity",
+      "type": "number",
+      "label": "Terminal opacity",
+      "description": "0.7–1.0. Lower is more see-through.",
+      "min": 0.7,
+      "max": 1
     }
   ],
   "system": {
@@ -77,7 +86,7 @@
     {
       "path": "/home/niri/.config/foot/foot.ini",
       "owner": "niri:niri",
-      "content": "font=JetBrainsMono Nerd Font:size=11\npad=12x12\n[colors-dark]\nalpha=0.94\nbackground=1e1e2e\nforeground=cdd6f4\n"
+      "content": "font=JetBrainsMono Nerd Font:size=11\npad=12x12\n[colors-dark]\nalpha={{opacity}}\nbackground=1e1e2e\nforeground=cdd6f4\n"
     },
     {
       "path": "/home/niri/.config/swaylock/config",

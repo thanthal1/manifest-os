@@ -16,7 +16,9 @@
     "license": "free"
   },
   "variables": {
-    "accent": "#cba6f7"
+    "accent": "#cba6f7",
+    "wallpaper": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/TokyoManifest.jpg",
+    "opacity": "0.96"
   },
   "settings": [
     {
@@ -30,6 +32,20 @@
       "type": "color",
       "label": "Accent colour",
       "description": "Terminal / prompt accent."
+    },
+    {
+      "id": "wallpaper",
+      "type": "path",
+      "label": "Wallpaper",
+      "description": "A local image path or a URL."
+    },
+    {
+      "id": "opacity",
+      "type": "number",
+      "label": "Terminal opacity",
+      "description": "0.7–1.0. Lower is more see-through.",
+      "min": 0.7,
+      "max": 1
     }
   ],
   "system": {
@@ -99,7 +115,7 @@
     "scale": "{{scale}}"
   },
   "wallpaper": {
-    "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/TokyoManifest.jpg",
+    "source": "{{wallpaper}}",
     "mode": "fill"
   },
   "files": [
@@ -131,7 +147,7 @@
     {
       "path": "/home/kai/.local/share/konsole/CatppuccinMocha.colorscheme",
       "owner": "kai:kai",
-      "content": "[Background]\nColor=30,30,46\n\n[BackgroundIntense]\nColor=30,30,46\n\n[BackgroundFaint]\nColor=30,30,46\n\n[Color0]\nColor=69,71,90\n\n[Color0Intense]\nColor=88,91,112\n\n[Color1]\nColor=243,139,168\n\n[Color1Intense]\nColor=243,139,168\n\n[Color2]\nColor=166,227,161\n\n[Color2Intense]\nColor=166,227,161\n\n[Color3]\nColor=249,226,175\n\n[Color3Intense]\nColor=249,226,175\n\n[Color4]\nColor=137,180,250\n\n[Color4Intense]\nColor=137,180,250\n\n[Color5]\nColor=245,194,231\n\n[Color5Intense]\nColor=245,194,231\n\n[Color6]\nColor=148,226,213\n\n[Color6Intense]\nColor=148,226,213\n\n[Color7]\nColor=186,194,222\n\n[Color7Intense]\nColor=166,173,200\n\n[Foreground]\nColor=205,214,244\n\n[ForegroundIntense]\nColor=205,214,244\n\n[ForegroundFaint]\nColor=205,214,244\n\n[General]\nBlur=true\nColorRandomization=false\nDescription=Catppuccin Mocha\nOpacity=0.96\nWallpaper=\n"
+      "content": "[Background]\nColor=30,30,46\n\n[BackgroundIntense]\nColor=30,30,46\n\n[BackgroundFaint]\nColor=30,30,46\n\n[Color0]\nColor=69,71,90\n\n[Color0Intense]\nColor=88,91,112\n\n[Color1]\nColor=243,139,168\n\n[Color1Intense]\nColor=243,139,168\n\n[Color2]\nColor=166,227,161\n\n[Color2Intense]\nColor=166,227,161\n\n[Color3]\nColor=249,226,175\n\n[Color3Intense]\nColor=249,226,175\n\n[Color4]\nColor=137,180,250\n\n[Color4Intense]\nColor=137,180,250\n\n[Color5]\nColor=245,194,231\n\n[Color5Intense]\nColor=245,194,231\n\n[Color6]\nColor=148,226,213\n\n[Color6Intense]\nColor=148,226,213\n\n[Color7]\nColor=186,194,222\n\n[Color7Intense]\nColor=166,173,200\n\n[Foreground]\nColor=205,214,244\n\n[ForegroundIntense]\nColor=205,214,244\n\n[ForegroundFaint]\nColor=205,214,244\n\n[General]\nBlur=true\nColorRandomization=false\nDescription=Catppuccin Mocha\nOpacity={{opacity}}\nWallpaper=\n"
     },
     {
       "path": "/home/kai/.zshrc",

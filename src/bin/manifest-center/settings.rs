@@ -151,10 +151,12 @@ fn row_for(q: &Question, doc: &Rc<RefCell<serde_json::Value>>) -> gtk::Widget {
             let min = q.min.unwrap_or(0.0);
             let max = q.max.unwrap_or(min.max(100.0));
             let val = cur.parse::<f64>().unwrap_or(min).clamp(min, max);
-            // 0.25 steps + 2 digits handle scale-like settings; integers still
-            // land on whole numbers.
-            let adj = gtk::Adjustment::new(val, min, max, 0.25, 1.0, 0.0);
-            let row = adw::SpinRow::builder().title(&q.label).adjustment(&adj).digits(2).build();
+            // Fine steps (0.05, 2 digits) for a small range like 0–1 opacity;
+            // whole steps for a big range like gaps in pixels.
+            let (step, digits): (f64, u32) =
+                if (max - min) <= 2.0 { (0.05, 2) } else { (1.0, 0) };
+            let adj = gtk::Adjustment::new(val, min, max, step, (step * 4.0).max(1.0), 0.0);
+            let row = adw::SpinRow::builder().title(&q.label).adjustment(&adj).digits(digits).build();
             row.set_tooltip_text(Some(&tooltip));
             let doc = doc.clone();
             let id = q.id.clone();

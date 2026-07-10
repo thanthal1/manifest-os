@@ -15,7 +15,9 @@
     "license": "free"
   },
   "variables": {
-    "accent": "#cba6f7"
+    "accent": "#cba6f7",
+    "wallpaper": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/image.jpg",
+    "opacity": "0.95"
   },
   "settings": [
     {
@@ -29,6 +31,20 @@
       "type": "color",
       "label": "Accent colour",
       "description": "Border / bar / notification accent."
+    },
+    {
+      "id": "wallpaper",
+      "type": "path",
+      "label": "Wallpaper",
+      "description": "A local image path or a URL."
+    },
+    {
+      "id": "opacity",
+      "type": "number",
+      "label": "Terminal opacity",
+      "description": "0.7–1.0. Lower is more see-through.",
+      "min": 0.7,
+      "max": 1
     }
   ],
   "system": {
@@ -96,7 +112,7 @@
     "scale": "{{scale}}"
   },
   "wallpaper": {
-    "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/image.jpg",
+    "source": "{{wallpaper}}",
     "mode": "fill"
   },
   "files": [
@@ -123,7 +139,7 @@
     {
       "path": "/home/dev/.config/foot/foot.ini",
       "owner": "dev:dev",
-      "content": "# Managed by Manifest OS — foot\nfont=JetBrainsMono Nerd Font:size=11\npad=12x12\n\n[colors-dark]\nalpha=0.95\nbackground=1e1e2e\nforeground=cdd6f4\n"
+      "content": "# Managed by Manifest OS — foot\nfont=JetBrainsMono Nerd Font:size=11\npad=12x12\n\n[colors-dark]\nalpha={{opacity}}\nbackground=1e1e2e\nforeground=cdd6f4\n"
     },
     {
       "path": "/home/dev/.config/starship.toml",

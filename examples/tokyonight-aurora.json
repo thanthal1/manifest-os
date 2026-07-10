@@ -19,7 +19,9 @@
   },
   "variables": {
     "accent": "#ff9b54",
-    "ember": "#ff5d5d"
+    "ember": "#ff5d5d",
+    "wallpaper": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/TokyoManifest.jpg",
+    "opacity": "0.84"
   },
   "settings": [
     {
@@ -44,6 +46,20 @@
       "label": "Ember colour",
       "description": "The deep red in the workspace gradient and criticals.",
       "default": "#ff5d5d"
+    },
+    {
+      "id": "wallpaper",
+      "type": "path",
+      "label": "Wallpaper",
+      "description": "A local image path or a URL."
+    },
+    {
+      "id": "opacity",
+      "type": "number",
+      "label": "Terminal opacity",
+      "description": "0.7–1.0. Lower is more see-through.",
+      "min": 0.7,
+      "max": 1
     }
   ],
   "system": {
@@ -117,7 +133,7 @@
     "scale": "{{scale}}"
   },
   "wallpaper": {
-    "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/TokyoManifest.jpg",
+    "source": "{{wallpaper}}",
     "mode": "fill"
   },
   "files": [
@@ -154,7 +170,7 @@
     {
       "path": "/home/dev/.config/kitty/kitty.conf",
       "owner": "dev:dev",
-      "content": "# Tokyo Night August Aurora\nfont_family      JetBrainsMono Nerd Font\nfont_size        11.5\ncursor_shape     beam\ncursor_blink_interval 0.5\nscrollback_lines 10000\nenable_audio_bell no\nwindow_padding_width 14\nbackground_opacity 0.84\nbackground_blur 1\nconfirm_os_window_close 0\nhide_window_decorations yes\n\nforeground #f4d6bf\nbackground #1b1412\nselection_foreground #1b1412\nselection_background #ffc061\ncursor #ffc061\ncolor0 #160b08\ncolor1 {{ember}}\ncolor2 #d99a5c\ncolor3 #ffc061\ncolor4 #ff7a5c\ncolor5 #e86f5f\ncolor6 {{accent}}\ncolor7 #ddb6a2\ncolor8 #6f5148\ncolor9 {{ember}}\ncolor10 #d99a5c\ncolor11 #ffc061\ncolor12 #ff7a5c\ncolor13 #e86f5f\ncolor14 {{accent}}\ncolor15 #f4d6bf\n"
+      "content": "# Tokyo Night August Aurora\nfont_family      JetBrainsMono Nerd Font\nfont_size        11.5\ncursor_shape     beam\ncursor_blink_interval 0.5\nscrollback_lines 10000\nenable_audio_bell no\nwindow_padding_width 14\nbackground_opacity {{opacity}}\nbackground_blur 1\nconfirm_os_window_close 0\nhide_window_decorations yes\n\nforeground #f4d6bf\nbackground #1b1412\nselection_foreground #1b1412\nselection_background #ffc061\ncursor #ffc061\ncolor0 #160b08\ncolor1 {{ember}}\ncolor2 #d99a5c\ncolor3 #ffc061\ncolor4 #ff7a5c\ncolor5 #e86f5f\ncolor6 {{accent}}\ncolor7 #ddb6a2\ncolor8 #6f5148\ncolor9 {{ember}}\ncolor10 #d99a5c\ncolor11 #ffc061\ncolor12 #ff7a5c\ncolor13 #e86f5f\ncolor14 {{accent}}\ncolor15 #f4d6bf\n"
     },
     {
       "path": "/home/dev/.config/fastfetch/config.jsonc",
