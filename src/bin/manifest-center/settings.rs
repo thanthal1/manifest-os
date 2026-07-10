@@ -24,14 +24,9 @@ pub fn build(
     stack: &Rc<adw::ViewStack>,
     toasts: &adw::ToastOverlay,
 ) {
-    let page = adw::PreferencesPage::new();
-
+    // No manifest on record, or one without a `settings` block → don't add the
+    // Settings tab at all (nothing to show).
     let Some((raw_path, doc)) = load_applied() else {
-        page.add(&empty_group(
-            "No settings to show",
-            "This system wasn't set up from a manifest that exposes quick settings.",
-        ));
-        register(stack, &page);
         return;
     };
 
@@ -45,15 +40,10 @@ pub fn build(
         .unwrap_or_default();
 
     if settings.is_empty() {
-        page.add(&empty_group(
-            "No settings to show",
-            "This setup didn't expose any quick settings. Its author can add a \
-             `settings` block to the manifest to turn it into a control panel.",
-        ));
-        register(stack, &page);
         return;
     }
 
+    let page = adw::PreferencesPage::new();
     let doc = Rc::new(RefCell::new(doc));
 
     let group = adw::PreferencesGroup::builder()
@@ -101,10 +91,6 @@ fn register(stack: &Rc<adw::ViewStack>, page: &adw::PreferencesPage) {
     stack
         .add_titled(page, Some("settings"), "Settings")
         .set_icon_name(Some("emblem-system-symbolic"));
-}
-
-fn empty_group(title: &str, body: &str) -> adw::PreferencesGroup {
-    adw::PreferencesGroup::builder().title(title).description(body).build()
 }
 
 /// The current value of a setting: the variable's value if set, else the
