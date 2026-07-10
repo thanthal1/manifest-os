@@ -10,7 +10,8 @@
 //! matches. This is what lets a well-authored manifest double as a settings app.
 
 use adw::prelude::*;
-use gtk::prelude::*;
+use gtk4 as gtk;
+use libadwaita as adw;
 use manifest::manifest::Question;
 use std::cell::RefCell;
 use std::path::PathBuf;
