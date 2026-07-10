@@ -109,11 +109,28 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
 
     pacstrap(ctx)?;
     ctx.shell("genfstab -U /mnt >> /mnt/etc/fstab", true)?;
+    if alongside {
+        // The shared ESP is only needed at boot (the firmware/GRUB already read
+        // it; our kernels live on our own root), so mark it `nofail`. A flaky or
+        // slow ESP shared with the other OS(es) must not drop the boot to
+        // emergency mode — where our locked root leaves no rescue shell.
+        ctx.shell(
+            "sed -i -E '/[[:space:]]\\/boot\\/efi[[:space:]]/ s/(vfat[[:space:]]+[^[:space:]]+)/\\1,nofail/' /mnt/etc/fstab",
+            true,
+        )?;
+    }
     install_fs_tools(&plan.filesystem, ctx)?;
     setup_persistent_swap(plan, parts, ctx)?;
     configure_storage_boot(plan, &storage, ctx)?;
     persist_network_config(plan, ctx)?;
     brand_system(ctx)?;
+    // With root locked (the default), a boot failure drops to sulogin which
+    // refuses a locked account ("the root account is locked") — no way to fix
+    // the machine from its own console. Allow a passwordless emergency shell so
+    // recovery is possible. Skipped when a root password was set (respect it).
+    if plan.root_password.is_none() {
+        enable_emergency_recovery(ctx)?;
+    }
     create_bootstrap_user(ctx)?;
 
     let manifest_in_root = stage_manifest(&plan.manifest, ctx)?;
@@ -310,6 +327,23 @@ fn configure_root_password(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     step("Setting the root password");
     ctx.set_password_chroot("/mnt", "root", pw)?;
     println!("  · root password set");
+    Ok(())
+}
+
+/// Make emergency/rescue mode usable on a locked-root system. `sulogin` (what
+/// emergency.service/rescue.service run) refuses a locked account and prints
+/// "the root account is locked", stranding the user at a boot failure with no
+/// way to fix it. `SYSTEMD_SULOGIN_FORCE=1` spawns the shell anyway. This is a
+/// local-console-only path, and anyone at the console can already get root
+/// (boot media, or `init=/bin/bash` from GRUB), so it adds no real exposure —
+/// it just turns a bricked machine into a recoverable one.
+fn enable_emergency_recovery(ctx: &Ctx) -> Result<()> {
+    step("Enabling emergency-mode recovery");
+    let dropin = "# Managed by Manifest OS — reach a recovery shell when root is locked.\n\
+                  [Service]\nEnvironment=SYSTEMD_SULOGIN_FORCE=1\n";
+    ctx.write_root("/mnt/etc/systemd/system/emergency.service.d/override.conf", dropin)?;
+    ctx.write_root("/mnt/etc/systemd/system/rescue.service.d/override.conf", dropin)?;
+    println!("  · emergency/rescue shell reachable without a root password");
     Ok(())
 }
 
