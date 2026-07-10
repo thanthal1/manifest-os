@@ -178,12 +178,15 @@ fn grub(boot: &Boot, fw: Firmware, ctx: &Ctx) -> Result<()> {
     }
 
     match fw {
+        // A distinct bootloader-id (\EFI\ManifestOS\, not the generic \EFI\GRUB\)
+        // so installing alongside another distro never overwrites *its* GRUB EFI
+        // binary — both keep their own firmware entry.
         Firmware::Uefi => ctx.sudo(
             "grub-install",
             &[
                 "--target=x86_64-efi",
                 &format!("--efi-directory={}", boot.esp),
-                "--bootloader-id=GRUB",
+                "--bootloader-id=ManifestOS",
             ],
         )?,
         Firmware::Bios => {

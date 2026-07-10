@@ -104,7 +104,7 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
         build_storage(plan, uefi, ctx)?
     };
     let parts = &storage.parts;
-    mount(parts, ctx)?;
+    mount(parts, alongside, ctx)?;
     setup_install_zram(ctx)?; // always-on: keeps low-memory machines off the OOM killer
 
     pacstrap(ctx)?;
@@ -117,7 +117,7 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     create_bootstrap_user(ctx)?;
 
     let manifest_in_root = stage_manifest(&plan.manifest, ctx)?;
-    ensure_boot_block(ctx)?;
+    ensure_boot_block(alongside, ctx)?;
     apply_system_overrides(plan, ctx)?;
     if let Some(root_luks) = &storage.root_luks_part {
         inject_crypt_cmdline(root_luks, initramfs_uses_systemd(ctx), ctx)?;
@@ -1354,11 +1354,17 @@ fn apply_system_overrides(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn mount(parts: &Parts, ctx: &Ctx) -> Result<()> {
+fn mount(parts: &Parts, alongside: bool, ctx: &Ctx) -> Result<()> {
     ctx.sudo("mount", &[&parts.root, "/mnt"])?;
     if let Some(esp) = &parts.esp {
-        ctx.sudo("mkdir", &["-p", "/mnt/boot"])?;
-        ctx.sudo("mount", &[esp, "/mnt/boot"])?;
+        // Dual boot reuses another OS's ESP, so mount it at /boot/efi and keep
+        // /boot on our own root — otherwise our kernel+initramfs land on the
+        // shared ESP and collide with (overwrite) the other distro's same-named
+        // files (e.g. two `linux-zen` installs both writing initramfs-linux-zen.img).
+        // An erase install owns the ESP outright, so /boot is simplest there.
+        let esp_mnt = if alongside { "/mnt/boot/efi" } else { "/mnt/boot" };
+        ctx.sudo("mkdir", &["-p", esp_mnt])?;
+        ctx.sudo("mount", &[esp, esp_mnt])?;
     }
     if let Some(home) = &parts.home {
         ctx.sudo("mkdir", &["-p", "/mnt/home"])?;
@@ -1580,10 +1586,10 @@ fn precheck_manifest(choice: &str, ctx: &Ctx) -> Result<()> {
 /// default GRUB block. GRUB auto-detects UEFI vs BIOS (see `boot.rs`) and boots
 /// either, so it is the safe universal default. Best-effort: never fail the
 /// install over this (the manifest may still carry its own loader).
-fn ensure_boot_block(ctx: &Ctx) -> Result<()> {
+fn ensure_boot_block(alongside: bool, ctx: &Ctx) -> Result<()> {
     step("Ensuring a bootloader");
     if ctx.dry_run {
-        println!("  · would add a default GRUB boot block if the manifest declares none");
+        println!("  · would ensure a GRUB boot block (esp /boot/efi for dual boot)");
         return Ok(());
     }
     let path = "/mnt/etc/manifest-install.json";
@@ -1601,15 +1607,28 @@ fn ensure_boot_block(ctx: &Ctx) -> Result<()> {
             return Ok(());
         }
     };
-    match doc.as_object_mut() {
-        Some(obj) if !obj.contains_key("boot") => {
-            obj.insert("boot".to_string(), serde_json::json!({ "loader": "grub" }));
-            let out = serde_json::to_string_pretty(&doc).context("re-serializing manifest")?;
-            std::fs::write(path, out).with_context(|| format!("writing {path}"))?;
-            println!("  · no bootloader declared — added a default GRUB boot block");
-        }
-        Some(_) => println!("  · manifest declares its own bootloader — leaving it"),
-        None => println!("  · skip: staged manifest is not a JSON object"),
+    let Some(obj) = doc.as_object_mut() else {
+        println!("  · skip: staged manifest is not a JSON object");
+        return Ok(());
+    };
+    let mut changed = true;
+    if alongside {
+        // Dual boot: force GRUB with the shared ESP at /boot/efi (matching the
+        // mount) so os-prober adds the other OS and our kernels live on our own
+        // root. Overrides whatever the manifest declared — systemd-boot on a
+        // shared ESP doesn't chainload other distros, and the esp must match.
+        obj.insert("boot".to_string(), serde_json::json!({ "loader": "grub", "esp": "/boot/efi" }));
+        println!("  · dual boot — GRUB on the shared ESP (/boot/efi); kernels stay on our root");
+    } else if !obj.contains_key("boot") {
+        obj.insert("boot".to_string(), serde_json::json!({ "loader": "grub" }));
+        println!("  · no bootloader declared — added a default GRUB boot block");
+    } else {
+        println!("  · manifest declares its own bootloader — leaving it");
+        changed = false;
+    }
+    if changed {
+        let out = serde_json::to_string_pretty(&doc).context("re-serializing manifest")?;
+        std::fs::write(path, out).with_context(|| format!("writing {path}"))?;
     }
     Ok(())
 }
@@ -1625,10 +1644,11 @@ fn finalize_boot(uefi: bool, ctx: &Ctx) {
         return;
     }
     step("Setting UEFI boot priority");
-    // grub-install / bootctl created an entry labelled "GRUB" or "Linux Boot
-    // Manager"; put its number first in BootOrder, ahead of the install media.
+    // grub-install / bootctl created an entry labelled "ManifestOS", "GRUB" or
+    // "Linux Boot Manager"; put its number first in BootOrder, ahead of the
+    // install media (and, on a dual boot, ahead of the other OS).
     let script = "command -v efibootmgr >/dev/null 2>&1 || exit 0\n\
-        n=$(efibootmgr | sed -n 's/^Boot\\([0-9A-Fa-f]\\{4\\}\\)\\* \\(GRUB\\|Linux Boot Manager\\)$/\\1/p' | head -n1)\n\
+        n=$(efibootmgr | sed -n 's/^Boot\\([0-9A-Fa-f]\\{4\\}\\)\\* \\(ManifestOS\\|GRUB\\|Linux Boot Manager\\)$/\\1/p' | head -n1)\n\
         [ -z \"$n\" ] && exit 0\n\
         rest=$(efibootmgr | sed -n 's/^BootOrder: //p' | tr ',' '\\n' | grep -vix \"$n\" | paste -sd, -)\n\
         if [ -n \"$rest\" ]; then efibootmgr -o \"$n,$rest\" >/dev/null; else efibootmgr -o \"$n\" >/dev/null; fi\n\
