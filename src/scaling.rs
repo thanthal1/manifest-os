@@ -22,7 +22,9 @@
 use crate::exec::Ctx;
 use anyhow::Result;
 
-const ENV_PATH: &str = "/etc/profile.d/manifest-scale.sh";
+// `zz-` so it sources AFTER manifest-theme.sh / manifest-desktop.sh — otherwise
+// the theme's fixed cursor_size (XCURSOR_SIZE) would clobber the scaled cursor.
+const ENV_PATH: &str = "/etc/profile.d/zz-manifest-scale.sh";
 const SCRIPT_PATH: &str = "/usr/local/bin/manifest-scale";
 const AUTOSTART_PATH: &str = "/etc/xdg/autostart/manifest-scale.desktop";
 

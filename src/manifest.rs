@@ -464,14 +464,10 @@ where
     match serde_json::Value::deserialize(d)? {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::Number(n) => Ok(n.as_f64()),
-        serde_json::Value::String(s) => {
-            let t = s.trim();
-            if t.is_empty() {
-                Ok(None)
-            } else {
-                t.parse().map(Some).map_err(serde::de::Error::custom)
-            }
-        }
+        // A non-numeric string (empty, or an unresolved `{{token}}` when the raw
+        // manifest is parsed before substitution — e.g. by `manifest verify`) is
+        // treated as unset rather than an error.
+        serde_json::Value::String(s) => Ok(s.trim().parse().ok()),
         _ => Err(serde::de::Error::custom("scale must be a number")),
     }
 }

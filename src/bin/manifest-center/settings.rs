@@ -142,6 +142,13 @@ fn row_for(q: &Question, doc: &Rc<RefCell<serde_json::Value>>) -> gtk::Widget {
     let cur = current_value(q, &doc.borrow());
     let tooltip = q.description.clone().unwrap_or_default();
 
+    // A scale-type setting (or one literally named "scale") gets a clean
+    // preset dropdown — a free spinner is fiddly (rejects 1.75, jumps by odd
+    // steps) and there are only a handful of scales anyone wants.
+    if q.qtype == "scale" || q.id == "scale" {
+        return scale_dropdown(q, doc, &cur, &tooltip);
+    }
+
     match q.qtype.as_str() {
         "boolean" => {
             let row = adw::SwitchRow::builder()
@@ -201,6 +208,45 @@ fn row_for(q: &Question, doc: &Rc<RefCell<serde_json::Value>>) -> gtk::Widget {
 fn trim_num(n: f64) -> String {
     let s = format!("{n:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The scale presets everyone actually uses, `(label, value)`.
+const SCALE_PRESETS: &[(&str, &str)] = &[
+    ("100%", "1"),
+    ("125%", "1.25"),
+    ("150%", "1.5"),
+    ("175%", "1.75"),
+    ("200%", "2"),
+    ("250%", "2.5"),
+    ("300%", "3"),
+];
+
+fn scale_dropdown(
+    q: &Question,
+    doc: &Rc<RefCell<serde_json::Value>>,
+    cur: &str,
+    tooltip: &str,
+) -> gtk::Widget {
+    let labels: Vec<&str> = SCALE_PRESETS.iter().map(|(l, _)| *l).collect();
+    let model = gtk::StringList::new(&labels);
+    let row = adw::ComboRow::builder().title(&q.label).model(&model).build();
+    row.set_tooltip_text(Some(tooltip));
+    // Select the preset whose value equals the current one (numeric compare so
+    // "1.0" matches "1"); default to 100% when it's off-grid.
+    let cur_f = cur.parse::<f64>().unwrap_or(1.0);
+    let sel = SCALE_PRESETS
+        .iter()
+        .position(|(_, v)| v.parse::<f64>().map(|f| (f - cur_f).abs() < 1e-6).unwrap_or(false))
+        .unwrap_or(0);
+    row.set_selected(sel as u32);
+    let doc = doc.clone();
+    let id = q.id.clone();
+    row.connect_selected_notify(move |r| {
+        if let Some((_, v)) = SCALE_PRESETS.get(r.selected() as usize) {
+            set_var(&doc, &id, v.to_string());
+        }
+    });
+    row.upcast()
 }
 
 // ---------------------------------------------------------------------------

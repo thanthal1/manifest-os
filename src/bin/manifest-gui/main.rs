@@ -89,6 +89,21 @@ impl State {
     }
 }
 
+/// Scale the installer UI on a HiDPI panel. Under cage (kiosk Wayland), GTK4
+/// often ignores GDK_SCALE — the fractional-scale protocol reports scale 1 — so
+/// the installer renders unreadably tiny on a 4K screen. `gtk-xft-dpi` is
+/// honoured regardless, so drive it from the auto-detected panel scale
+/// (96 dpi × scale, in 1024ths of a point). No-op on a normal-density display.
+fn apply_hidpi() {
+    let scale = manifest::conditions::default_scale();
+    if scale <= 1.0 {
+        return;
+    }
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_property("gtk-xft-dpi", (96.0 * scale * 1024.0) as i32);
+    }
+}
+
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
@@ -120,6 +135,7 @@ where
 }
 
 fn build_ui(app: &adw::Application) {
+    apply_hidpi();
     let state = Rc::new(RefCell::new(State::new()));
     // Widgets that only appear in Advanced mode; the header toggle flips them.
     let advanced_widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::new(RefCell::new(Vec::new()));
