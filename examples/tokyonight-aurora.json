@@ -24,7 +24,7 @@
   "settings": [
     {
       "id": "scale",
-      "type": "number",
+      "type": "scale",
       "label": "Display scale",
       "description": "1 = 100%, 2 = 200% for HiDPI screens. Leave at 1 to auto-detect.",
       "min": 1,
@@ -113,6 +113,9 @@
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
   },
+  "display": {
+    "scale": "{{scale}}"
+  },
   "wallpaper": {
     "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/TokyoManifest.jpg",
     "mode": "fill"
@@ -167,6 +170,11 @@
       "path": "/home/dev/.zshrc",
       "owner": "dev:dev",
       "content": "setopt AUTO_CD INTERACTIVE_COMMENTS SHARE_HISTORY HIST_IGNORE_ALL_DUPS\nHISTFILE=~/.zsh_history; HISTSIZE=10000; SAVEHIST=10000\nalias ls='eza --icons --group-directories-first'\nalias ll='eza -lah --icons --group-directories-first'\nalias tree='eza --tree --icons'\nalias cat='bat --paging=never'\nalias ..='cd ..'\nautoload -Uz compinit && compinit\nzstyle ':completion:*' menu select\neval \"$(starship init zsh)\"\nfastfetch\n"
+    },
+    {
+      "path": "/home/dev/.config/hypr/hyprlock.conf",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS — hyprlock (Tokyo Night August Aurora)\nbackground {\n    monitor =\n    path = /usr/share/backgrounds/manifest/current\n    blur_passes = 3\n    blur_size = 7\n    color = rgba(1b1412ff)\n}\ngeneral {\n    hide_cursor = true\n}\ninput-field {\n    monitor =\n    size = 340, 60\n    outline_thickness = 2\n    dots_size = 0.25\n    dots_spacing = 0.3\n    rounding = 16\n    outer_color = rgba(ff9b54ee)\n    inner_color = rgba(1b1412cc)\n    font_color = rgba(f4d6bfff)\n    check_color = rgba(ffc061ee)\n    fail_color = rgba(ff5d5dee)\n    fade_on_empty = false\n    placeholder_text = Locked\n    position = 0, -20\n    halign = center\n    valign = center\n}\nlabel {\n    monitor =\n    text = cmd[update:1000] date +\"%H:%M\"\n    color = rgba(ffc061ff)\n    font_size = 72\n    font_family = JetBrainsMono Nerd Font\n    position = 0, 150\n    halign = center\n    valign = center\n}\nlabel {\n    monitor =\n    text = cmd[update:1000] date +\"%A, %d %B\"\n    color = rgba(f4d6bfff)\n    font_size = 22\n    font_family = JetBrainsMono Nerd Font\n    position = 0, 75\n    halign = center\n    valign = center\n}\n"
     }
   ],
   "conditional": [

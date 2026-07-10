@@ -15,6 +15,23 @@
     "version": "1.0.0",
     "license": "free"
   },
+  "variables": {
+    "accent": "#cba6f7"
+  },
+  "settings": [
+    {
+      "id": "scale",
+      "type": "scale",
+      "label": "Display scale",
+      "description": "UI scale for HiDPI screens. 100% auto-detects."
+    },
+    {
+      "id": "accent",
+      "type": "color",
+      "label": "Accent colour",
+      "description": "Terminal / prompt accent."
+    }
+  ],
   "system": {
     "hostname": "plasma",
     "locale": "en_US.UTF-8",
@@ -78,6 +95,9 @@
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
   },
+  "display": {
+    "scale": "{{scale}}"
+  },
   "wallpaper": {
     "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/TokyoManifest.jpg",
     "mode": "fill"
@@ -121,7 +141,7 @@
     {
       "path": "/home/kai/.config/starship.toml",
       "owner": "kai:kai",
-      "content": "# Catppuccin Mocha — Manifest OS\nadd_newline = true\nformat = \"\"\"\n[](surface0)$os$username[](bg:surface1 fg:surface0)$directory[](fg:surface1 bg:none) $git_branch$git_status\n$character\"\"\"\n\npalette = 'catppuccin_mocha'\n\n[palettes.catppuccin_mocha]\nsurface0 = '#313244'\nsurface1 = '#45475a'\nmauve = '#cba6f7'\nblue = '#89b4fa'\ngreen = '#a6e3a1'\ntext = '#cdd6f4'\n\n[os]\ndisabled = false\nstyle = 'bg:surface0 fg:mauve'\n[os.symbols]\nArch = ' '\n\n[username]\nshow_always = true\nstyle_user = 'bg:surface0 fg:text'\nstyle_root = 'bg:surface0 fg:red'\nformat = '[ $user ]($style)'\n\n[directory]\nstyle = 'bg:surface1 fg:text'\nformat = '[ $path ]($style)'\ntruncation_length = 3\n\n[git_branch]\nsymbol = ' '\nstyle = 'fg:mauve'\nformat = '[$symbol$branch]($style) '\n\n[git_status]\nstyle = 'fg:blue'\n\n[character]\nsuccess_symbol = '[❯](bold green)'\nerror_symbol = '[❯](bold red)'\n"
+      "content": "# Catppuccin Mocha — Manifest OS\nadd_newline = true\nformat = \"\"\"\n[](surface0)$os$username[](bg:surface1 fg:surface0)$directory[](fg:surface1 bg:none) $git_branch$git_status\n$character\"\"\"\n\npalette = 'catppuccin_mocha'\n\n[palettes.catppuccin_mocha]\nsurface0 = '#313244'\nsurface1 = '#45475a'\nmauve = '{{accent}}'\nblue = '#89b4fa'\ngreen = '#a6e3a1'\ntext = '#cdd6f4'\n\n[os]\ndisabled = false\nstyle = 'bg:surface0 fg:mauve'\n[os.symbols]\nArch = ' '\n\n[username]\nshow_always = true\nstyle_user = 'bg:surface0 fg:text'\nstyle_root = 'bg:surface0 fg:red'\nformat = '[ $user ]($style)'\n\n[directory]\nstyle = 'bg:surface1 fg:text'\nformat = '[ $path ]($style)'\ntruncation_length = 3\n\n[git_branch]\nsymbol = ' '\nstyle = 'fg:mauve'\nformat = '[$symbol$branch]($style) '\n\n[git_status]\nstyle = 'fg:blue'\n\n[character]\nsuccess_symbol = '[❯](bold green)'\nerror_symbol = '[❯](bold red)'\n"
     },
     {
       "path": "/home/kai/.config/fastfetch/config.jsonc",

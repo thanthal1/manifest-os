@@ -17,6 +17,20 @@
   "variables": {
     "accent": "#cba6f7"
   },
+  "settings": [
+    {
+      "id": "scale",
+      "type": "scale",
+      "label": "Display scale",
+      "description": "UI scale for HiDPI screens. 100% auto-detects."
+    },
+    {
+      "id": "accent",
+      "type": "color",
+      "label": "Accent colour",
+      "description": "Border / bar / notification accent."
+    }
+  ],
   "system": {
     "hostname": "sway-station",
     "locale": "en_US.UTF-8",
@@ -78,6 +92,9 @@
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
   },
+  "display": {
+    "scale": "{{scale}}"
+  },
   "wallpaper": {
     "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/image.jpg",
     "mode": "fill"
@@ -117,6 +134,11 @@
       "path": "/home/dev/.zshrc",
       "owner": "dev:dev",
       "content": "# Managed by Manifest OS\nsetopt AUTO_CD INTERACTIVE_COMMENTS\nHISTFILE=~/.zsh_history\nHISTSIZE=10000\nSAVEHIST=10000\nsetopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS\n\n# Sensible aliases (eza/bat are installed in packages)\nalias ls='eza --group-directories-first --icons'\nalias ll='eza -lah --group-directories-first --icons'\nalias tree='eza --tree'\nalias cat='bat --paging=never'\nalias grep='grep --color=auto'\nalias ..='cd ..'\nalias ...='cd ../..'\n\nautoload -Uz compinit && compinit\nzstyle ':completion:*' menu select\n\n# Prompt (starship is installed in packages)\neval \"$(starship init zsh)\"\n"
+    },
+    {
+      "path": "/home/dev/.config/swaylock/config",
+      "owner": "dev:dev",
+      "content": "# Managed by Manifest OS — swaylock\ncolor=1e1e2e\nfont=JetBrainsMono Nerd Font\nindicator-radius=120\nindicator-thickness=10\nring-color=45475a\nring-clear-color=a6e3a1\nring-ver-color=89b4fa\nring-wrong-color=f38ba8\nkey-hl-color=cba6f7\nbs-hl-color=f38ba8\ninside-color=1e1e2ecc\ninside-clear-color=a6e3a1\ninside-ver-color=89b4fa\ninside-wrong-color=f38ba8\ntext-color=cdd6f4\ntext-clear-color=1e1e2e\ntext-ver-color=1e1e2e\ntext-wrong-color=1e1e2e\nline-uses-inside\nshow-failed-attempts\nignore-empty-password\nimage=/usr/share/backgrounds/manifest/current\nscaling=fill\n"
     }
   ],
   "conditional": [
