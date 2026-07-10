@@ -245,7 +245,13 @@ fn run() -> Result<()> {
             dry_run,
             answers,
         } => {
-            let (manifest, json) = load_manifest(&file, answers.as_deref())?;
+            let (mut manifest, json) = load_manifest(&file, answers.as_deref())?;
+            // Applying a manifest (incl. a shared setup, via the desktop app)
+            // should never drop what you already have: fold this system's
+            // explicitly-installed packages into the manifest so it stays a
+            // complete record and a future prune won't remove them. Sync-only —
+            // a fresh install has no meaningful "existing" packages.
+            let json = fold_existing_packages(&mut manifest, json);
             let ctx = Ctx::new(dry_run);
             install::sync(&manifest, &ctx)?;
             history::record(&json, &manifest.meta.name, &ctx);
@@ -513,6 +519,26 @@ fn load_manifest(
     manifest::conditions::resolve(&mut manifest, &facts);
 
     Ok((manifest, recorded))
+}
+
+/// Fold the packages already explicitly installed on this system into the
+/// manifest (and the JSON that gets recorded), so a sync never forgets what's
+/// already here. Uses the same capture as `manifest export` — explicit installs
+/// minus the base system, the desktop recipe's own packages and the kernel — so
+/// only *your* chosen apps are added, not recipe-implied ones. On a non-Arch box
+/// (no pacman) capture yields nothing, so this is a no-op.
+fn fold_existing_packages(manifest: &mut Manifest, json: String) -> String {
+    let existing = export::capture_manifest().packages;
+    let extra: Vec<String> = existing
+        .into_iter()
+        .filter(|p| !manifest.packages.contains(p))
+        .collect();
+    if extra.is_empty() {
+        return json;
+    }
+    println!("sync: keeping {} package(s) already installed on this system", extra.len());
+    manifest.packages.extend(extra.iter().cloned());
+    merge_conditional_packages(&json, &extra).unwrap_or(json)
 }
 
 /// Return `json` with `extra` appended to its top-level `packages` array.
