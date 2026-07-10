@@ -63,17 +63,47 @@ pub fn install(df: &Dotfiles, ctx: &Ctx) -> Result<()> {
         Method::Symlink => "symlink",
         Method::Copy => "copy",
     };
+
+    // Where in the repo to read from, and where in the filesystem to write to.
+    // `subdir` handles repos that keep configs under e.g. `config/` instead of
+    // mirroring `$HOME`; `into` retargets the base (default `$HOME`), so
+    // `subdir:"config", into:"~/.config"` maps `<repo>/config/*` → `~/.config/*`.
+    let source_root = match df.subdir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sub) => format!("{dest}/{}", sub.trim_start_matches('/')),
+        None => dest.clone(),
+    };
+    let target = match df.into.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(into) => resolve_into(into, &home),
+        None => home.clone(),
+    };
+
     if ctx.dry_run {
-        println!("  · would {verb} repo files into {home} (mirroring the tree)");
+        println!("  · would {verb} {source_root}/* into {target}");
         return Ok(());
     }
 
-    let repo_root = Path::new(&dest);
-    let home_path = Path::new(&home);
+    let src = Path::new(&source_root);
+    if !src.is_dir() {
+        anyhow::bail!(
+            "dotfiles subdir `{}` not found in the repo (looked for {source_root})",
+            df.subdir.as_deref().unwrap_or("")
+        );
+    }
+    let target_path = Path::new(&target);
+    std::fs::create_dir_all(target_path)?;
     let mut count = 0usize;
-    place_tree(repo_root, repo_root, home_path, &method, &mut count)?;
-    println!("  · {verb}ed {count} file(s) into {home}");
+    place_tree(src, src, target_path, &method, &mut count)?;
+    println!("  · {verb}ed {count} file(s) into {target}");
     Ok(())
+}
+
+/// Resolve an `into` target: `~/...` → the invoking user's home, else as-is.
+fn resolve_into(into: &str, home: &str) -> String {
+    match into.strip_prefix("~/") {
+        Some(rest) => format!("{home}/{rest}"),
+        None if into == "~" => home.to_string(),
+        None => into.to_string(),
+    }
 }
 
 /// Recursively place every regular file under `dir` into `$HOME`, preserving

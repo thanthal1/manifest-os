@@ -528,9 +528,15 @@ pub struct Dotfiles {
     pub source: String,
     #[serde(default = "default_branch")]
     pub branch: String,
-    /// "symlink" | "copy" — how dotfiles are placed. Phase 1 clones only.
+    /// "symlink" | "copy" — how dotfiles are placed.
     #[serde(default)]
     pub method: String,
+    /// Place only this subdirectory of the repo, not the whole root — for repos
+    /// that keep configs under e.g. `config/` rather than mirroring `$HOME`.
+    pub subdir: Option<String>,
+    /// Target base directory (default `$HOME`). Pair with `subdir` to map a
+    /// repo layout onto the right place, e.g. `subdir:"config", into:"~/.config"`.
+    pub into: Option<String>,
 }
 
 fn default_branch() -> String {

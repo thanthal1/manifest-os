@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "JaKooLit Hyprland-Dots (as a manifest)",
+    "author": "Manifest OS",
+    "description": "Reproduces JaKooLit's Hyprland-Dots the declarative way: install the packages its script installs, then place its exact configs via `dotfiles` (config/ → ~/.config). No install.sh executed — everything is declared, reproducible and rollback-able.",
+    "tags": ["hyprland", "jakoolit", "rice", "dotfiles"],
+    "license": "free"
+  },
+  "system": {
+    "hostname": "hypr-dots",
+    "locale": "en_US.UTF-8",
+    "timezone": "UTC",
+    "keymap": "us"
+  },
+  "boot": { "loader": "grub", "cmdline": ["quiet"], "timeout": 3 },
+  "repos": { "multilib": true },
+  "users": [
+    { "name": "hypr", "groups": ["wheel", "video", "input", "audio"], "shell": "/bin/bash", "sudo": true }
+  ],
+  "desktop": "hyprland",
+  "display_manager": "sddm",
+  "packages": [
+    "hyprland", "hyprlock", "hypridle", "hyprpaper", "hyprpicker", "hyprcursor",
+    "hyprland-qtutils", "xdg-desktop-portal-hyprland", "xdg-desktop-portal-gtk",
+    "waybar", "rofi-wayland", "swaync", "wlogout", "swww",
+    "kitty", "cava", "btop", "fastfetch",
+    "pipewire", "pipewire-alsa", "pipewire-pulse", "pipewire-jack", "wireplumber",
+    "pavucontrol", "pamixer", "playerctl",
+    "grim", "slurp", "swappy", "wl-clipboard", "cliphist", "wf-recorder",
+    "brightnessctl", "network-manager-applet", "blueman", "bluez", "bluez-utils",
+    "nwg-look", "nwg-displays", "qt5ct", "qt6ct", "kvantum", "kvantum-qt5",
+    "qt5-wayland", "qt6-wayland",
+    "polkit-gnome", "gnome-keyring", "xdg-user-dirs", "gvfs",
+    "nautilus", "wallust", "python-pywalfox",
+    "ttf-jetbrains-mono-nerd", "noto-fonts", "noto-fonts-emoji", "noto-fonts-cjk",
+    "ttf-fira-code", "ttf-fira-sans", "adobe-source-code-pro-fonts",
+    "bibata-cursor-theme", "sddm",
+    "imagemagick", "jq", "wget", "unzip", "rsync",
+    "eza", "bat", "fzf", "ripgrep", "firefox"
+  ],
+  "theme": {
+    "cursor": "Bibata-Modern-Ice",
+    "cursor_size": 24,
+    "font": "JetBrainsMono Nerd Font 11",
+    "monospace_font": "JetBrainsMono Nerd Font 11",
+    "dark": true
+  },
+  "dotfiles": {
+    "source": "https://github.com/JaKooLit/Hyprland-Dots",
+    "branch": "main",
+    "subdir": "config",
+    "into": "~/.config",
+    "method": "copy"
+  }
+}
