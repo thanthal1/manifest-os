@@ -58,6 +58,10 @@ else
 fi
 
 # Ship the example manifests so the TUI can list and install them by name.
+# Clean the bundle dir FIRST: install(1) only ever *adds* files, so without
+# this the airootfs accumulates every example ever shipped — stale ones then
+# show up in the installer picker even after they're removed from examples/.
+rm -rf "$profile/airootfs/usr/share/manifest-os/examples"
 # Refuse to bake an empty/invalid example — a 0-byte bundle installs onto a
 # wiped disk and only fails deep in the chroot ("reading survey block: EOF").
 for m in "$repo"/examples/*.json; do
