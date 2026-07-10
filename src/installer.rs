@@ -616,9 +616,13 @@ pub fn finish_and_reboot() {
     let _ = Command::new("sync").status();
     let _ = Command::new("umount").args(["-R", "/mnt"]).status();
 
-    if uefi {
+    // In a VM on UEFI the disc can stay — efibootmgr made the disk the default
+    // and the firmware honours it — so reboot hands-off. Everywhere else, wait
+    // for the user to pull the media: BIOS *must* have it removed, and on real
+    // UEFI hardware some firmware still boots the USB first, so recommend it.
+    if uefi && in_vm {
         println!("\n  Set as the default boot entry — rebooting into Manifest OS.");
-        println!("  (You can leave the install media attached.)");
+        println!("  (You can leave the disc attached.)");
     } else {
         use std::io::Write;
         let how = if in_vm {
@@ -626,7 +630,12 @@ pub fn finish_and_reboot() {
         } else {
             "unplug the install USB"
         };
-        print!("\n  Installed. Please {how}, then press Enter to reboot. ");
+        let note = if uefi {
+            " (recommended — some firmware still boots it first; either way Manifest OS is the default)"
+        } else {
+            ""
+        };
+        print!("\n  Installed. Please {how}{note}, then press Enter to reboot. ");
         std::io::stdout().flush().ok();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok();

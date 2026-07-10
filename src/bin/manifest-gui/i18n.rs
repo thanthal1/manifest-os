@@ -123,7 +123,7 @@ static EN: &[(&str, &str)] = &[
     ("installing.subtitle", "Sit back — this takes a few minutes. Don't turn off your computer."),
     ("done.title", "All done!"),
     ("done.restart", "Restart now"),
-    ("done.uefi_message", "Manifest OS is installed. Press Restart — you can leave the USB plugged in; it will boot into your new system."),
+    ("done.uefi_message", "Manifest OS is installed. If you can, unplug the install USB (or eject the disc) now, then press Restart — some firmware still boots the USB first. It's set as the default boot entry, so it boots your new system either way."),
     ("done.bios_message", "Manifest OS is installed. Remove the install USB (or eject the disc), then press Restart."),
     ("error.title", "Something went wrong"),
     ("error.subtitle", "The install didn't finish. You can go back and try again."),
