@@ -155,6 +155,7 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     configure_autologin(plan, ctx)?;
     run_post_install_script(plan, ctx)?;
     stage_desktop_app(plan, ctx);
+    sanitize_persisted_manifest(ctx);
     if alongside {
         enable_dual_boot(ctx);
     }
@@ -1803,6 +1804,31 @@ fn run_manifest(manifest_in_root: &str, answers: Option<&str>, ctx: &Ctx) -> Res
         let _ = std::fs::remove_file("/mnt/etc/manifest-answers.json");
     }
     result
+}
+
+/// The manifest we leave at `/etc/manifest-install.json` is world-readable (the
+/// unprivileged installer reads it during install; the Settings app reads its
+/// `settings`/`variables` after), so it must not carry secrets. Blank user
+/// passwords — the common inline secret — once the install has consumed them
+/// (accounts are already created). Anything more sensitive should come from a
+/// survey `secret` (kept only in the answers file, which is deleted), never
+/// inlined. Best-effort: a failure here never fails the install.
+fn sanitize_persisted_manifest(ctx: &Ctx) {
+    step("Scrubbing secrets from the saved manifest");
+    if ctx.dry_run {
+        println!("  · would blank inline user passwords in /etc/manifest-install.json");
+        return;
+    }
+    let path = "/mnt/etc/manifest-install.json";
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if let Ok(scrubbed) = crate::history::scrub_secrets(&raw) {
+        if scrubbed != raw && ctx.write_root(path, &scrubbed).is_ok() {
+            let _ = ctx.sudo("chmod", &["644", path]);
+            println!("  · blanked inline user passwords in the saved manifest");
+        }
+    }
 }
 
 /// Save the install log somewhere it survives a failure: the target's

@@ -135,7 +135,7 @@ fn ensure_repo(ctx: &Ctx) -> Result<()> {
 /// Blank out user passwords in a manifest's JSON before it's committed. Also
 /// the semantically-correct thing for rollback: re-applying a manifest to an
 /// existing system shouldn't reset already-created accounts' passwords.
-fn scrub_secrets(json: &str) -> Result<String> {
+pub fn scrub_secrets(json: &str) -> Result<String> {
     let mut v: serde_json::Value = serde_json::from_str(json).context("parsing manifest to scrub")?;
     if let Some(users) = v.get_mut("users").and_then(|u| u.as_array_mut()) {
         for u in users.iter_mut() {
