@@ -13,6 +13,7 @@
 //! `--features gui`.
 
 mod designer;
+mod settings;
 mod snapshots;
 
 use std::io::{BufRead, BufReader};
@@ -59,6 +60,7 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&snap_page, Some("snapshots"), "Snapshots")
         .set_icon_name(Some("document-open-recent-symbolic"));
     build_apply(&window, &stack, &toasts);
+    settings::build(&window, &stack, &toasts);
     designer::build(&window, &stack, &toasts);
 
     let switcher = adw::ViewSwitcher::builder()

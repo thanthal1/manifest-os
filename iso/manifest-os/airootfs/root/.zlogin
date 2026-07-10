@@ -23,6 +23,16 @@ if [[ $(tty) == "/dev/tty1" && -z "${MANIFEST_NO_WELCOME:-}" ]]; then
         export WLR_NO_HARDWARE_CURSORS=1
         export GSK_RENDERER=cairo        # GTK software renderer
         export GDK_BACKEND=wayland
+        # HiDPI: on a 4K-class panel the GTK installer is unreadably tiny, so
+        # scale it up. Widest preferred mode across connected outputs decides.
+        _w=$(for m in /sys/class/drm/*/modes; do head -n1 "$m"; done 2>/dev/null \
+             | cut -d x -f1 | sort -rn | head -n1)
+        if [ "${_w:-0}" -ge 3840 ] 2>/dev/null; then
+            export GDK_SCALE=2
+        elif [ "${_w:-0}" -ge 2560 ] 2>/dev/null; then
+            export GDK_DPI_SCALE=1.4
+        fi
+        unset _w
         # cage needs a seat manager. We run as root, so start seatd and use it
         # (libseat has no usable "builtin" backend in Arch's build).
         if ! pgrep -x seatd >/dev/null 2>&1; then

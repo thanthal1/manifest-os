@@ -36,6 +36,15 @@ impl Answers {
     pub fn pairs(&self) -> impl Iterator<Item = (String, String)> + '_ {
         self.values.iter().map(|(k, v)| (k.clone(), v.clone()))
     }
+
+    /// Seed lower-priority facts (auto-detected hardware: `gpu`, `scale`, …) so
+    /// they fill `{{id}}` tokens too — but only where a survey answer or
+    /// variable hasn't already set that id (those always win).
+    pub fn add_base_facts(&mut self, facts: impl IntoIterator<Item = (String, String)>) {
+        for (k, v) in facts {
+            self.values.entry(k).or_insert(v);
+        }
+    }
 }
 
 /// Parse the `variables` and `survey` blocks out of the raw manifest (ignoring

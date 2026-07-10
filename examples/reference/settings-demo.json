@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Settings-app demo",
+    "author": "Manifest OS",
+    "description": "A manifest that doubles as a settings app: the `settings` block exposes scale, accent and wallpaper for later tweaking in System Snapshots.",
+    "license": "free"
+  },
+  "variables": {
+    "scale": "1",
+    "accent": "#cba6f7",
+    "wallpaper": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/image.jpg"
+  },
+  "settings": [
+    {
+      "id": "scale",
+      "type": "number",
+      "label": "Display scale",
+      "description": "1 = 100%, 2 = 200% (for HiDPI screens).",
+      "min": 1,
+      "max": 3,
+      "default": 1
+    },
+    {
+      "id": "accent",
+      "type": "color",
+      "label": "Accent colour",
+      "description": "Used across the bar, borders and notifications.",
+      "default": "#cba6f7"
+    },
+    {
+      "id": "wallpaper",
+      "type": "path",
+      "label": "Wallpaper",
+      "description": "A local path or an image URL.",
+      "default": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/image.jpg"
+    }
+  ],
+  "desktop": "hyprland",
+  "display": { "scale": "{{scale}}" },
+  "wallpaper": { "source": "{{wallpaper}}", "mode": "fill" },
+  "files": [
+    {
+      "path": "/home/dev/.config/manifest/colors.conf",
+      "owner": "dev:dev",
+      "content": "accent = {{accent}}\n"
+    }
+  ],
+  "users": [
+    { "name": "dev", "groups": ["wheel"], "sudo": true, "password": "dev" }
+  ]
+}

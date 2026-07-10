@@ -484,7 +484,14 @@ fn load_manifest(
 ) -> Result<(Manifest, String)> {
     let raw = std::fs::read_to_string(file)
         .with_context(|| format!("reading manifest at {}", file.display()))?;
-    let answered = survey::collect(&raw, answers)?;
+    let mut answered = survey::collect(&raw, answers)?;
+    // Let auto-detected hardware facts (`{{gpu}}`, `{{scale}}`, …) fill tokens
+    // too, at lower priority than survey answers / variables. Detect without
+    // manifest `detect` overrides here — those aren't parsed yet and only
+    // matter to `when`, which re-detects below.
+    answered.add_base_facts(
+        manifest::conditions::Facts::detect(&std::collections::BTreeMap::new()).pairs(),
+    );
     let substituted = survey::substitute(&raw, &answered);
     let mut manifest = Manifest::from_str(&substituted)?;
     let extra = survey::conditional_packages(&manifest.conditional_packages, &answered);

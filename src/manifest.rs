@@ -63,6 +63,15 @@ pub struct Manifest {
     #[serde(default)]
     pub survey: Vec<Question>,
 
+    /// Post-install **settings** the author exposes for later tweaking in the
+    /// System Snapshots app — a curated subset of the manifest turned into a
+    /// friendly control panel. Each entry's `id` is a [`variables`](Self::variables)
+    /// key: the control shows that variable's current value, and saving rewrites
+    /// it and re-applies (so `{{id}}` updates everywhere). Same typed/validated
+    /// shape as `survey`. This is how a good manifest doubles as a settings app.
+    #[serde(default)]
+    pub settings: Vec<Question>,
+
     /// Package lists gated on survey answers (the original, string-condition
     /// form). Prefer `conditional` for anything beyond packages.
     #[serde(default)]
@@ -123,6 +132,11 @@ pub struct Manifest {
     /// See [`crate::theming`].
     pub theme: Option<Theme>,
 
+    /// Display settings — currently the UI `scale`. Applied across whatever
+    /// environment the manifest sets up (GTK/Qt app scaling everywhere, plus
+    /// each full DE's native setting). See [`crate::scaling`].
+    pub display: Option<Display>,
+
     /// Shell commands run *before* package installation. Escape hatch only.
     #[serde(default)]
     pub pre_install: Vec<String>,
@@ -136,10 +150,14 @@ pub struct Manifest {
 #[derive(Debug, Deserialize)]
 pub struct Question {
     pub id: String,
-    /// "text" | "secret" | "boolean" | "select" | "multiselect" | "number" | "path"
+    /// "text" | "secret" | "boolean" | "select" | "multiselect" | "number" |
+    /// "path" | "color"
     #[serde(rename = "type")]
     pub qtype: String,
     pub label: String,
+    /// Optional one-line helper text (shown under the control in the survey /
+    /// Settings UI).
+    pub description: Option<String>,
     #[serde(default)]
     pub required: bool,
     /// Default answer (any JSON scalar). Used when unattended.
@@ -425,6 +443,39 @@ pub struct Meta {
     pub license: String,
 }
 
+/// Display / scaling settings.
+#[derive(Debug, Default, Deserialize)]
+pub struct Display {
+    /// UI scale factor: `1.0` = 100%, `1.5` = 150%, `2.0` = 200% (HiDPI). When
+    /// unset the installer auto-detects a default from the panel (see the
+    /// `scale` fact). Applied cross-desktop by [`crate::scaling`]. Accepts a
+    /// number or a numeric string, so `"scale": "{{scale}}"` works after
+    /// token substitution.
+    #[serde(default, deserialize_with = "de_scale")]
+    pub scale: Option<f64>,
+}
+
+/// Deserialize a scale as a number *or* a numeric string (empty → none), so a
+/// substituted `{{scale}}` token — which lands as a JSON string — still parses.
+fn de_scale<'de, D>(d: D) -> std::result::Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(n) => Ok(n.as_f64()),
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Ok(None)
+            } else {
+                t.parse().map(Some).map_err(serde::de::Error::custom)
+            }
+        }
+        _ => Err(serde::de::Error::custom("scale must be a number")),
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct System {
     /// System hostname, written to /etc/hostname and /etc/hosts.
@@ -536,5 +587,36 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scale_of(json: &str) -> Option<f64> {
+        Manifest::from_str(json).unwrap().display.and_then(|d| d.scale)
+    }
+
+    #[test]
+    fn display_scale_accepts_number_or_numeric_string() {
+        assert_eq!(scale_of(r#"{"schema_version":"1.0.0","display":{"scale":2}}"#), Some(2.0));
+        assert_eq!(scale_of(r#"{"schema_version":"1.0.0","display":{"scale":"1.5"}}"#), Some(1.5));
+        // Empty (e.g. an unresolved token that fell through) → none, not an error.
+        assert_eq!(scale_of(r#"{"schema_version":"1.0.0","display":{"scale":""}}"#), None);
+        assert_eq!(scale_of(r#"{"schema_version":"1.0.0"}"#), None);
+    }
+
+    #[test]
+    fn settings_block_reuses_the_question_shape() {
+        let m = Manifest::from_str(
+            r#"{"schema_version":"1.0.0","settings":[
+                {"id":"scale","type":"number","label":"Scale","min":1,"max":3,
+                 "description":"HiDPI"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.settings.len(), 1);
+        assert_eq!(m.settings[0].id, "scale");
+        assert_eq!(m.settings[0].description.as_deref(), Some("HiDPI"));
     }
 }

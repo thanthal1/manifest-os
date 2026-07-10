@@ -35,6 +35,7 @@ impl Facts {
         let virt = detect_virt();
         map.insert("is_vm".into(), (virt != "none").to_string());
         map.insert("virt".into(), virt);
+        map.insert("scale".into(), detect_scale());
         map.insert(
             "firmware".into(),
             if Path::new("/sys/firmware/efi").exists() { "uefi" } else { "bios" }.into(),
@@ -50,6 +51,12 @@ impl Facts {
     /// A fact's value, lowercased.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.map.get(key).map(String::as_str)
+    }
+
+    /// Every fact as an owned `(id, value)` pair — for seeding the substitution
+    /// map so `{{gpu}}`, `{{scale}}`, … resolve like survey answers do.
+    pub fn pairs(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.map.iter().map(|(k, v)| (k.clone(), v.clone()))
     }
 
     /// Add facts (survey answers / variables), overriding auto-detected values
@@ -251,6 +258,54 @@ fn detect_cpu() -> String {
     "unknown".into()
 }
 
+/// A sensible default display scale from the connected panels' pixel width:
+/// `2` for 4K-class (≥3840), `1.5` for QHD-class (≥2560), else `1`. A coarse
+/// heuristic (it doesn't read physical size), but it's right for the common
+/// case a HiDPI laptop hits — and a manifest's `display.scale` overrides it.
+/// Exposed as the `scale` fact so `{{scale}}` and `when` can use it.
+fn detect_scale() -> String {
+    let mut widest = 0u32;
+    if let Ok(cards) = std::fs::read_dir("/sys/class/drm") {
+        for c in cards.flatten() {
+            let dir = c.path();
+            // Only connected outputs (skip card0 itself and disconnected ones).
+            let connected = std::fs::read_to_string(dir.join("status"))
+                .map(|s| s.trim() == "connected")
+                .unwrap_or(false);
+            if !connected {
+                continue;
+            }
+            if let Ok(modes) = std::fs::read_to_string(dir.join("modes")) {
+                if let Some(w) = modes
+                    .lines()
+                    .next()
+                    .and_then(|m| m.split_once('x'))
+                    .and_then(|(w, _)| w.trim().parse::<u32>().ok())
+                {
+                    widest = widest.max(w);
+                }
+            }
+        }
+    }
+    scale_for_width(widest)
+}
+
+/// The auto-detected default display scale as a number (1.0 when unknown or
+/// not HiDPI) — the fallback the installer applies when a manifest sets no
+/// explicit `display.scale`.
+pub fn default_scale() -> f64 {
+    detect_scale().parse().unwrap_or(1.0)
+}
+
+fn scale_for_width(width: u32) -> String {
+    match width {
+        w if w >= 3840 => "2",
+        w if w >= 2560 => "1.5",
+        _ => "1",
+    }
+    .to_string()
+}
+
 /// Virtualization technology, or `none` on bare metal (`systemd-detect-virt`).
 /// `systemd-detect-virt` prints `none` (exit 1) on bare metal, so stdout is
 /// authoritative regardless of exit status.
@@ -340,6 +395,14 @@ mod tests {
             "conditional":[{"when":{"is_vm":true},"desktop":"niri"}]}"#);
         resolve(&mut base_unset, &facts);
         assert_eq!(base_unset.desktop.as_deref(), Some("niri")); // overlay fills it
+    }
+
+    #[test]
+    fn scale_heuristic_matches_panel_class() {
+        assert_eq!(scale_for_width(3840), "2"); // 4K
+        assert_eq!(scale_for_width(2560), "1.5"); // QHD
+        assert_eq!(scale_for_width(1920), "1"); // FHD
+        assert_eq!(scale_for_width(0), "1"); // nothing detected
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::keybindings;
 use crate::kernel;
 use crate::manifest::Manifest;
 use crate::pacman;
+use crate::scaling;
 use crate::snippets;
 use crate::system;
 use crate::theming;
@@ -143,6 +144,18 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     if let Some(th) = &manifest.theme {
         step("Applying the theme");
         theming::apply(th, manifest.desktop.as_deref(), primary_user, ctx)?;
+    }
+
+    // Display scale: an explicit `display.scale`, else the panel's auto-detected
+    // default (so a HiDPI machine isn't left with a tiny UI). 1.0 is a no-op.
+    let scale = manifest
+        .display
+        .as_ref()
+        .and_then(|d| d.scale)
+        .unwrap_or_else(crate::conditions::default_scale);
+    if scale > 1.0 {
+        step("Setting display scale");
+        scaling::apply(scale, ctx)?;
     }
 
     if !manifest.keybindings.is_empty() {
