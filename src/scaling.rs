@@ -98,8 +98,17 @@ fn runtime_script(scale: f64) -> String {
          \x20 *mate*)\n\
          \x20   gsettings set org.mate.interface window-scaling-factor {int_scale} 2>/dev/null ;;\n\
          \x20 *kde*|*plasma*)\n\
+         \x20   # KDE scales the whole UI itself. Use its scale factor — NOT\n\
+         \x20   # forceFontDPI, which scales fonts only and (atop Plasma's own\n\
+         \x20   # HiDPI auto-scale) overflows the panel off-screen. kscreen-doctor\n\
+         \x20   # applies it live on Wayland; ScaleFactor persists it for X11.\n\
          \x20   kw=kwriteconfig6; command -v $kw >/dev/null 2>&1 || kw=kwriteconfig5\n\
-         \x20   $kw --file kcmfonts --group General --key forceFontDPI {dpi} 2>/dev/null ;;\n\
+         \x20   $kw --file kdeglobals --group KScreen --key ScaleFactor {sc} 2>/dev/null\n\
+         \x20   if command -v kscreen-doctor >/dev/null 2>&1; then\n\
+         \x20     for o in $(kscreen-doctor -o 2>/dev/null | sed -n 's/^Output: [0-9]* \\([^ ]*\\).*/\\1/p'); do\n\
+         \x20       kscreen-doctor output.$o.scale.{sc} 2>/dev/null\n\
+         \x20     done\n\
+         \x20   fi ;;\n\
          \x20 *xfce*)\n\
          \x20   xfconf-query -c xsettings -p /Xft/DPI -n -t int -s {dpi} 2>/dev/null ;;\n\
          \x20 *) exit 0 ;;\n\
@@ -152,7 +161,8 @@ mod tests {
             "gsettings set org.gnome.desktop.interface text-scaling-factor 2",
             "gsettings set org.cinnamon.desktop.interface scaling-factor 2",
             "gsettings set org.mate.interface window-scaling-factor 2",
-            "--file kcmfonts --group General --key forceFontDPI 192",
+            "--file kdeglobals --group KScreen --key ScaleFactor 2",
+            "kscreen-doctor output.$o.scale.2",
             "xfconf-query -c xsettings -p /Xft/DPI -n -t int -s 192",
             "*) exit 0 ;;",
         ] {
