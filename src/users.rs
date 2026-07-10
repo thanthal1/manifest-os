@@ -10,7 +10,8 @@ use anyhow::Result;
 
 pub fn apply(users: &[UserSpec], ctx: &Ctx) -> Result<()> {
     for u in users {
-        if ctx.check("id", &["--", &u.name]) {
+        let existed = ctx.check("id", &["--", &u.name]);
+        if existed {
             println!("  · user {} already exists", u.name);
         } else {
             create(u, ctx)?;
@@ -20,6 +21,15 @@ pub fn apply(users: &[UserSpec], ctx: &Ctx) -> Result<()> {
         }
         if let Some(pw) = &u.password {
             ctx.set_password(&u.name, pw)?;
+        } else if !existed {
+            // Created fresh with no password → the account can't log in until
+            // one is set. The graphical installer sets it via its account page
+            // (so `existed` is true there); this warns the CLI/TUI-direct path
+            // instead of silently shipping a locked account.
+            println!(
+                "  · note: {0} has no password — set one with `passwd {0}` (the graphical installer does this for you)",
+                u.name
+            );
         }
     }
     Ok(())

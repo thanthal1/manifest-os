@@ -89,8 +89,7 @@
         "audio"
       ],
       "shell": "/bin/zsh",
-      "sudo": true,
-      "password": "dev"
+      "sudo": true
     }
   ],
   "desktop": "hyprland",
