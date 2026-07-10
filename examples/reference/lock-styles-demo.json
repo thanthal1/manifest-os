@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Lock-screen styles demo",
+    "author": "Manifest OS",
+    "description": "A Settings dropdown of hosted swaylock themes. Each option pulls a config from a URL (host your own on GitHub); a power user can point at their own URL or inline `content` instead.",
+    "license": "free"
+  },
+  "variables": { "lock_style": "Aurora" },
+  "settings": [
+    {
+      "id": "lock_style",
+      "type": "select",
+      "label": "Lock screen",
+      "description": "Pick a hosted lock theme, or edit the manifest to use your own.",
+      "options": ["Aurora", "Minimal", "Big clock"]
+    }
+  ],
+  "system": { "hostname": "lock-demo" },
+  "desktop": "sway",
+  "users": [
+    { "name": "dev", "groups": ["wheel", "video", "input"], "sudo": true, "password": "dev" }
+  ],
+  "conditional": [
+    {
+      "when": { "lock_style": "Aurora" },
+      "files": [
+        {
+          "path": "/home/dev/.config/swaylock/config",
+          "owner": "dev:dev",
+          "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/lockscreens/aurora.conf"
+        }
+      ]
+    },
+    {
+      "when": { "lock_style": "Minimal" },
+      "files": [
+        {
+          "path": "/home/dev/.config/swaylock/config",
+          "owner": "dev:dev",
+          "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/lockscreens/minimal.conf"
+        }
+      ]
+    },
+    {
+      "when": { "lock_style": "Big clock" },
+      "files": [
+        {
+          "path": "/home/dev/.config/swaylock/config",
+          "owner": "dev:dev",
+          "source": "https://raw.githubusercontent.com/thanthal1/ManifestOSImages/refs/heads/main/lockscreens/big-clock.conf"
+        }
+      ]
+    }
+  ]
+}

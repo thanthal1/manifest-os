@@ -202,7 +202,11 @@ pub struct UserSpec {
     pub password: Option<String>,
 }
 
-/// A file to write verbatim.
+/// A file to write. The content is either inline (`content`) or pulled from a
+/// hosted URL / local path (`source`) — the latter lets a manifest reference a
+/// hosted config (e.g. a swaylock theme in a GitHub repo) instead of inlining
+/// it, which pairs with a `settings` dropdown + `conditional` to offer a
+/// picker of hosted styles.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileSpec {
     /// Destination. `~/...` writes to the invoking user's home; an absolute
@@ -210,6 +214,9 @@ pub struct FileSpec {
     pub path: String,
     #[serde(default)]
     pub content: String,
+    /// Fetch the content from here instead of `content`: an `http(s)://` URL
+    /// (curl'd) or a local path (copied). Wins over `content` when set.
+    pub source: Option<String>,
     /// Octal permission string, e.g. "644" or "0440".
     pub mode: Option<String>,
     /// chown target, e.g. "root:root" or "alice". Implies a root-owned write.
