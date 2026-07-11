@@ -94,6 +94,21 @@ else
     echo "reference manifests NOT bundled (set MANIFEST_BUNDLE_REFERENCE=1 to include them)"
 fi
 
+# Ship the bundled plugins (docker/tailscale/ollama/steam/k3s) so a manifest can
+# use their blocks on a fresh install. Clean first (same accumulation reason as
+# examples), then bake each validated *.json into the plugin search path.
+rm -rf "$profile/airootfs/usr/share/manifest-os/plugins"
+if compgen -G "$repo/plugins/*.json" >/dev/null; then
+    for p in "$repo"/plugins/*.json; do
+        [[ -s "$p" ]] || { echo "ERROR: plugin $(basename "$p") is empty — aborting build" >&2; exit 1; }
+        if command -v python &>/dev/null && ! python -c "import json,sys; json.load(open(sys.argv[1]))" "$p" 2>/dev/null; then
+            echo "ERROR: plugin $(basename "$p") is not valid JSON — aborting build" >&2; exit 1
+        fi
+        install -Dm644 "$p" "$profile/airootfs/usr/share/manifest-os/plugins/$(basename "$p")"
+    done
+    echo "bundled $(ls "$repo"/plugins/*.json | wc -l) plugin(s)"
+fi
+
 # Normalize line endings — a Windows checkout may carry CRLF, which makes
 # mkarchiso choke when it sources profiledef.sh ($'\r': command not found).
 # grep -I skips binary files (e.g. the baked-in manifest binary).

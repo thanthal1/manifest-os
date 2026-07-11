@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Plugins demo — a homelab / dev host",
+    "author": "Manifest OS",
+    "description": "Shows the plugin system: the bundled `docker`, `tailscale`, `ollama` and `steam` blocks expand into packages + services the core engine never had to know about — plus one INLINE plugin (`syncthing`) carried in the manifest itself, so this file is fully self-contained and reproduces the same system anywhere, no plugin install needed.",
+    "tags": ["plugins", "docker", "homelab", "ai"],
+    "license": "free"
+  },
+  "system": { "hostname": "homelab", "timezone": "UTC" },
+  "users": [
+    { "name": "op", "groups": ["wheel", "docker"], "sudo": true }
+  ],
+  "packages": ["git", "htop", "vim"],
+
+  "docker":    { "compose": true, "buildx": true },
+  "tailscale": {},
+  "ollama":    { "webui": true },
+  "steam":     { "gamemode": true, "mangohud": true },
+
+  "plugins": [
+    {
+      "plugin": "syncthing",
+      "version": "1.0.0",
+      "description": "Continuous file sync, run as a per-user service.",
+      "requires": ["user"],
+      "expands": {
+        "packages": ["syncthing"],
+        "post_install": [
+          "systemctl enable syncthing@{{user}}.service"
+        ]
+      },
+      "conditional": [
+        {
+          "when": { "gui": true },
+          "packages": ["qsyncthingtray"]
+        }
+      ]
+    }
+  ],
+  "syncthing": { "user": "op", "gui": false }
+}

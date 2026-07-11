@@ -1,0 +1,12 @@
+{
+  "plugin": "tailscale",
+  "version": "1.0.0",
+  "description": "Tailscale mesh VPN: installs the client and enables the tailscaled daemon. Connecting (`tailscale up`) is an interactive login left to the user, so no auth secret is ever baked into the manifest.",
+  "expands": {
+    "packages": ["tailscale"],
+    "services": { "system": ["tailscaled.service"] },
+    "post_install": [
+      "echo 'Tailscale installed — run `sudo tailscale up` to authenticate and join your tailnet.'"
+    ]
+  }
+}

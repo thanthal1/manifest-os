@@ -181,9 +181,25 @@ function scanDNS(m, push){
   (m.packages||[]).forEach(p=>{ if(DNS_PKGS.has(p)) push("MEDIUM",`installs a DNS server/resolver (\`${p}\`)`,"A local DNS server/forwarder intercepts all name resolution — review its config for spoofed/overridden domains.","packages"); });
 }
 
+const CORE_KEYS=new Set(["schema_version","meta","system","repos","packages","services","dotfiles","desktop","display_manager","boot","variables","survey","settings","conditional_packages","conditional","detect","users","files","snippets","flatpak","defaults","wallpaper","keybindings","theme","display","pre_install","post_install","plugins"]);
 function scan(m){
   const F=[], R=[];
   const push=(sev,title,detail,where)=>F.push({sev,title,detail,where});
+  // plugins: fold each inline plugin's contributed primitives into the manifest
+  // view so every check below covers them, and flag external (non-inline) blocks.
+  const inline=m.plugins||[], provided=new Set();
+  inline.forEach(p=>{ if(p&&typeof p==="object"){ provided.add(p.plugin); (p.provides||[]).forEach(k=>provided.add(k)); }});
+  Object.keys(m).forEach(k=>{ if(!CORE_KEYS.has(k)&&!provided.has(k))
+    push("MEDIUM",`external plugin block \`${k}\``,"Not a core field and not defined inline — it expands via a plugin shipped separately, so what it installs can't be reviewed from this manifest alone.",k); });
+  inline.forEach(p=>{ if(!p||typeof p!=="object")return;
+    const bodies=[p.expands||{}]; (p.conditional||[]).forEach(r=>{ if(r&&typeof r==="object"){ const b={...r}; delete b.when; bodies.push(b); }});
+    bodies.forEach(b=>{ if(!b||typeof b!=="object")return;
+      for(const ph of ["pre_install","post_install"]) (m[ph]=(m[ph]||[]).concat(b[ph]||[]));
+      for(const k of ["files","snippets","users"]) (m[k]=(m[k]||[]).concat(b[k]||[]));
+      if(b.dotfiles) m.dotfiles=[].concat(m.dotfiles||[]).concat(b.dotfiles);
+      if(b.repos&&typeof b.repos==="object") m.repos=Object.assign({},m.repos,b.repos);
+    });
+  });
   // hooks
   for(const phase of ["pre_install","post_install"]) (m[phase]||[]).forEach((line,i)=>{
     push("HIGH",phase+" runs a shell command","Author-supplied shell runs as root during install — the single biggest review item.",`${phase}[${i}]: ${shorten(line)}`);
@@ -211,9 +227,10 @@ function scan(m){
   // sources
   const urls=[];
   const w=m.wallpaper; if(typeof w==="string") urls.push(["wallpaper",w]); else if(w&&w.source) urls.push(["wallpaper.source",w.source]);
-  if(m.dotfiles&&m.dotfiles.source){ urls.push(["dotfiles.source",m.dotfiles.source]);
-    push("MEDIUM","dotfiles cloned from a URL","Every file in the repo is placed into the user's $HOME — the whole repo is trusted. Review it.",`dotfiles.source: ${m.dotfiles.source}`);
-    R.push(["dotfiles","dotfiles.source",m.dotfiles.source]); }
+  // dotfiles may be a single object or an array of mappings.
+  [].concat(m.dotfiles||[]).forEach((df,i)=>{ if(!df||!df.source)return; urls.push([`dotfiles[${i}].source`,df.source]);
+    push("MEDIUM","dotfiles cloned from a URL","Every file in the repo is placed into the user's $HOME — the whole repo is trusted. Review it.",`dotfiles.source: ${df.source}`);
+    R.push(["dotfiles",`dotfiles[${i}].source`,df.source]); });
   urls.forEach(([where,u])=>{ u=(""+u).replace(/[).,'"]+$/,""); if(!/^http/.test(u))return; R.push(["url",where,u]);
     if(/^http:\/\//.test(u)) push("MEDIUM","plain-HTTP resource","http:// is unauthenticated and MITM-able; require https://.",`${where}: ${u}`); });
   // repos + boot

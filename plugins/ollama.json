@@ -1,0 +1,16 @@
+{
+  "plugin": "ollama",
+  "version": "1.0.0",
+  "description": "Local LLM runtime (Ollama) with its service enabled. `webui: true` adds Open WebUI. For GPU acceleration, install `ollama-cuda` (NVIDIA) or `ollama-rocm` (AMD) via the manifest's `packages` instead of the CPU `ollama` here.",
+  "expands": {
+    "packages": ["ollama"],
+    "services": { "system": ["ollama.service"] }
+  },
+  "conditional": [
+    {
+      "when": { "webui": true },
+      "packages": ["open-webui"],
+      "services": { "system": ["open-webui.service"] }
+    }
+  ]
+}

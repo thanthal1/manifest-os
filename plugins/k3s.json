@@ -1,0 +1,9 @@
+{
+  "plugin": "k3s",
+  "version": "1.0.0",
+  "description": "Lightweight Kubernetes (k3s): installs the k3s binary and enables a single-node control plane. Joining more nodes needs the server's node-token (a secret), so that's left to the user rather than baked into the manifest.",
+  "expands": {
+    "packages": ["k3s-bin"],
+    "services": { "system": ["k3s.service"] }
+  }
+}

@@ -20,6 +20,7 @@ pub mod keybindings;
 pub mod kernel;
 pub mod manifest;
 pub mod pacman;
+pub mod plugins;
 pub mod probe;
 pub mod scaling;
 pub mod segment;

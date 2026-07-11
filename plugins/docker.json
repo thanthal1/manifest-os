@@ -1,0 +1,14 @@
+{
+  "plugin": "docker",
+  "version": "1.0.0",
+  "description": "Docker Engine with its socket enabled. Flags add Compose, Buildx, and rootless mode. (To let a user run docker without sudo, add \"docker\" to that user's `groups` in the manifest's `users` block.)",
+  "expands": {
+    "packages": ["docker"],
+    "services": { "system": ["docker.socket"] }
+  },
+  "conditional": [
+    { "when": { "compose": true },  "packages": ["docker-compose"] },
+    { "when": { "buildx": true },   "packages": ["docker-buildx"] },
+    { "when": { "rootless": true }, "packages": ["docker-rootless-extras"] }
+  ]
+}

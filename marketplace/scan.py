@@ -269,13 +269,16 @@ def scan_sources(m, rep):
         urls.append(("wallpaper", w))
     elif isinstance(w, dict) and w.get("source"):
         urls.append(("wallpaper.source", w["source"]))
+    # dotfiles may be a single object or an array of mappings.
     df = m.get("dotfiles")
-    if isinstance(df, dict) and df.get("source"):
-        src = df["source"]
-        urls.append(("dotfiles.source", src))
-        rep.add("MEDIUM", "dotfiles", "dotfiles cloned from a URL",
-                "Every file in the repo is placed into the user's $HOME — the whole repo "
-                "is trusted code/config. Review it.", f"dotfiles.source: {src}")
+    df_list = df if isinstance(df, list) else [df] if isinstance(df, dict) else []
+    for i, entry in enumerate(df_list):
+        if isinstance(entry, dict) and entry.get("source"):
+            src = entry["source"]
+            urls.append((f"dotfiles[{i}].source", src))
+            rep.add("MEDIUM", "dotfiles", "dotfiles cloned from a URL",
+                    "Every file in the repo is placed into the user's $HOME — the whole repo "
+                    "is trusted code/config. Review it.", f"dotfiles.source: {src}")
     for phase in ("pre_install", "post_install"):
         for line in m.get(phase, []) or []:
             urls += [(phase, u) for u in re.findall(r"https?://[^\s\"'|)]+", line)]
@@ -392,11 +395,72 @@ def shorten(s, n=90):
 # Driver
 # ---------------------------------------------------------------------------
 
+# Core top-level manifest keys the engine understands natively. Anything else is
+# a plugin block (or a typo). Keep loosely in sync with src/manifest.rs.
+CORE_KEYS = {
+    "schema_version", "meta", "system", "repos", "packages", "services",
+    "dotfiles", "desktop", "display_manager", "boot", "variables", "survey",
+    "settings", "conditional_packages", "conditional", "detect", "users",
+    "files", "snippets", "flatpak", "defaults", "wallpaper", "keybindings",
+    "theme", "display", "pre_install", "post_install", "plugins",
+}
+
+
+def scan_plugins(m, rep):
+    """Fold inline plugin content into `m` so every other scanner covers it, and
+    flag blocks that rely on a plugin shipped outside this manifest.
+
+    A plugin `expands` a custom block into the same primitives (hooks, files,
+    users, repos, dotfiles) the rest of the scanner already vets — so an inline
+    plugin sneaking in a root hook must not escape review just because it's one
+    level down.
+    """
+    inline = m.get("plugins") or []
+    provided = set()
+    for p in inline:
+        if isinstance(p, dict):
+            provided.add(p.get("plugin"))
+            provided.update(p.get("provides") or [])
+
+    # Blocks with no core field and no inline definition = external plugin.
+    for key in list(m.keys()):
+        if key in CORE_KEYS or key in provided:
+            continue
+        rep.add("MEDIUM", "plugins", f"external plugin block `{key}`",
+                "This block isn't a core field and isn't defined inline — it expands "
+                "via a plugin shipped separately, so what it installs can't be reviewed "
+                "from this manifest alone. Prefer an inline `plugins` definition.", key)
+
+    # Merge each inline plugin's contributed primitives into the manifest view.
+    for p in inline:
+        if not isinstance(p, dict):
+            continue
+        bodies = [p.get("expands") or {}]
+        for r in (p.get("conditional") or []):
+            if isinstance(r, dict):
+                bodies.append({k: v for k, v in r.items() if k != "when"})
+        for b in bodies:
+            if not isinstance(b, dict):
+                continue
+            for phase in ("pre_install", "post_install"):
+                m.setdefault(phase, []).extend(b.get(phase) or [])
+            for key in ("files", "snippets", "users"):
+                m.setdefault(key, []).extend(b.get(key) or [])
+            df = b.get("dotfiles")
+            if df:
+                cur = m.get("dotfiles")
+                m["dotfiles"] = (cur if isinstance(cur, list) else [cur] if cur else []) \
+                    + (df if isinstance(df, list) else [df])
+            if isinstance(b.get("repos"), dict):
+                m.setdefault("repos", {}).update(b["repos"])
+
+
 def scan(manifest, check_packages=False):
     rep = Report()
     if not isinstance(manifest, dict):
         rep.add("CRITICAL", "schema", "not a JSON object", "The manifest must be a JSON object.")
         return rep
+    scan_plugins(manifest, rep)
     scan_hooks(manifest, rep)
     scan_files(manifest, rep)
     scan_dns(manifest, rep)

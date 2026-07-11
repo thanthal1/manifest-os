@@ -1,0 +1,14 @@
+{
+  "plugin": "steam",
+  "version": "1.0.0",
+  "description": "Steam (enables the multilib repo it needs). Flags add the common Steam-Deck-style extras: GameMode, MangoHud, and Gamescope.",
+  "expands": {
+    "repos": { "multilib": true },
+    "packages": ["steam"]
+  },
+  "conditional": [
+    { "when": { "gamemode": true },  "packages": ["gamemode", "lib32-gamemode"] },
+    { "when": { "mangohud": true },  "packages": ["mangohud", "lib32-mangohud"] },
+    { "when": { "gamescope": true }, "packages": ["gamescope"] }
+  ]
+}

@@ -267,19 +267,30 @@ fn run() -> Result<()> {
             history::rollback(reference.as_deref(), dry_run)
         }
         Command::Verify { file } => {
-            let manifest = Manifest::from_path(&file)?;
+            let raw = std::fs::read_to_string(&file)
+                .with_context(|| format!("reading manifest at {}", file.display()))?;
+            // Expand plugin blocks first, so an unknown block is a verify error
+            // and the reported package count includes what plugins contribute.
+            let expanded = manifest::plugins::expand(&raw)?;
+            let manifest = Manifest::from_str(&expanded)?;
             let kernel = kernel::resolve(manifest.system.kernel.as_deref())?;
             let default_note = if manifest.system.kernel.is_none() {
                 " (default)"
             } else {
                 ""
             };
+            let plugin_note = if expanded != raw {
+                " (plugins expanded)"
+            } else {
+                ""
+            };
             println!(
-                "✓ valid — schema v{}, {} package(s), kernel: {}{}",
+                "✓ valid — schema v{}, {} package(s), kernel: {}{}{}",
                 manifest.schema_version,
                 manifest.packages.len(),
                 kernel.package,
                 default_note,
+                plugin_note,
             );
             Ok(())
         }
@@ -499,6 +510,10 @@ fn load_manifest(
         manifest::conditions::Facts::detect(&std::collections::BTreeMap::new()).pairs(),
     );
     let substituted = survey::substitute(&raw, &answered);
+    // Expand any plugin blocks (`docker`, `tailscale`, …) into core primitives
+    // before parsing, so nothing downstream — including the recorded/rollback
+    // JSON — needs to know a plugin was ever involved.
+    let substituted = manifest::plugins::expand(&substituted)?;
     let mut manifest = Manifest::from_str(&substituted)?;
     let extra = survey::conditional_packages(&manifest.conditional_packages, &answered);
     let mut recorded = substituted.clone();
