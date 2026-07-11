@@ -66,6 +66,30 @@ pub fn compute(new: &Manifest, current: Option<&Manifest>) -> Vec<Change> {
     out
 }
 
+/// Whether applying `new` over `current` needs the **full** pipeline (package
+/// installs, desktop/user/bootloader/service work) rather than just regenerating
+/// config. A settings/variables-only edit touches none of these, so it can take
+/// the fast [`crate::install::reconfigure`] path; anything here forces a sync.
+pub fn requires_full_apply(new: &Manifest, current: Option<&Manifest>) -> bool {
+    let empty = Manifest::from_str(r#"{"schema_version":"1.0.0"}"#).expect("valid empty manifest");
+    let old = current.unwrap_or(&empty);
+
+    let set = |v: &[String]| v.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let flatpak_apps =
+        |m: &Manifest| m.flatpak.as_ref().map(|f| set(&f.apps)).unwrap_or_default();
+    let users = |m: &Manifest| m.users.iter().map(|u| u.name.clone()).collect::<std::collections::BTreeSet<_>>();
+
+    set(&old.packages) != set(&new.packages)
+        || old.desktop != new.desktop
+        || old.display_manager != new.display_manager
+        || old.system.kernel != new.system.kernel
+        || old.boot.is_some() != new.boot.is_some()
+        || set(&old.services.system) != set(&new.services.system)
+        || set(&old.services.user) != set(&new.services.user)
+        || flatpak_apps(old) != flatpak_apps(new)
+        || users(old) != users(new)
+}
+
 /// Print the diff (CLI `manifest diff`).
 pub fn run(new: &Manifest, current: Option<&Manifest>) {
     match current {
@@ -234,6 +258,29 @@ mod tests {
         run(&new, None);
         let old = parse(r#"{"schema_version":"1.0.0","desktop":"niri"}"#);
         run(&new, Some(&old));
+    }
+
+    #[test]
+    fn config_only_edit_does_not_require_full_apply() {
+        // A variables/theme/wallpaper edit (what the Settings app produces) must
+        // take the fast reconfigure path.
+        let old = parse(r#"{"schema_version":"1.0.0","packages":["git"],"desktop":"niri","theme":{"dark":false}}"#);
+        let new = parse(r#"{"schema_version":"1.0.0","packages":["git"],"desktop":"niri","theme":{"dark":true},"variables":{"scale":"1.5"}}"#);
+        assert!(!requires_full_apply(&new, Some(&old)));
+    }
+
+    #[test]
+    fn package_or_desktop_edit_requires_full_apply() {
+        let old = parse(r#"{"schema_version":"1.0.0","packages":["git"],"desktop":"niri"}"#);
+        // added a package
+        let more_pkgs = parse(r#"{"schema_version":"1.0.0","packages":["git","firefox"],"desktop":"niri"}"#);
+        assert!(requires_full_apply(&more_pkgs, Some(&old)));
+        // changed the desktop
+        let other_de = parse(r#"{"schema_version":"1.0.0","packages":["git"],"desktop":"gnome"}"#);
+        assert!(requires_full_apply(&other_de, Some(&old)));
+        // added a service
+        let svc = parse(r#"{"schema_version":"1.0.0","packages":["git"],"desktop":"niri","services":{"system":["sshd"]}}"#);
+        assert!(requires_full_apply(&svc, Some(&old)));
     }
 
     #[test]

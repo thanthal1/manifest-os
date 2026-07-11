@@ -5,9 +5,11 @@
 //! that variable's current value with the right control (a slider for a number,
 //! a switch for a boolean, a dropdown for a select, a field otherwise). Saving
 //! writes the new values back into the manifest's `variables` and re-applies it
-//! through the same privileged `manifest sync` the Designer/Apply pages use —
-//! so `{{id}}` updates everywhere (scale, wallpaper, accent, …) and the system
-//! matches. This is what lets a well-authored manifest double as a settings app.
+//! through `manifest reconfigure` — a targeted re-apply that regenerates just
+//! the config the change touches (scale, wallpaper, accent, …) instead of
+//! rerunning the whole install, so `{{id}}` updates everywhere without a full
+//! `-Syu`/package pass. This is what lets a well-authored manifest double as a
+//! settings app.
 
 use adw::prelude::*;
 use gtk4 as gtk;
@@ -75,7 +77,10 @@ pub fn build(
                     &stack,
                     &toasts,
                     "Applying settings",
-                    vec!["sync".into(), path],
+                    // Targeted re-apply — regenerates config (scale, wallpaper,
+                    // theme, …) without rerunning the whole install. Falls back
+                    // to a full sync itself if the edit changed something heavy.
+                    vec!["reconfigure".into(), path],
                 ),
                 Err(e) => toasts.add_toast(adw::Toast::new(&format!("Couldn't save settings: {e}"))),
             }

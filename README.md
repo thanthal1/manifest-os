@@ -283,7 +283,8 @@ manifest install <file.json> [--dry-run] [--answers a.json]   # apply a manifest
 manifest verify  <file.json>               # validate structure + schema version
 manifest export  [-o out.json]             # capture the running system into a manifest
 manifest diff    <file.json>               # preview what applying would change
-manifest sync    <file.json>               # re-apply an edited manifest
+manifest sync    <file.json>               # re-apply an edited manifest (full)
+manifest reconfigure <file.json>           # targeted re-apply for settings/config-only edits
 manifest history                           # list applied manifests (git-backed)
 manifest rollback [<ref>]                  # revert to a previous manifest
 manifest desktops | kernels                # list supported desktops/WMs / kernels

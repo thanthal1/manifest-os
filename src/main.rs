@@ -72,6 +72,22 @@ enum Command {
         #[arg(long)]
         answers: Option<PathBuf>,
     },
+    /// Targeted re-apply for settings / config-only edits: regenerate the
+    /// config the manifest declares (theme, wallpaper, scale, keybindings,
+    /// files, snippets, defaults) without the slow steps — no `-Syu`, no paru,
+    /// no package installs. Checks the diff first and falls back to a full
+    /// `sync` automatically if the edit actually changed packages, the desktop,
+    /// users or services. This is what the Settings app uses.
+    Reconfigure {
+        /// Path to a manifest.json.
+        file: PathBuf,
+        /// Print every step without executing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// JSON object of survey answers ({"id": value}) for unattended runs.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+    },
     /// Preview what applying a manifest would change, compared to the
     /// last-applied one. Read-only — makes no changes.
     Diff {
@@ -254,6 +270,28 @@ fn run() -> Result<()> {
             let json = fold_existing_packages(&mut manifest, json);
             let ctx = Ctx::new(dry_run);
             install::sync(&manifest, &ctx)?;
+            history::record(&json, &manifest.meta.name, &ctx);
+            Ok(())
+        }
+        Command::Reconfigure {
+            file,
+            dry_run,
+            answers,
+        } => {
+            let (mut manifest, json) = load_manifest(&file, answers.as_deref())?;
+            let json = fold_existing_packages(&mut manifest, json);
+            let ctx = Ctx::new(dry_run);
+            // Use the diff against the last-applied manifest to decide: if only
+            // config/variables changed, do the fast targeted re-apply; if the
+            // edit changed packages/desktop/users/services, fall back to a full
+            // sync so nothing new is left uninstalled.
+            let current = history::current();
+            if diff::requires_full_apply(&manifest, current.as_ref()) {
+                println!("→ this edit changes packages/desktop/services — running a full sync\n");
+                install::sync(&manifest, &ctx)?;
+            } else {
+                install::reconfigure(&manifest, &ctx)?;
+            }
             history::record(&json, &manifest.meta.name, &ctx);
             Ok(())
         }

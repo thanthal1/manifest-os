@@ -38,7 +38,7 @@ src/                     the engine + CLI (Rust)
   theming.rs keybindings.rs wallpaper.rs scaling.rs   cross-desktop theme / universal keybinds / wallpaper / HiDPI scale
   survey.rs conditions.rs     author questions, {{id}} injection  /  Facts + when/conditional/detect engine
   plugins.rs             expand custom blocks (docker/tailscale/…) into core primitives; inline or from plugins/
-  export.rs diff.rs history.rs  capture running system  /  preview changes  /  git-backed history + rollback
+  export.rs diff.rs history.rs  capture running system  /  preview changes (+ requires_full_apply) /  git-backed history + rollback
   installer.rs           the disk EXECUTOR: partition->format->mount->pacstrap->manifest install
   probe.rs               InstallPlan + disk/network/manifest/existing-OS probing (shared by TUI+GUI)
   tui.rs                 the Ratatui guided installer
@@ -105,7 +105,7 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 | dual-boot alongside Windows (shrink + reuse ESP, per-OS bootloader) | ✅ | real HW (4 concurrent installs, stable) |
 | LUKS (systemd `sd-encrypt` + BIOS/UEFI) | ✅ | VM |
 | System Snapshots app (save/restore/apply/Designer/settings) | ✅ | VM (cage software-render) |
-| export / diff / sync / history / rollback | ✅ | VM + dry-run |
+| export / diff / sync / reconfigure / history / rollback | ✅ | VM + dry-run |
 | WiFi list+connect (rfkill-unblock included) | ✅ | real HW (laptop) |
 | Install-log to USB on a real-HW failure | ✅ fixed | needs a real failing USB to re-confirm |
 | marketplace boot-test **server** (`server.py`) | ⏳ WIP, unverified | see marketplace/SERVER-TODO.md |

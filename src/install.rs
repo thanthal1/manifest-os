@@ -30,12 +30,22 @@ use crate::users;
 use crate::wallpaper;
 use anyhow::Result;
 
-/// Whether we're doing a first-time install or re-applying an edited manifest
-/// to an already-running system.
+/// Whether we're doing a first-time install, a full re-apply, or a targeted
+/// config-only re-apply (settings/variables edits that regenerate config
+/// without touching packages, the desktop, users or the bootloader).
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Install,
     Sync,
+    Reconfigure,
+}
+
+impl Mode {
+    /// The heavy path — repos, `-Syu`, paru, package installs, desktop/user/boot
+    /// setup. Skipped for [`Mode::Reconfigure`], which only regenerates config.
+    fn full(self) -> bool {
+        self != Mode::Reconfigure
+    }
 }
 
 /// Apply a manifest to the current system for the first time.
@@ -57,9 +67,25 @@ pub fn sync(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
     apply(manifest, ctx, Mode::Sync)
 }
 
+/// Targeted re-apply for a settings/config-only edit: regenerate the config the
+/// manifest declares (system, wallpaper, theme, scale, keybindings, files,
+/// snippets, defaults) and nothing else. Skips repos, `-Syu`, paru, package
+/// installs, desktop/user/bootloader setup — the slow, network-bound steps that
+/// a variables-only change can't have altered. The caller ([`crate::main`]'s
+/// `reconfigure`) checks the diff first and routes to [`sync`] instead if the
+/// edit did change something heavy.
+pub fn reconfigure(manifest: &Manifest, ctx: &Ctx) -> Result<()> {
+    apply(manifest, ctx, Mode::Reconfigure)
+}
+
 fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     let m = &manifest.meta;
-    let verb = if mode == Mode::Sync { "Syncing" } else { "Installing" };
+    let full = mode.full();
+    let verb = match mode {
+        Mode::Install => "Installing",
+        Mode::Sync => "Syncing",
+        Mode::Reconfigure => "Updating",
+    };
     println!(
         "\n→ {verb} \"{}\"{}\n",
         if m.name.is_empty() { "(unnamed manifest)" } else { &m.name },
@@ -71,31 +97,33 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     let kernel = kernel::resolve(manifest.system.kernel.as_deref())?;
     let desktop = desktop::resolve(manifest)?;
 
-    step("Enabling repositories");
-    pacman::enable_repos(manifest, kernel, ctx)?;
+    if full {
+        step("Enabling repositories");
+        pacman::enable_repos(manifest, kernel, ctx)?;
 
-    step("Updating system");
-    pacman::sync_system(ctx)?;
+        step("Updating system");
+        pacman::sync_system(ctx)?;
 
-    step("Bootstrapping paru");
-    pacman::bootstrap_paru(ctx)?;
+        step("Bootstrapping paru");
+        pacman::bootstrap_paru(ctx)?;
 
-    run_hooks("pre_install", &manifest.pre_install, ctx)?;
+        run_hooks("pre_install", &manifest.pre_install, ctx)?;
 
-    step("Installing packages");
-    println!("  · kernel: {} ({} + {})", kernel.display, kernel.package, kernel.headers);
-    if kernel.key != crate::kernel::DEFAULT_KEY {
-        println!("  · note: non-default kernel — ensure the bootloader has an entry for it");
-    }
-    let desktop_pkgs = desktop.as_ref().map(|d| d.packages.clone()).unwrap_or_default();
-    if let Some(d) = &desktop {
-        println!("  · desktop: {} (+{} packages)", d.display_name, d.packages.len());
-    }
-    pacman::install_packages(manifest, kernel, &desktop_pkgs, ctx)?;
+        step("Installing packages");
+        println!("  · kernel: {} ({} + {})", kernel.display, kernel.package, kernel.headers);
+        if kernel.key != crate::kernel::DEFAULT_KEY {
+            println!("  · note: non-default kernel — ensure the bootloader has an entry for it");
+        }
+        let desktop_pkgs = desktop.as_ref().map(|d| d.packages.clone()).unwrap_or_default();
+        if let Some(d) = &desktop {
+            println!("  · desktop: {} (+{} packages)", d.display_name, d.packages.len());
+        }
+        pacman::install_packages(manifest, kernel, &desktop_pkgs, ctx)?;
 
-    if let Some(fp) = &manifest.flatpak {
-        step("Installing Flatpak apps");
-        flatpak::apply(fp, ctx)?;
+        if let Some(fp) = &manifest.flatpak {
+            step("Installing Flatpak apps");
+            flatpak::apply(fp, ctx)?;
+        }
     }
 
     if !manifest.system.is_empty() {
@@ -103,27 +131,31 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         system::apply(&manifest.system, ctx)?;
     }
 
-    if !manifest.users.is_empty() {
+    if full && !manifest.users.is_empty() {
         step("Creating users");
         users::apply(&manifest.users, ctx)?;
     }
 
-    if let Some(boot_cfg) = &manifest.boot {
-        step("Configuring bootloader");
-        boot::apply(boot_cfg, kernel, ctx)?;
+    if full {
+        if let Some(boot_cfg) = &manifest.boot {
+            step("Configuring bootloader");
+            boot::apply(boot_cfg, kernel, ctx)?;
+        }
     }
 
     let mut switched_desktop = false;
-    if let Some(d) = &desktop {
-        step("Configuring desktop");
-        // On a sync, retarget the login manager first if the desktop changed,
-        // so the freshly-enabled DM below becomes the boot default.
-        if mode == Mode::Sync {
-            switched_desktop = desktop::switch_default(d, ctx);
-        }
-        desktop::apply(d, ctx)?;
-        if !d.aur.is_empty() {
-            println!("  · note: AUR packages pulled — {}", d.aur.join(", "));
+    if full {
+        if let Some(d) = &desktop {
+            step("Configuring desktop");
+            // On a sync, retarget the login manager first if the desktop changed,
+            // so the freshly-enabled DM below becomes the boot default.
+            if mode == Mode::Sync {
+                switched_desktop = desktop::switch_default(d, ctx);
+            }
+            desktop::apply(d, ctx)?;
+            if !d.aur.is_empty() {
+                println!("  · note: AUR packages pulled — {}", d.aur.join(", "));
+            }
         }
     }
 
@@ -163,7 +195,7 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         keybindings::apply(&manifest.keybindings, manifest.desktop.as_deref(), primary_user, ctx)?;
     }
 
-    if !manifest.dotfiles.is_empty() {
+    if full && !manifest.dotfiles.is_empty() {
         step("Installing dotfiles");
         dotfiles::install(&manifest.dotfiles, ctx)?;
     }
@@ -186,18 +218,24 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         defaults::apply(defaults_cfg, primary_user, ctx)?;
     }
 
-    enable_services(manifest, ctx)?;
-    run_hooks("post_install", &manifest.post_install, ctx)?;
+    if full {
+        enable_services(manifest, ctx)?;
+        run_hooks("post_install", &manifest.post_install, ctx)?;
 
-    // Keep the system's declared state in sync with future package changes.
-    // Last, so nothing in this run self-triggers the hook. Best-effort — a
-    // failure here shouldn't fail an otherwise-complete install.
-    step("Enabling package tracking");
-    if let Err(e) = export::enable_tracking(ctx) {
-        println!("  · note: couldn't enable package tracking ({e:#})");
+        // Keep the system's declared state in sync with future package changes.
+        // Last, so nothing in this run self-triggers the hook. Best-effort — a
+        // failure here shouldn't fail an otherwise-complete install.
+        step("Enabling package tracking");
+        if let Err(e) = export::enable_tracking(ctx) {
+            println!("  · note: couldn't enable package tracking ({e:#})");
+        }
     }
 
-    let done = if mode == Mode::Sync { "Synced" } else { "Done" };
+    let done = match mode {
+        Mode::Sync => "Synced",
+        Mode::Reconfigure => "Updated",
+        Mode::Install => "Done",
+    };
     println!("\n✓ {done}.{}", if ctx.dry_run { " (dry-run — no changes made)" } else { "" });
     if switched_desktop && !ctx.dry_run {
         println!("  · log out (or reboot) to enter your new desktop.");
