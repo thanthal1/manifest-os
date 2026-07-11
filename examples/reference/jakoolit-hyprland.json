@@ -3,7 +3,7 @@
   "meta": {
     "name": "JaKooLit Hyprland-Dots (as a manifest)",
     "author": "Manifest OS",
-    "description": "Reproduces JaKooLit's Hyprland-Dots the declarative way: install the packages its script installs, then place its exact configs via `dotfiles` (config/ → ~/.config). No install.sh executed — everything is declared, reproducible and rollback-able.",
+    "description": "Reproduces JaKooLit's Hyprland-Dots the declarative way: install the packages its script installs, then place its exact configs via a `dotfiles` list — config/ → ~/.config, its icons → ~/.icons, plus wallpapers pulled from a second repo → ~/Pictures/wallpapers. No install.sh executed — everything is declared, reproducible and rollback-able.",
     "tags": ["hyprland", "jakoolit", "rice", "dotfiles"],
     "license": "free"
   },
@@ -46,11 +46,27 @@
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
   },
-  "dotfiles": {
-    "source": "https://github.com/JaKooLit/Hyprland-Dots",
-    "branch": "main",
-    "subdir": "config",
-    "into": "~/.config",
-    "method": "copy"
-  }
+  "dotfiles": [
+    {
+      "source": "https://github.com/JaKooLit/Hyprland-Dots",
+      "branch": "main",
+      "subdir": "config",
+      "into": "~/.config",
+      "method": "copy"
+    },
+    {
+      "source": "https://github.com/JaKooLit/Hyprland-Dots",
+      "branch": "main",
+      "subdir": "assets/.icons",
+      "into": "~/.icons",
+      "method": "copy"
+    },
+    {
+      "source": "https://github.com/JaKooLit/Wallpaper-Bank",
+      "branch": "main",
+      "subdir": "wallpapers",
+      "into": "~/Pictures/wallpapers",
+      "method": "copy"
+    }
+  ]
 }

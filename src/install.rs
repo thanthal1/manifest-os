@@ -163,9 +163,9 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         keybindings::apply(&manifest.keybindings, manifest.desktop.as_deref(), primary_user, ctx)?;
     }
 
-    if let Some(df) = &manifest.dotfiles {
+    if !manifest.dotfiles.is_empty() {
         step("Installing dotfiles");
-        dotfiles::install(df, ctx)?;
+        dotfiles::install(&manifest.dotfiles, ctx)?;
     }
 
     // After dotfiles, so an explicit `files` entry can override a dotfile.

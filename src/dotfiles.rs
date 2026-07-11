@@ -15,6 +15,7 @@
 use crate::exec::Ctx;
 use crate::manifest::Dotfiles;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -24,7 +25,30 @@ enum Method {
     Copy,
 }
 
-pub fn install(df: &Dotfiles, ctx: &Ctx) -> Result<()> {
+/// Apply every dotfiles entry: clone each unique repo once (so one repo mapped
+/// to several targets isn't fetched repeatedly), then place each entry's
+/// `subdir` → `into`.
+pub fn install(entries: &[Dotfiles], ctx: &Ctx) -> Result<()> {
+    let home = if ctx.dry_run {
+        "$HOME".to_string()
+    } else {
+        std::env::var("HOME").context("HOME is not set")?
+    };
+    let base = format!("{home}/.local/share/manifest/dotfiles");
+    let mut cloned: HashSet<String> = HashSet::new();
+    for df in entries {
+        apply_one(df, &home, &base, &mut cloned, ctx)?;
+    }
+    Ok(())
+}
+
+fn apply_one(
+    df: &Dotfiles,
+    home: &str,
+    base: &str,
+    cloned: &mut HashSet<String>,
+    ctx: &Ctx,
+) -> Result<()> {
     // The bundled examples ship a "point this at your own repo" placeholder;
     // installing one unedited must not kill the whole install at this stage.
     // A real (non-placeholder) URL that fails to clone is still fatal below —
@@ -42,22 +66,18 @@ pub fn install(df: &Dotfiles, ctx: &Ctx) -> Result<()> {
         other => anyhow::bail!("unknown dotfiles method `{other}` (expected symlink|copy)"),
     };
 
-    // Persistent clone location so symlinks survive a reboot.
-    let home = if ctx.dry_run {
-        "$HOME".to_string()
-    } else {
-        std::env::var("HOME").context("HOME is not set")?
-    };
-    let parent = format!("{home}/.local/share/manifest");
-    let dest = format!("{parent}/dotfiles");
-
-    // Re-clone cleanly each run so the repo is the source of truth.
-    ctx.run("rm", &["-rf", &dest])?;
-    ctx.run("mkdir", &["-p", &parent])?;
-    ctx.run(
-        "git",
-        &["clone", "--branch", &df.branch, "--depth", "1", &df.source, &dest],
-    )?;
+    // A persistent clone dir per source (so symlinks survive a reboot and two
+    // entries can share one repo). Clone each source+branch only once per run.
+    let dest = format!("{base}/{}", slug(&df.source));
+    let key = format!("{}#{}", df.source, df.branch);
+    if cloned.insert(key) {
+        ctx.run("rm", &["-rf", &dest])?;
+        ctx.run("mkdir", &["-p", base])?;
+        ctx.run(
+            "git",
+            &["clone", "--branch", &df.branch, "--depth", "1", &df.source, &dest],
+        )?;
+    }
 
     let verb = match method {
         Method::Symlink => "symlink",
@@ -73,8 +93,8 @@ pub fn install(df: &Dotfiles, ctx: &Ctx) -> Result<()> {
         None => dest.clone(),
     };
     let target = match df.into.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(into) => resolve_into(into, &home),
-        None => home.clone(),
+        Some(into) => resolve_into(into, home),
+        None => home.to_string(),
     };
 
     if ctx.dry_run {
@@ -95,6 +115,17 @@ pub fn install(df: &Dotfiles, ctx: &Ctx) -> Result<()> {
     place_tree(src, src, target_path, &method, &mut count)?;
     println!("  · {verb}ed {count} file(s) into {target}");
     Ok(())
+}
+
+/// A filesystem-safe directory name for a repo source (so distinct repos get
+/// distinct clone dirs).
+fn slug(source: &str) -> String {
+    source
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 /// Resolve an `into` target: `~/...` → the invoking user's home, else as-is.

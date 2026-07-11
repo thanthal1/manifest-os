@@ -32,7 +32,12 @@ pub struct Manifest {
     #[serde(default)]
     pub services: Services,
 
-    pub dotfiles: Option<Dotfiles>,
+    /// Dotfiles repo(s) to clone and place. Accepts a single object or a list —
+    /// a list lets one manifest map several repo dirs (or several repos) to
+    /// different targets (e.g. `config/`→`~/.config`, a wallpaper repo→
+    /// `~/Pictures`). Each repo is cloned once even if listed twice.
+    #[serde(default, deserialize_with = "de_dotfiles")]
+    pub dotfiles: Vec<Dotfiles>,
 
     /// Optional desktop environment or window manager to set up automatically.
     /// One of the recipe keys in `desktop.rs` (e.g. "gnome", "plasma",
@@ -144,6 +149,26 @@ pub struct Manifest {
     /// Shell commands run *after* everything else. Escape hatch only.
     #[serde(default)]
     pub post_install: Vec<String>,
+
+    /// Inline **plugin** definitions carried by the manifest itself, so a shared
+    /// manifest that uses a custom block (`docker`, `tailscale`, `ollama`, …) is
+    /// fully self-contained and reviewable — no out-of-band install. Each entry
+    /// is a plugin descriptor (see [`crate::plugins::Plugin`]); it declares how
+    /// its block expands into core primitives. Inline definitions override any
+    /// same-named plugin found in a plugins directory. Applied and stripped by
+    /// [`crate::plugins::expand`] before the rest of the pipeline ever runs, so
+    /// the core engine never needs to know what these blocks mean.
+    #[serde(default)]
+    pub plugins: Vec<serde_json::Value>,
+
+    /// Every top-level block the core schema doesn't recognize, captured here by
+    /// serde rather than silently dropped. A **plugin** turns each of these into
+    /// core primitives (see [`plugins`](Self::plugins)); after
+    /// [`crate::plugins::expand`] runs, this is empty. Anything left with no
+    /// plugin to claim it is an error (a typo or an unknown block), surfaced by
+    /// `verify`/`install`.
+    #[serde(flatten)]
+    pub extensions: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// A first-run survey question.
@@ -541,6 +566,24 @@ pub struct Dotfiles {
 
 fn default_branch() -> String {
     "main".to_string()
+}
+
+/// Accept `dotfiles` as either a single object or an array of them.
+fn de_dotfiles<'de, D>(d: D) -> std::result::Result<Vec<Dotfiles>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        Many(Vec<Dotfiles>),
+        One(Dotfiles),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(d)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(o)) => vec![o],
+        Some(OneOrMany::Many(m)) => m,
+    })
 }
 
 #[derive(Debug, Deserialize)]
