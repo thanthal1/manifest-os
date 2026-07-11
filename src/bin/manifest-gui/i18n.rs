@@ -94,6 +94,8 @@ static EN: &[(&str, &str)] = &[
     ("disk.post_script_placeholder", "run in the new system after everything else"),
     ("disk.alongside_size_label", "Space for Manifest OS (GiB)"),
     ("disk.alongside_size_placeholder", "40"),
+    ("disk.layout_title", "Storage layout — drag the slider to resize"),
+    ("disk.layout_summary", "<b>Manifest OS:</b> {mos} GiB   ·   {os} keeps {keep} GiB"),
     ("disk.nvidia_label", "Install NVIDIA driver (proprietary)"),
     ("disk.swap_label", "Swap"),
     ("disk.swap_zram", "zram"),
@@ -197,4 +199,14 @@ pub fn t(key: &str) -> String {
         }
     }
     EN.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string()).unwrap_or_else(|| key.to_string())
+}
+
+/// Like [`t`], but fills `{name}` placeholders from `args`. Used for the few
+/// labels that interpolate live values (e.g. the storage-bar summary).
+pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
+    let mut s = t(key);
+    for (name, value) in args {
+        s = s.replace(&format!("{{{name}}}"), value);
+    }
+    s
 }

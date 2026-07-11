@@ -16,7 +16,7 @@
 
 mod i18n;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -32,7 +32,7 @@ use manifest::exec::Ctx;
 use manifest::probe::{self, Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::installer;
 
-use i18n::t;
+use i18n::{t, t_args};
 
 const APP_ID: &str = "os.manifest.Installer";
 
@@ -828,15 +828,24 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
             st.disk = w.disk.clone();
         }
 
+        // The visual storage bar: the disk drawn to scale with every existing
+        // partition, plus a draggable slice for Manifest OS carved from the OS
+        // we're shrinking. Shown for the dual-boot (alongside) choice.
+        let disk_bar = storage_bar(state, w);
+        content.append(&disk_bar);
+
         let win_disk = w.disk.clone();
         {
             let state_m = state.clone();
             let win_disk = win_disk.clone();
+            let disk_bar = disk_bar.clone();
             along.connect_toggled(move |b| {
                 if b.is_active() {
                     let mut st = state_m.borrow_mut();
                     st.install_mode = "alongside".into();
                     st.disk = win_disk.clone();
+                    drop(st);
+                    disk_bar.set_visible(true);
                 }
             });
         }
@@ -844,9 +853,11 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
             let state_m = state.clone();
             let list_for_modes = list.clone();
             let disk_names = disk_names.clone();
+            let disk_bar = disk_bar.clone();
             erase.connect_toggled(move |b| {
                 if b.is_active() {
                     state_m.borrow_mut().install_mode = "erase".into();
+                    disk_bar.set_visible(false);
                     // Re-apply the picked erase target.
                     if let Some(sel) = list_for_modes.selected_row() {
                         let i = sel.index();
@@ -926,13 +937,6 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         w.set_visible(false);
         content.append(w);
         adv.borrow_mut().push(w.clone().upcast());
-    }
-
-    if win.is_some() {
-        let size = alongside_size_row(state);
-        size.set_visible(false);
-        content.append(&size);
-        adv.borrow_mut().push(size.upcast());
     }
 
     // NVIDIA proprietary driver — offered only when an NVIDIA GPU is present.
@@ -1641,27 +1645,169 @@ fn swap_row(state: &Rc<RefCell<State>>) -> gtk::Box {
     row
 }
 
-/// "Space for Manifest OS" — how many GiB to carve from Windows when dual-booting.
-/// Shown only in Advanced; Easy mode uses the engine's sensible default.
-fn alongside_size_row(state: &Rc<RefCell<State>>) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let label = gtk::Label::new(Some(&t("disk.alongside_size_label")));
-    label.set_halign(gtk::Align::Start);
-    label.set_hexpand(true);
-    row.append(&label);
+const GIB: u64 = 1 << 30;
 
-    let size = gtk::Entry::builder()
-        .placeholder_text(t("disk.alongside_size_placeholder"))
-        .max_width_chars(9)
-        .build();
-    {
+/// The visual storage manager: the target disk drawn to scale with every
+/// existing partition as a labelled block, plus a draggable slice for Manifest
+/// OS carved out of the OS we shrink. The slider is the control; the bar above
+/// it updates live so you can see the split (defaults to an even 50/50 of the
+/// shrinkable partition). Gracefully renders however many partitions the disk
+/// has — 2, 3, 4 — each just becomes another block.
+fn storage_bar(state: &Rc<RefCell<State>>, existing: &probe::ExistingOs) -> gtk::Box {
+    let layout = Rc::new(probe::disk_layout(&existing.disk));
+    let shrink_part = existing.shrink_part.clone();
+    let shrink_gib = existing.shrink_size_gib;
+    let other_label = existing.label.clone();
+
+    // Carve bounds: at least 16 GiB for Manifest OS, and always leave the other
+    // OS at least 20 GiB so we never shrink it into unbootability.
+    let min_carve = 16u32.min(shrink_gib.saturating_sub(1).max(1));
+    let max_carve = shrink_gib.saturating_sub(20).max(min_carve + 1);
+    let default_carve = (shrink_gib / 2).clamp(min_carve, max_carve);
+    state.borrow_mut().alongside_gib = Some(default_carve);
+
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    container.set_margin_top(6);
+
+    let title = gtk::Label::new(Some(&t("disk.layout_title")));
+    title.set_halign(gtk::Align::Start);
+    title.add_css_class("dim-label");
+    container.append(&title);
+
+    let area = gtk::DrawingArea::new();
+    area.set_content_height(52);
+    area.set_hexpand(true);
+
+    let carve = Rc::new(Cell::new(default_carve));
+    area.set_draw_func({
+        let layout = layout.clone();
+        let carve = carve.clone();
+        let shrink_part = shrink_part.clone();
+        move |_, cr, w, h| draw_disk(cr, w, h, &layout, &shrink_part, carve.get())
+    });
+
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, min_carve as f64, max_carve as f64, 1.0);
+    scale.set_value(default_carve as f64);
+    scale.set_hexpand(true);
+    scale.set_draw_value(false);
+    scale.set_round_digits(0);
+
+    let summary = gtk::Label::new(None);
+    summary.set_halign(gtk::Align::Start);
+    summary.set_use_markup(true);
+    let set_summary = {
+        let summary = summary.clone();
+        let other_label = other_label.clone();
+        move |carve_gib: u32| {
+            summary.set_markup(&t_args(
+                "disk.layout_summary",
+                &[
+                    ("mos", &carve_gib.to_string()),
+                    ("os", &other_label),
+                    ("keep", &shrink_gib.saturating_sub(carve_gib).to_string()),
+                ],
+            ));
+        }
+    };
+    set_summary(default_carve);
+
+    scale.connect_value_changed({
         let state = state.clone();
-        size.connect_changed(move |e| {
-            state.borrow_mut().alongside_gib = e.text().trim().parse::<u32>().ok();
-        });
+        let carve = carve.clone();
+        let area = area.clone();
+        move |s| {
+            let v = s.value().round() as u32;
+            carve.set(v);
+            state.borrow_mut().alongside_gib = Some(v);
+            set_summary(v);
+            area.queue_draw();
+        }
+    });
+
+    container.append(&area);
+    container.append(&scale);
+    container.append(&summary);
+    container
+}
+
+/// Draw the disk to scale: each existing partition as a block, the shrink
+/// partition split into what the other OS keeps and the Manifest OS carve, and
+/// any unallocated tail as free space.
+fn draw_disk(
+    cr: &gtk::cairo::Context,
+    w: i32,
+    h: i32,
+    layout: &probe::DiskLayout,
+    shrink_part: &str,
+    carve_gib: u32,
+) {
+    let total = layout.total_bytes as f64;
+    let (w, h) = (w as f64, h as f64);
+    if total <= 0.0 || w <= 0.0 {
+        return;
     }
-    row.append(&size);
-    row
+    let gap = 1.5;
+    let mut x = 0.0f64;
+    let px = |bytes: u64| (bytes as f64 / total) * w;
+
+    // (label, bytes, colour) blocks, left to right.
+    let carve_bytes = (carve_gib as u64) * GIB;
+    let mut blocks: Vec<(String, u64, (f64, f64, f64), bool)> = Vec::new();
+    for p in &layout.parts {
+        if p.name == shrink_part {
+            let keep = p.size_bytes.saturating_sub(carve_bytes);
+            blocks.push((p.label.clone(), keep, colour_for(&p.fstype), false));
+            blocks.push(("Manifest OS".into(), carve_bytes.min(p.size_bytes), (0.20, 0.52, 0.90), true));
+        } else {
+            blocks.push((p.label.clone(), p.size_bytes, colour_for(&p.fstype), false));
+        }
+    }
+    if layout.free_bytes > GIB {
+        blocks.push(("Free".into(), layout.free_bytes, (0.75, 0.75, 0.75), false));
+    }
+
+    for (label, bytes, (r, g, b), accent) in blocks {
+        let bw = (px(bytes) - gap).max(0.0);
+        if bw <= 0.0 {
+            continue;
+        }
+        cr.set_source_rgb(r, g, b);
+        cr.rectangle(x, 0.0, bw, h);
+        let _ = cr.fill();
+
+        // Label, centred, only if the block is wide enough to hold it.
+        cr.select_font_face("sans-serif", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
+        cr.set_font_size(11.0);
+        let gib = bytes as f64 / GIB as f64;
+        let text = if gib >= 1.0 {
+            format!("{label} · {gib:.0} GiB")
+        } else {
+            label.clone()
+        };
+        if let Ok(ext) = cr.text_extents(&text) {
+            if ext.width() + 8.0 <= bw {
+                if accent {
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                } else {
+                    cr.set_source_rgb(0.97, 0.97, 0.97);
+                }
+                cr.move_to(x + (bw - ext.width()) / 2.0, h / 2.0 + ext.height() / 2.0);
+                let _ = cr.show_text(&text);
+            }
+        }
+        x += px(bytes);
+    }
+}
+
+/// A block colour keyed to the filesystem, so partitions read at a glance.
+fn colour_for(fstype: &str) -> (f64, f64, f64) {
+    match fstype {
+        "vfat" => (0.20, 0.55, 0.55),                      // EFI/FAT — teal
+        "ntfs" => (0.36, 0.44, 0.60),                      // Windows — slate blue
+        "ext2" | "ext3" | "ext4" | "btrfs" | "xfs" | "f2fs" => (0.38, 0.52, 0.40), // Linux — green-grey
+        "swap" => (0.50, 0.42, 0.58),                      // swap — muted purple
+        _ => (0.48, 0.48, 0.48),                            // unknown — grey
+    }
 }
 
 /// A "Label: [searchable dropdown]" row — a long list (e.g. every timezone)

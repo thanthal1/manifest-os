@@ -389,6 +389,80 @@ pub fn list_disks() -> Vec<Disk> {
         .collect()
 }
 
+/// One partition on a disk, for the installer's storage-layout visual.
+pub struct Partition {
+    pub name: String,
+    pub size_bytes: u64,
+    pub fstype: String,
+    /// A short friendly label ("Windows", "EFI", "Linux", "Swap", …).
+    pub label: String,
+}
+
+/// The on-disk layout of `disk`: total size, its partitions in on-disk order,
+/// and any unallocated tail — everything the installer's storage bar needs to
+/// draw the disk to scale. Read-only (one `lsblk`, no mounts).
+pub struct DiskLayout {
+    pub total_bytes: u64,
+    pub parts: Vec<Partition>,
+    pub free_bytes: u64,
+}
+
+pub fn disk_layout(disk: &str) -> DiskLayout {
+    let mut layout = DiskLayout { total_bytes: 0, parts: Vec::new(), free_bytes: 0 };
+    let Ok(out) = Command::new("lsblk")
+        .args(["-P", "-p", "-b", "-o", "NAME,TYPE,FSTYPE,SIZE,PARTLABEL,PKNAME"])
+        .output()
+    else {
+        return layout;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let val = |line: &str, k: &str| -> String {
+        line.split(&format!("{k}=\""))
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string()
+    };
+    let base = disk.trim_start_matches("/dev/");
+    let mut used = 0u64;
+    for line in text.lines() {
+        let kind = val(line, "TYPE");
+        let size: u64 = val(line, "SIZE").parse().unwrap_or(0);
+        let name = val(line, "NAME");
+        if kind == "disk" && (name == disk || name.trim_start_matches("/dev/") == base) {
+            layout.total_bytes = size;
+        } else if kind == "part" {
+            let pk = val(line, "PKNAME");
+            if pk != base && pk != disk {
+                continue;
+            }
+            let fstype = val(line, "FSTYPE");
+            let label = friendly_part_label(&fstype, &val(line, "PARTLABEL"));
+            used += size;
+            layout.parts.push(Partition { name, size_bytes: size, fstype, label });
+        }
+    }
+    layout.free_bytes = layout.total_bytes.saturating_sub(used);
+    layout
+}
+
+/// A short human label for a partition: its GPT partition label if any, else a
+/// name inferred from the filesystem. Kept light (no mounting) — it's cosmetic.
+fn friendly_part_label(fstype: &str, partlabel: &str) -> String {
+    let pl = partlabel.trim();
+    if !pl.is_empty() {
+        return pl.to_string();
+    }
+    match fstype {
+        "vfat" => "EFI".into(),
+        "ntfs" => "Windows".into(),
+        "ext2" | "ext3" | "ext4" | "btrfs" | "xfs" | "f2fs" => "Linux".into(),
+        "swap" => "Swap".into(),
+        "" => "Unused".into(),
+        other => other.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hardware
 // ---------------------------------------------------------------------------
