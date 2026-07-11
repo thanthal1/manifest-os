@@ -102,7 +102,8 @@ fn add_cachyos_repo(ctx: &Ctx) -> Result<()> {
 }
 
 /// Step 4 — ensure paru exists. paru is the one hardcoded AUR helper.
-/// Bootstrapped from the AUR: base-devel + git, clone paru-bin, makepkg -si.
+/// Bootstrapped from the AUR: base-devel + git + a real `rust` toolchain, clone
+/// the source `paru` package, `makepkg -si`.
 ///
 /// makepkg refuses to run as root, so the clone/build run at user level; only
 /// the dependency install uses sudo.
@@ -111,11 +112,26 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
         println!("  · paru already installed");
         return Ok(());
     }
-    println!("  · installing build prerequisites (base-devel, git)");
-    ctx.sudo(
-        "pacman",
-        &["-S", "--needed", "--noconfirm", "--disable-download-timeout", "base-devel", "git"],
-    )?;
+    // paru's PKGBUILD needs a Rust toolchain (`cargo` makedepend). That dep is
+    // provided by BOTH `rust` and `rustup`; with `--noconfirm`, makepkg can pull
+    // `rustup`, whose `cargo` is a shim that dies with "rustup could not choose a
+    // version of cargo to run" until a default toolchain is set — sinking the
+    // whole install. So pin the provider to the real `rust` package up front (an
+    // exact name → no ambiguity). If `rustup` is somehow already the provider,
+    // don't fight it (installing `rust` would conflict); the build step below
+    // sets a default toolchain instead.
+    let rustup_present = ctx.check("sh", &["-c", "pacman -Qq rustup >/dev/null 2>&1"]);
+    println!(
+        "  · installing build prerequisites (base-devel, git{})",
+        if rustup_present { "" } else { ", rust" }
+    );
+    let mut prereqs = vec![
+        "-S", "--needed", "--noconfirm", "--disable-download-timeout", "base-devel", "git",
+    ];
+    if !rustup_present {
+        prereqs.push("rust");
+    }
+    ctx.sudo("pacman", &prereqs)?;
 
     println!("  · building paru from the AUR");
     // Parallelism sized to the machine, but CONSERVATIVELY: rustc can spike to
@@ -128,6 +144,10 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
         "cd \"$(mktemp -d)\" && \
          git clone --depth 1 {PARU_AUR} && \
          cd paru && \
+         if command -v rustup >/dev/null 2>&1 && ! rustup default >/dev/null 2>&1; then \
+             echo '  · configuring default rust toolchain for rustup'; \
+             rustup default stable; \
+         fi; \
          mem_kb=$(awk '/MemAvailable/ {{print $2}}' /proc/meminfo); \
          jobs=$(( (${{mem_kb:-0}} - 2097152) / 2621440 )); \
          [ \"$jobs\" -lt 1 ] && jobs=1; \
