@@ -1,0 +1,28 @@
+# Maintainer: Matthew McCabe <matthew.mccabe816@gmail.com>
+#
+# The Manifest OS pacman keyring — the PUBLIC half of the repo signing key,
+# installed into pacman's keyring so `SigLevel = Required` verifies every
+# package downloaded from the [manifest-os] repo.
+#
+# The files here (manifest-os.asc, manifest-os-trusted, manifest-os-revoked)
+# are produced by packaging/gen-key.sh, which exports ONLY public material —
+# the private key never leaves the maintainer machine's ~/.gnupg.
+
+pkgname=manifest-os-keyring
+pkgver="${MANIFEST_PKGVER:-0.1.0}"
+pkgrel=1
+pkgdesc="Manifest OS package-signing public key for pacman"
+arch=('any')
+url="https://github.com/thanthal1/manifest-os"
+license=('MIT')
+install=manifest-os-keyring.install
+source=('manifest-os.asc' 'manifest-os-trusted' 'manifest-os-revoked')
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+    # pacman-key --populate reads binary keyrings; de-armor the exported key.
+    gpg --dearmor < manifest-os.asc > manifest-os.gpg
+    install -Dm644 manifest-os.gpg      "$pkgdir/usr/share/pacman/keyrings/manifest-os.gpg"
+    install -Dm644 manifest-os-trusted  "$pkgdir/usr/share/pacman/keyrings/manifest-os-trusted"
+    install -Dm644 manifest-os-revoked  "$pkgdir/usr/share/pacman/keyrings/manifest-os-revoked"
+}

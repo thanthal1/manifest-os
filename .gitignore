@@ -24,6 +24,22 @@ Thumbs.db
 !.vscode/extensions.json
 vendor-archiso/
 
+# Packaging: built packages + the repo db live on the GitHub release, not in git.
+packaging/out/
+packaging/pkg/*.tar.gz
+packaging/pkg/src/
+packaging/pkg/pkg/
+packaging/keyring/src/
+packaging/keyring/pkg/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+# NEVER commit private key material (gen-key.sh never writes these into the
+# repo; this is a second line of defence against a stray manual export).
+*.sec.asc
+*.sec.gpg
+*secring*
+*private*.asc
+
 # ISO build artifacts
 iso/work/
 iso/out/

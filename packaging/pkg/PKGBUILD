@@ -1,0 +1,71 @@
+# Maintainer: Matthew McCabe <matthew.mccabe816@gmail.com>
+#
+# Split PKGBUILD for the Manifest OS components. One source tarball (created
+# by `git archive` — see packaging/README.md), one cargo build, four packages:
+#
+#   manifest-os           the engine + CLI (usr/bin/manifest)
+#   manifest-os-gui       the graphical installer + System Snapshots app
+#   manifest-os-plugins   the bundled plugins (docker/tailscale/ollama/k3s/steam)
+#   manifest-os-examples  the flagship + reference example manifests
+#
+# Versioning: pass MANIFEST_PKGVER in the environment to override (the repo
+# build script sets it); defaults to the Cargo.toml version.
+
+pkgbase=manifest-os
+pkgname=(manifest-os manifest-os-gui manifest-os-plugins manifest-os-examples)
+pkgver="${MANIFEST_PKGVER:-0.1.0}"
+pkgrel=1
+pkgdesc="Declare a complete Arch system in one manifest.json and reproduce it anywhere"
+arch=('x86_64')
+url="https://github.com/thanthal1/manifest-os"
+license=('MIT')
+makedepends=('rust' 'cargo' 'gtk4' 'libadwaita')
+options=('!debug')
+source=("$pkgbase-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgbase-$pkgver"
+    cargo build --release --locked --features gui
+}
+
+package_manifest-os() {
+    pkgdesc="Manifest OS engine + CLI: install/verify/export/diff/sync/reconfigure/rollback"
+    depends=('git' 'sudo')
+    optdepends=('flatpak: for the manifest flatpak block'
+                'manifest-os-plugins: bundled plugin blocks (docker, tailscale, ollama, ...)'
+                'manifest-os-examples: example manifests')
+    cd "$pkgbase-$pkgver"
+    install -Dm755 target/release/manifest "$pkgdir/usr/bin/manifest"
+}
+
+package_manifest-os-gui() {
+    pkgdesc="Manifest OS graphical installer and the System Snapshots desktop app"
+    depends=('manifest-os' 'gtk4' 'libadwaita')
+    cd "$pkgbase-$pkgver"
+    install -Dm755 target/release/manifest-gui "$pkgdir/usr/bin/manifest-gui"
+    install -Dm755 target/release/manifest-center "$pkgdir/usr/bin/manifest-center"
+}
+
+package_manifest-os-plugins() {
+    pkgdesc="Bundled Manifest OS plugins: new manifest blocks (docker, tailscale, ollama, k3s, steam)"
+    arch=('any')
+    depends=('manifest-os')
+    cd "$pkgbase-$pkgver"
+    for p in plugins/*.json; do
+        install -Dm644 "$p" "$pkgdir/usr/share/manifest-os/plugins/$(basename "$p")"
+    done
+}
+
+package_manifest-os-examples() {
+    pkgdesc="Manifest OS example manifests: the four flagship desktops + feature demos"
+    arch=('any')
+    depends=('manifest-os')
+    cd "$pkgbase-$pkgver"
+    for m in examples/*.json; do
+        install -Dm644 "$m" "$pkgdir/usr/share/manifest-os/examples/$(basename "$m")"
+    done
+    for m in examples/reference/*.json; do
+        install -Dm644 "$m" "$pkgdir/usr/share/manifest-os/examples/reference/$(basename "$m")"
+    done
+}

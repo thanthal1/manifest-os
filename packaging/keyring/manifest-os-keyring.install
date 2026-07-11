@@ -1,0 +1,13 @@
+# Load the Manifest OS public key into pacman's keyring and mark it trusted,
+# the same way archlinux-keyring does. pacman-key may be uninitialised in a
+# chroot/container — then it's a no-op and the ISO/installer handles it later.
+
+post_install() {
+    if usr/bin/pacman-key -l >/dev/null 2>&1; then
+        usr/bin/pacman-key --populate manifest-os
+    fi
+}
+
+post_upgrade() {
+    post_install
+}
