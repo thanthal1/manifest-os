@@ -14,31 +14,39 @@ package repo.
 - `manifest-os/packages.x86_64` — packages baked into the live system (Arch's
   releng set + our additions). WiFi is handled by `iwd`, already included.
 - `manifest-os/airootfs/` — the live filesystem overlay:
-  - `usr/local/bin/manifest-welcome` — auto-launches on tty1 login; brings the
-    network up (incl. WiFi via `iwctl`) and points at the install flow
-  - `usr/local/bin/manifest` — the CLI, **baked in at build time** by `build.sh`
-    (not committed)
-  - `root/.zlogin` — runs the welcome on boot
+  - `usr/local/bin/manifest`, `manifest-gui`, `manifest-center` — the three
+    binaries, **baked in at build time** by `build.sh` (not committed)
+  - `root/.zlogin` — boots straight into the **graphical installer**
+    (`manifest-gui` under `cage`/`seatd`, software-render fallback), with the
+    text TUI (`manifest tui`) as the fallback path
+  - example manifests staged under `usr/share/manifest-os/examples`
 
 ## Building (on an Arch host / the VM, as root)
 
 ```bash
-cargo build --release          # produce the Linux binary
-sudo ./iso/build.sh            # mkarchiso -> iso/out/manifestos-*.iso
+cargo build --release --features gui   # CLI + GTK installer + System Snapshots
+sudo ./iso/build.sh                    # mkarchiso -> iso/out/manifestos-*.iso
 ```
 
-`mkarchiso` needs Arch + root + the `archiso` package — it can't run on
-Windows. Build it in the Arch VM, then boot the resulting ISO.
+`--features gui` is required — `build.sh` bakes all three binaries and skips the
+desktop app if it isn't next to the CLI. `mkarchiso` needs Arch + root + the
+`archiso` package — it can't run on Windows. Build it in the `manifest-build`
+VM, then boot the resulting ISO. `build.sh` also repairs the Windows-checkout
+hazards (mangled systemd symlinks, CRLF) — see HANDOFF's Gotchas.
 
-## What still belongs in the real TUI
+## The install flow (implemented)
 
-`manifest-welcome` is a placeholder. The full Ratatui TUI will own the parts
-that can't live in a manifest:
+The live image boots into the guided installer, which owns the parts that can't
+live in a manifest — then hands off to `manifest install` for the declarative
+part:
 
-1. **Network** — WiFi join (stubbed here via `iwctl`)
-2. **Disk** — partitioning, filesystem, swap (the steps hand-scripted during VM
-   testing — that flow is the TUI's spec)
-3. **Manifest** — browse catalog / enter URL / load from USB
-4. **Install** — run the survey, then `manifest install` into the new root
+1. **Network** — wired + WiFi join (`iwd`, with rfkill-unblock)
+2. **Disk** — blank-disk erase, alongside-Windows dual-boot, or LUKS/LVM/RAID;
+   filesystem + swap
+3. **Manifest** — pick a bundled example, enter a URL, or load from USB
+4. **Install** — run the survey/settings, then `manifest install` into the new
+   root, set up users + bootloader, and reboot
+
+`manifest provision` is the same flow, unattended/headless (scriptable for CI).
 
 [archiso]: https://gitlab.archlinux.org/archlinux/archiso

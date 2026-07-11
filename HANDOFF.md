@@ -1,7 +1,7 @@
 # Manifest OS — Handoff
 
 > *Declare it. Share it. Deploy it.*
-> Snapshot for picking this project up cold. Last updated 2026-07-04.
+> Snapshot for picking this project up cold. Last updated 2026-07-10.
 > Repo: https://github.com/thanthal1/manifest-os
 
 ## What this is
@@ -34,16 +34,17 @@ src/                     the engine + CLI (Rust)
   kernel.rs / boot.rs    kernel catalog + headers  /  bootloader (systemd-boot, grub, microcode)
   desktop.rs             25 desktop/WM recipes + display managers
   system.rs users.rs files.rs   hostname/locale/tz/keymap  /  useradd+sudoers+chpasswd  /  declarative writes
-  dotfiles.rs snippets.rs       clone+place a repo  /  marker-block config fragments
-  theming.rs keybindings.rs wallpaper.rs   cross-desktop theme / universal keybinds / wallpaper
-  survey.rs              author questions, {{id}} injection, conditional_packages
+  dotfiles.rs snippets.rs       clone+place repos (list, subdir/into)  /  marker-block config fragments
+  theming.rs keybindings.rs wallpaper.rs scaling.rs   cross-desktop theme / universal keybinds / wallpaper / HiDPI scale
+  survey.rs conditions.rs     author questions, {{id}} injection  /  Facts + when/conditional/detect engine
+  plugins.rs             expand custom blocks (docker/tailscale/…) into core primitives; inline or from plugins/
   export.rs diff.rs history.rs  capture running system  /  preview changes  /  git-backed history + rollback
   installer.rs           the disk EXECUTOR: partition->format->mount->pacstrap->manifest install
   probe.rs               InstallPlan + disk/network/manifest/existing-OS probing (shared by TUI+GUI)
   tui.rs                 the Ratatui guided installer
   exec.rs                Ctx: run/sudo/shell/write_root/write_user/set_password/cryptsetup/check + --dry-run
   bin/manifest-gui/      GTK4 graphical installer (feature `gui`) — i18n catalogs in i18n/
-  bin/manifest-center/   System Snapshots app (feature `gui`): main.rs, snapshots.rs, designer.rs
+  bin/manifest-center/   System Snapshots app (feature `gui`): main.rs, snapshots.rs, designer.rs, settings.rs (post-install settings panel)
 iso/
   manifest-os/           archiso profile (derived from releng, rebranded)
   build.sh               bakes binaries+examples, fixes CRLF + mangled symlinks, runs mkarchiso
@@ -52,7 +53,8 @@ scripts/
   audit-vms.sh           full unattended VM installs of every example (deep, slow)
 marketplace/             submission-review tooling (scanner + web UI + boot-test + cache) — see its README
 docker/Dockerfile        Arch container for fast engine testing
-examples/*.json          sample manifests (hyprland-pro = full all-declarative desktop)
+examples/*.json          4 flagship desktops (tokyonight-aurora/catppuccin-plasma/niri-rice/sway-pro); reference/ = feature demos + smaller configs
+plugins/*.json           bundled plugins (docker/tailscale/ollama/k3s/steam) — new manifest blocks, baked to /usr/share/manifest-os/plugins
 dist/                    build artifacts (gitignored): ISOs + screenshots
 ```
 
@@ -61,11 +63,19 @@ Three binaries: **`manifest`** (CLI, always), **`manifest-gui`** and
 
 ## The manifest (what a JSON can declare)
 
-`system`, `repos`, `packages`, `services`, `dotfiles`, `desktop` +
-`display_manager`, `boot`, `survey` + `conditional_packages`, `users`, `files`,
-`snippets`, `wallpaper`, `keybindings`, `theme`, and `pre_install`/`post_install`
-(the escape hatch — everything else is declarative). Schema:
-[`src/manifest.rs`](src/manifest.rs); complete example:
+`system`, `repos`, `packages`, `services`, `dotfiles` (one repo or a list, with
+`subdir`/`into` retargeting), `desktop` + `display_manager`, `boot`, `users`,
+`files`, `snippets`, `flatpak`, `defaults`, `wallpaper`, `keybindings`, `theme`,
+`display` (HiDPI `scale`), and `pre_install`/`post_install` (the escape hatch —
+everything else is declarative). Plus the **adaptive** layer: `variables` +
+`survey`/`settings` questions (`{{token}}` substitution), auto-detected `detect`
+facts (gpu/cpu/virt/is_vm/firmware/scale), and `when`-gated `conditional`
+overlays + `conditional_packages`. Plus **plugins**: `docker`/`tailscale`/etc.
+blocks that a plugin (bundled in `plugins/`, or inline in the manifest's own
+`plugins` array) expands into core primitives before parsing — the core never
+learns what they mean. Schema: [`src/manifest.rs`](src/manifest.rs); facts/
+conditions engine: [`src/conditions.rs`](src/conditions.rs); plugin expander:
+[`src/plugins.rs`](src/plugins.rs); complete example:
 [`examples/tokyonight-aurora.json`](examples/tokyonight-aurora.json).
 
 ## Install options (TUI + GUI + `provision`)
@@ -83,17 +93,20 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 | Manifest schema + all declarative blocks | ✅ | unit/dry-run + Docker + VM |
 | repos, source-paru, packages, 25 desktops | ✅ | Docker (real Arch) |
 | system / users / files / snippets / theme / keybindings / wallpaper | ✅ | VM |
-| dotfiles clone + per-file place | ✅ | Docker |
+| dotfiles clone + per-file place (list, subdir/into) | ✅ | Docker + dry-run |
+| variables / survey / `when`+conditional / detect facts | ✅ | unit + VM |
+| plugins — custom blocks expand into core (inline + bundled) | ✅ | unit + dry-run |
+| HiDPI `display.scale` (desktop+cursor+lock) + settings-app panel | ✅ | VM (14" 4K) |
 | bootloader: GRUB (BIOS+UEFI) installs **and boots** | ✅ | VM |
 | systemd-boot (UEFI) | ✅ | VM (UEFI) |
 | guided TUI + **GTK GUI installer** (all screens) | ✅ | VM |
 | full install → reboot into installed desktop | ✅ | VM (niri-rice, **hyprland-pro**) |
 | **UEFI hands-off reboot** (efibootmgr boot-order) | ✅ | VM (UEFI) |
-| dual-boot carve (shrink + reuse ESP) | ✅ carve | needs a real Windows for os-prober |
+| dual-boot alongside Windows (shrink + reuse ESP, per-OS bootloader) | ✅ | real HW (4 concurrent installs, stable) |
 | LUKS (systemd `sd-encrypt` + BIOS/UEFI) | ✅ | VM |
-| System Snapshots app (save/restore/apply/Designer) | ✅ | VM (cage software-render) |
+| System Snapshots app (save/restore/apply/Designer/settings) | ✅ | VM (cage software-render) |
 | export / diff / sync / history / rollback | ✅ | VM + dry-run |
-| WiFi list+connect | ⚠️ code only | VBox has no wireless — needs real HW |
+| WiFi list+connect (rfkill-unblock included) | ✅ | real HW (laptop) |
 | Install-log to USB on a real-HW failure | ✅ fixed | needs a real failing USB to re-confirm |
 | marketplace boot-test **server** (`server.py`) | ⏳ WIP, unverified | see marketplace/SERVER-TODO.md |
 
@@ -158,8 +171,9 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
   in [`marketplace/SERVER-TODO.md`](marketplace/SERVER-TODO.md). Still to build:
   stage-2 behavioural capture (outbound conns / listeners / fs-diff), resource
   pinning + manifest signing at approval.
-- **Real hardware:** WiFi connect, and re-confirm the install-log-to-USB fix on
-  a real failing USB — neither is testable in VBox.
+- **Real hardware:** WiFi connect and dual-boot alongside Windows are now
+  confirmed on real HW; still to re-confirm the install-log-to-USB fix on a real
+  failing USB (not testable in VBox).
 - **Catalog/site + a real `manifest-os-release` package + signing key** instead
   of the executor writing branding inline.
 - **Move dev to real Arch** for native builds, real GPU, and dogfooding (no VM

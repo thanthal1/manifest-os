@@ -29,7 +29,7 @@ The core install flow:
 | Bootstrap paru | the one hardcoded AUR helper |
 | `pre_install` hooks | author shell, run first |
 | Install packages | one `paru -S` for official + AUR + kernel |
-| Dotfiles | `git clone` (placement coming) |
+| Dotfiles | `git clone` + per-file placement (one repo or a list) |
 | Enable services | systemd system + user units |
 | `post_install` hooks | author shell, run last |
 
@@ -74,6 +74,22 @@ whole `~/.config`. `symlink` links each file back to a persistent clone (so
 editing the repo updates the live config); `copy` copies them. `.git`, README
 and LICENSE are skipped.
 
+**`subdir` / `into`** retarget where files are read from and written to, for
+repos that don't mirror `$HOME`. `subdir:"config", into:"~/.config"` maps
+`<repo>/config/*` → `~/.config/*`.
+
+**`dotfiles` may also be a list** — map several repo directories (or several
+repos) to different targets in one manifest. Each unique repo is cloned only
+once, even when mapped multiple times:
+
+```json
+"dotfiles": [
+  { "source": "https://github.com/JaKooLit/Hyprland-Dots", "subdir": "config",       "into": "~/.config",            "method": "copy" },
+  { "source": "https://github.com/JaKooLit/Hyprland-Dots", "subdir": "assets/.icons", "into": "~/.icons",             "method": "copy" },
+  { "source": "https://github.com/JaKooLit/Wallpaper-Bank", "subdir": "wallpapers",   "into": "~/Pictures/wallpapers", "method": "copy" }
+]
+```
+
 ## Declarative config (instead of hooks)
 
 The manifest prefers **declared state** over shell. Common things that would
@@ -108,6 +124,69 @@ otherwise be `post_install` commands have first-class blocks the CLI executes:
 
 `pre_install` / `post_install` remain only as an escape hatch for the genuinely
 one-off.
+
+## Adaptive manifests (variables, conditions, machine detection)
+
+A manifest can adapt to the machine and to the person installing it, instead of
+being a fixed snapshot:
+
+```json
+"variables": { "editor": "nvim" },
+"survey":  [ { "id": "laptop", "type": "bool", "label": "Is this a laptop?" } ],
+"detect":  { "gpu": "auto", "is_vm": "auto" },
+"conditional": [
+  { "when": { "gpu": "nvidia" }, "packages": ["nvidia-dkms"] },
+  { "when": { "laptop": true },  "packages": ["tlp", "brightnessctl"] }
+],
+"files": [
+  { "path": "~/.config/foo.conf", "content": "editor={{editor}}", "when": { "is_vm": false } }
+]
+```
+
+- **`variables`** — author-defined values, substituted as `{{name}}` anywhere.
+- **`survey`** — questions asked at install; answers become tokens too, with
+  optional `pattern` / `min` / `max` validation.
+- **`detect`** — auto-detected facts (`gpu`, `cpu`, `virt`, `is_vm`, `firmware`,
+  `scale`) exposed as tokens.
+- **`when`** — gate a `conditional` package/file/service overlay, or any single
+  `files` entry, on those facts.
+
+## Display scaling & settings app
+
+`display.scale` scales the desktop, cursor and lock screen for HiDPI panels; set
+it to `"{{scale}}"` to auto-detect from the panel resolution. A manifest can also
+expose a **`settings`** block — the same question format as `survey`, but editable
+*after* install from the System Snapshots app, so a well-authored manifest doubles
+as a settings panel (scale, accent colour, wallpaper, opacity, …):
+
+```json
+"display":  { "scale": "{{scale}}" },
+"settings": [ { "id": "scale", "type": "scale", "label": "Display scale", "default": 1.0 } ]
+```
+
+## Plugins (new blocks without bloating the core)
+
+The core schema stays small; new capabilities grow at the edges. A **plugin**
+teaches the manifest a new top-level block — `docker`, `tailscale`, `ollama`,
+`k3s`, `steam`, … — by declaring how it *expands* into primitives the engine
+already knows (`packages`, `services`, `files`, `repos`, hooks, `conditional`):
+
+```json
+"docker":    { "compose": true },
+"tailscale": {},
+"ollama":    { "webui": true },
+"steam":     { "gamemode": true }
+```
+
+The engine never learns what "docker" means — plugin blocks are folded into core
+fields *before* it parses the manifest. Plugins load from a plugins directory
+(bundled ones live in [`plugins/`](plugins)) or, so a shared manifest is fully
+self-contained, from the manifest's own inline `plugins: [ … ]` array. Expansion
+is pure data — no code runs — so a plugin is as reviewable as any other block,
+and the marketplace scanner vets what it expands into. See
+[`plugins/README.md`](plugins/README.md) to write one, and
+[`examples/reference/plugins-demo.json`](examples/reference/plugins-demo.json)
+for bundled + inline plugins together.
 
 ## System basics
 
@@ -181,7 +260,7 @@ with `"display_manager"`. See the four flagship desktops in
 [`sway-pro.json`](examples/sway-pro.json) (Sway). Smaller feature-demos and extra
 configs live in [`examples/reference/`](examples/reference).
 
-> All 118 packages across the catalog are validated against the real Arch repos
+> Every package name across the catalog is validated against the real Arch repos
 > in CI-style container runs — no broken package names.
 
 ## Try it (safely, anywhere)
