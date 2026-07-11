@@ -238,6 +238,19 @@ pub fn resolve(manifest: &Manifest) -> Result<Option<Resolved>> {
     for &p in DESKTOP_BASE {
         push(p, &mut packages);
     }
+    // Command-line clipboard tools, matched to the session type. Without these,
+    // copy/paste in GUI apps still works (the toolkit + compositor handle it),
+    // but any keybind or script that pipes to/from the clipboard
+    // (`wl-copy`/`xclip`) — and many WM rice configs do — would silently fail.
+    // A "Both" DE ships both sessions, so give it both helpers.
+    match r.session {
+        Session::Wayland => push("wl-clipboard", &mut packages),
+        Session::X11 => push("xclip", &mut packages),
+        Session::Both => {
+            push("wl-clipboard", &mut packages);
+            push("xclip", &mut packages);
+        }
+    }
     for &p in r.core {
         push(p, &mut packages);
     }
@@ -425,7 +438,7 @@ const CATALOG: &[Recipe] = &[
         default_dm: Some("gdm"),
         portals: &["xdg-desktop-portal-gnome"],
         polkit: None, // bundled with gnome-shell
-        extras: &["gnome-keyring", "xdg-user-dirs-gtk"],
+        extras: &["gnome-keyring", "xdg-user-dirs-gtk", "gnome-screenshot"],
         services: &[],
         env: &[],
         session_exec: "gnome-session",
@@ -470,7 +483,7 @@ const CATALOG: &[Recipe] = &[
         default_dm: Some("lightdm"),
         portals: &["xdg-desktop-portal-gtk"],
         polkit: Some("polkit-gnome"),
-        extras: &["network-manager-applet", "gnome-keyring"],
+        extras: &["network-manager-applet", "gnome-keyring", "gnome-screenshot"],
         services: &[],
         env: &[],
         session_exec: "cinnamon-session",
@@ -576,7 +589,7 @@ const CATALOG: &[Recipe] = &[
         default_dm: Some("sddm"),
         portals: &["xdg-desktop-portal-hyprland"],
         polkit: Some("hyprpolkitagent"),
-        extras: &["kitty", "waybar", "wofi", "mako", "hyprpaper", "hyprlock", "hypridle", "network-manager-applet", "qt5-wayland", "qt6-wayland"],
+        extras: &["kitty", "waybar", "wofi", "mako", "hyprpaper", "hyprlock", "hypridle", "network-manager-applet", "qt5-wayland", "qt6-wayland", "grim", "slurp"],
         services: &[],
         env: &[("XDG_CURRENT_DESKTOP", "Hyprland"), ("QT_QPA_PLATFORM", "wayland;xcb"), ("MOZ_ENABLE_WAYLAND", "1")],
         session_exec: "Hyprland",
@@ -591,7 +604,7 @@ const CATALOG: &[Recipe] = &[
         default_dm: Some("greetd"),
         portals: &["xdg-desktop-portal-wlr"],
         polkit: Some("polkit-gnome"),
-        extras: &["swaybg", "swaylock", "swayidle", "waybar", "foot", "wmenu", "mako", "network-manager-applet"],
+        extras: &["swaybg", "swaylock", "swayidle", "waybar", "foot", "wmenu", "mako", "network-manager-applet", "grim", "slurp"],
         services: &[],
         env: &[("XDG_CURRENT_DESKTOP", "sway"), ("MOZ_ENABLE_WAYLAND", "1")],
         session_exec: "sway",
@@ -667,7 +680,7 @@ const CATALOG: &[Recipe] = &[
         default_dm: Some("lightdm"),
         portals: &["xdg-desktop-portal-gtk"],
         polkit: Some("polkit-gnome"),
-        extras: &["dmenu", "rofi", "picom", "feh", "dunst", "alacritty", "network-manager-applet"],
+        extras: &["dmenu", "rofi", "picom", "feh", "dunst", "alacritty", "network-manager-applet", "scrot"],
         services: &[],
         env: &[],
         session_exec: "i3",
