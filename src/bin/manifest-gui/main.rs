@@ -16,7 +16,7 @@
 
 mod i18n;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -755,50 +755,34 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell<Vec<gtk::Widget>>>) {
     let (root, content, buttons) = page(&t("disk.title"), &t("disk.subtitle"));
 
-    let disks = probe::list_disks();
+    // Install targets — fixed disks only (USB sticks / SD cards, incl. the live
+    // boot medium, are excluded so they can't be picked by mistake).
+    let disks = probe::list_install_disks();
     let disk_names: Vec<String> = disks.iter().map(|d| d.name.clone()).collect();
 
     // If an OS (Windows, another Linux, …) is on a disk, offer to keep it (dual
     // boot) instead of erasing. A blank disk yields None → just the erase flow.
     let win = probe::detect_existing_os();
 
-    // The disk picker (the "erase" target). For dual boot the disk is fixed to
-    // the one the existing OS lives on, so we only steer state.disk here in erase mode.
+    // The reactive storage bar — follows whichever disk + mode is selected.
+    let (disk_bar, refresh) = storage_manager(state);
+
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
     for d in &disks {
         let row = adw::ActionRow::builder()
             .title(&format!("{} ({})", d.model, d.size))
-            .subtitle(&format!("Erase {} and install here", d.name))
+            .subtitle(&d.name)
             .build();
         list.append(&row);
     }
-    if !disks.is_empty() {
-        list.select_row(list.row_at_index(0).as_ref());
-        state.borrow_mut().disk = disks[0].name.clone();
-    }
-    {
-        let state = state.clone();
-        let disk_names = disk_names.clone();
-        list.connect_row_selected(move |_, row| {
-            if let Some(row) = row {
-                let i = row.index();
-                if i >= 0 {
-                    if state.borrow().install_mode == "erase" {
-                        if let Some(name) = disk_names.get(i as usize) {
-                            state.borrow_mut().disk = name.clone();
-                        }
-                    }
-                }
-            }
-        });
-    }
 
-    if let Some(w) = &win {
-        // Dual-boot chooser. Default to keeping the existing OS — the friendly choice.
+    // Dual-boot chooser (only when an existing OS is present). Radio buttons so
+    // focus moving through them doesn't flip the choice for keyboard users.
+    let along_btn: Option<gtk::CheckButton> = if let Some(w) = &win {
         let intro = gtk::Label::new(Some(&format!(
-            "Found {} on {} ({} GB). You can keep it and choose which to start, or erase everything.",
+            "Found {} on {} ({} GB). Keep it and dual-boot, or erase everything.",
             w.label, w.disk, w.shrink_size_gib
         )));
         intro.set_wrap(true);
@@ -806,73 +790,92 @@ fn add_disk(stack: &Rc<gtk::Stack>, state: &Rc<RefCell<State>>, adv: &Rc<RefCell
         intro.add_css_class("dim-label");
         content.append(&intro);
 
-        // Radio buttons (not a selectable list): a binary choice that must NOT
-        // change just because focus moved through it — important for keyboard
-        // users, who would otherwise flip "erase"/"alongside" by tabbing past.
         let along = gtk::CheckButton::with_label(&format!(
-            "Install alongside it — keep {} and pick which to start (recommended)",
+            "Install alongside {} — dual boot (recommended)",
             w.label
         ));
-        let erase = gtk::CheckButton::with_label(
-            "Erase the whole disk — remove everything and start fresh",
-        );
+        let erase = gtk::CheckButton::with_label("Erase the whole disk and start fresh");
         erase.set_group(Some(&along));
-        along.set_active(true); // default to keeping the existing OS
+        along.set_active(true);
         content.append(&along);
         content.append(&erase);
 
-        // Start in dual-boot mode, targeting the existing OS's disk.
+        // Default: dual-boot, targeting the existing OS's disk (select its row).
         {
             let mut st = state.borrow_mut();
             st.install_mode = "alongside".into();
             st.disk = w.disk.clone();
         }
-
-        // The visual storage bar: the disk drawn to scale with every existing
-        // partition, plus a draggable slice for Manifest OS carved from the OS
-        // we're shrinking. Shown for the dual-boot (alongside) choice.
-        let disk_bar = storage_bar(state, w);
-        content.append(&disk_bar);
-
-        let win_disk = w.disk.clone();
-        {
-            let state_m = state.clone();
-            let win_disk = win_disk.clone();
-            let disk_bar = disk_bar.clone();
-            along.connect_toggled(move |b| {
-                if b.is_active() {
-                    let mut st = state_m.borrow_mut();
-                    st.install_mode = "alongside".into();
-                    st.disk = win_disk.clone();
-                    drop(st);
-                    disk_bar.set_visible(true);
-                }
-            });
+        if let Some(idx) = disk_names.iter().position(|n| n == &w.disk) {
+            list.select_row(list.row_at_index(idx as i32).as_ref());
         }
-        {
-            let state_m = state.clone();
-            let list_for_modes = list.clone();
-            let disk_names = disk_names.clone();
-            let disk_bar = disk_bar.clone();
-            erase.connect_toggled(move |b| {
+
+        along.connect_toggled({
+            let state = state.clone();
+            let refresh = refresh.clone();
+            move |b| {
                 if b.is_active() {
-                    state_m.borrow_mut().install_mode = "erase".into();
-                    disk_bar.set_visible(false);
-                    // Re-apply the picked erase target.
-                    if let Some(sel) = list_for_modes.selected_row() {
-                        let i = sel.index();
-                        if i >= 0 {
-                            if let Some(name) = disk_names.get(i as usize) {
-                                state_m.borrow_mut().disk = name.clone();
-                            }
-                        }
-                    }
+                    state.borrow_mut().install_mode = "alongside".into();
+                    refresh();
                 }
-            });
-        }
+            }
+        });
+        erase.connect_toggled({
+            let state = state.clone();
+            let refresh = refresh.clone();
+            move |b| {
+                if b.is_active() {
+                    state.borrow_mut().install_mode = "erase".into();
+                    refresh();
+                }
+            }
+        });
+        Some(along)
+    } else {
+        None
+    };
+
+    // No existing OS → plain whole-disk erase on the first disk.
+    if win.is_none() && !disks.is_empty() {
+        list.select_row(list.row_at_index(0).as_ref());
+        let mut st = state.borrow_mut();
+        st.install_mode = "erase".into();
+        st.disk = disks[0].name.clone();
     }
 
+    // Selecting a disk retargets the install and refreshes the bar. Dual-boot
+    // only makes sense on a disk with something resizable, so disable it (and
+    // fall back to erase) on a blank one.
+    list.connect_row_selected({
+        let state = state.clone();
+        let disk_names = disk_names.clone();
+        let refresh = refresh.clone();
+        let along_btn = along_btn.clone();
+        move |_, row| {
+            let Some(row) = row else { return };
+            let i = row.index();
+            if i < 0 {
+                return;
+            }
+            let Some(name) = disk_names.get(i as usize) else {
+                return;
+            };
+            state.borrow_mut().disk = name.clone();
+            let can_alongside = probe::disk_layout(name).shrink_target().is_some();
+            if let Some(along) = &along_btn {
+                along.set_sensitive(can_alongside);
+                if !can_alongside && along.is_active() {
+                    along.set_active(false); // flips the group to "erase"
+                }
+            }
+            refresh();
+        }
+    });
+
     content.append(&list);
+    content.append(&disk_bar);
+    // Prime the bar for the initial selection.
+    refresh();
 
     // Advanced: filesystem + swap + storage (encryption/LVM/RAID) + locale.
     // Filesystem names (ext4/btrfs/xfs) are technical identifiers, not words —
@@ -1647,24 +1650,27 @@ fn swap_row(state: &Rc<RefCell<State>>) -> gtk::Box {
 
 const GIB: u64 = 1 << 30;
 
-/// The visual storage manager: the target disk drawn to scale with every
-/// existing partition as a labelled block, plus a draggable slice for Manifest
-/// OS carved out of the OS we shrink. The slider is the control; the bar above
-/// it updates live so you can see the split (defaults to an even 50/50 of the
-/// shrinkable partition). Gracefully renders however many partitions the disk
-/// has — 2, 3, 4 — each just becomes another block.
-fn storage_bar(state: &Rc<RefCell<State>>, existing: &probe::ExistingOs) -> gtk::Box {
-    let layout = Rc::new(probe::disk_layout(&existing.disk));
-    let shrink_part = existing.shrink_part.clone();
-    let shrink_gib = existing.shrink_size_gib;
-    let other_label = existing.label.clone();
+/// What the storage bar is currently drawing — the selected disk's layout, the
+/// partition being carved (if any), and whether it's a whole-disk erase.
+struct BarModel {
+    layout: probe::DiskLayout,
+    shrink_part: Option<String>,
+    carve_gib: u32,
+    erase: bool,
+}
 
-    // Carve bounds: at least 16 GiB for Manifest OS, and always leave the other
-    // OS at least 20 GiB so we never shrink it into unbootability.
-    let min_carve = 16u32.min(shrink_gib.saturating_sub(1).max(1));
-    let max_carve = shrink_gib.saturating_sub(20).max(min_carve + 1);
-    let default_carve = (shrink_gib / 2).clamp(min_carve, max_carve);
-    state.borrow_mut().alongside_gib = Some(default_carve);
+/// The **reactive** storage bar: the selected disk drawn to scale, updating
+/// whenever the disk or install mode changes. Returns the widget plus a
+/// `refresh` closure that re-reads `state.disk` / `state.install_mode`,
+/// recomputes the carve slider for that disk, and redraws — so it follows the
+/// selection on multi-drive systems instead of being pinned to one disk.
+fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
+    let model = Rc::new(RefCell::new(BarModel {
+        layout: probe::DiskLayout { total_bytes: 0, parts: Vec::new(), free_bytes: 0 },
+        shrink_part: None,
+        carve_gib: 0,
+        erase: true,
+    }));
 
     let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
     container.set_margin_top(6);
@@ -1677,71 +1683,123 @@ fn storage_bar(state: &Rc<RefCell<State>>, existing: &probe::ExistingOs) -> gtk:
     let area = gtk::DrawingArea::new();
     area.set_content_height(52);
     area.set_hexpand(true);
-
-    let carve = Rc::new(Cell::new(default_carve));
     area.set_draw_func({
-        let layout = layout.clone();
-        let carve = carve.clone();
-        let shrink_part = shrink_part.clone();
-        move |_, cr, w, h| draw_disk(cr, w, h, &layout, &shrink_part, carve.get())
+        let model = model.clone();
+        move |_, cr, w, h| draw_disk(cr, w, h, &model.borrow())
     });
+    container.append(&area);
 
-    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, min_carve as f64, max_carve as f64, 1.0);
-    scale.set_value(default_carve as f64);
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
     scale.set_hexpand(true);
     scale.set_draw_value(false);
     scale.set_round_digits(0);
+    container.append(&scale);
 
     let summary = gtk::Label::new(None);
     summary.set_halign(gtk::Align::Start);
     summary.set_use_markup(true);
-    let set_summary = {
-        let summary = summary.clone();
-        let other_label = other_label.clone();
-        move |carve_gib: u32| {
-            summary.set_markup(&t_args(
-                "disk.layout_summary",
-                &[
-                    ("mos", &carve_gib.to_string()),
-                    ("os", &other_label),
-                    ("keep", &shrink_gib.saturating_sub(carve_gib).to_string()),
-                ],
-            ));
-        }
-    };
-    set_summary(default_carve);
+    container.append(&summary);
 
+    // Dragging the slider updates the carve for the currently-shrinking disk.
     scale.connect_value_changed({
+        let model = model.clone();
         let state = state.clone();
-        let carve = carve.clone();
         let area = area.clone();
+        let summary = summary.clone();
         move |s| {
             let v = s.value().round() as u32;
-            carve.set(v);
+            {
+                let mut m = model.borrow_mut();
+                if m.erase || m.shrink_part.is_none() {
+                    return;
+                }
+                m.carve_gib = v;
+            }
             state.borrow_mut().alongside_gib = Some(v);
-            set_summary(v);
+            update_summary(&summary, &model.borrow());
             area.queue_draw();
         }
     });
 
-    container.append(&area);
-    container.append(&scale);
-    container.append(&summary);
-    container
+    let refresh: Rc<dyn Fn()> = {
+        let model = model.clone();
+        let state = state.clone();
+        let area = area.clone();
+        let scale = scale.clone();
+        let summary = summary.clone();
+        Rc::new(move || {
+            let (disk, alongside) = {
+                let st = state.borrow();
+                (st.disk.clone(), st.install_mode == "alongside")
+            };
+            if disk.is_empty() {
+                return;
+            }
+            let layout = probe::disk_layout(&disk);
+            let shrink = layout.shrink_target().map(|p| (p.name.clone(), p.size_bytes));
+            // Erase, or a disk with nothing resizable → the whole disk is used.
+            let erase = !alongside || shrink.is_none();
+
+            let mut carve = 0u32;
+            match (&shrink, erase) {
+                (Some((_, shrink_bytes)), false) => {
+                    // Leave the other partition ≥20 GiB; give Manifest OS ≥16.
+                    let sg = (*shrink_bytes / GIB) as u32;
+                    let min = 16u32.min(sg.saturating_sub(1).max(1));
+                    let max = sg.saturating_sub(20).max(min + 1);
+                    let def = (sg / 2).clamp(min, max);
+                    scale.set_range(min as f64, max as f64);
+                    scale.set_value(def as f64);
+                    scale.set_visible(true);
+                    carve = def;
+                    state.borrow_mut().alongside_gib = Some(def);
+                }
+                _ => scale.set_visible(false),
+            }
+            {
+                let mut m = model.borrow_mut();
+                m.layout = layout;
+                m.shrink_part = if erase { None } else { shrink.map(|(n, _)| n) };
+                m.carve_gib = carve;
+                m.erase = erase;
+            }
+            update_summary(&summary, &model.borrow());
+            area.queue_draw();
+        })
+    };
+
+    (container, refresh)
+}
+
+/// The one-line "Manifest OS: N GiB · other keeps M GiB" (or whole-disk) caption.
+fn update_summary(summary: &gtk::Label, m: &BarModel) {
+    let total_gib = m.layout.total_bytes / GIB;
+    match &m.shrink_part {
+        Some(name) if !m.erase => {
+            let shrink_gib = m
+                .layout
+                .parts
+                .iter()
+                .find(|p| &p.name == name)
+                .map(|p| p.size_bytes / GIB)
+                .unwrap_or(0);
+            summary.set_markup(&t_args(
+                "disk.layout_summary",
+                &[
+                    ("mos", &m.carve_gib.to_string()),
+                    ("keep", &shrink_gib.saturating_sub(m.carve_gib as u64).to_string()),
+                ],
+            ));
+        }
+        _ => summary.set_markup(&t_args("disk.layout_summary_erase", &[("total", &total_gib.to_string())])),
+    }
 }
 
 /// Draw the disk to scale: each existing partition as a block, the shrink
 /// partition split into what the other OS keeps and the Manifest OS carve, and
 /// any unallocated tail as free space.
-fn draw_disk(
-    cr: &gtk::cairo::Context,
-    w: i32,
-    h: i32,
-    layout: &probe::DiskLayout,
-    shrink_part: &str,
-    carve_gib: u32,
-) {
-    let total = layout.total_bytes as f64;
+fn draw_disk(cr: &gtk::cairo::Context, w: i32, h: i32, m: &BarModel) {
+    let total = m.layout.total_bytes as f64;
     let (w, h) = (w as f64, h as f64);
     if total <= 0.0 || w <= 0.0 {
         return;
@@ -1750,20 +1808,25 @@ fn draw_disk(
     let mut x = 0.0f64;
     let px = |bytes: u64| (bytes as f64 / total) * w;
 
-    // (label, bytes, colour) blocks, left to right.
-    let carve_bytes = (carve_gib as u64) * GIB;
+    // (label, bytes, colour, is-accent) blocks, left to right.
     let mut blocks: Vec<(String, u64, (f64, f64, f64), bool)> = Vec::new();
-    for p in &layout.parts {
-        if p.name == shrink_part {
-            let keep = p.size_bytes.saturating_sub(carve_bytes);
-            blocks.push((p.label.clone(), keep, colour_for(&p.fstype), false));
-            blocks.push(("Manifest OS".into(), carve_bytes.min(p.size_bytes), (0.20, 0.52, 0.90), true));
-        } else {
-            blocks.push((p.label.clone(), p.size_bytes, colour_for(&p.fstype), false));
+    if m.erase {
+        // Whole-disk install — everything becomes Manifest OS.
+        blocks.push(("Manifest OS".into(), m.layout.total_bytes, (0.20, 0.52, 0.90), true));
+    } else {
+        let carve_bytes = (m.carve_gib as u64) * GIB;
+        for p in &m.layout.parts {
+            if Some(&p.name) == m.shrink_part.as_ref() {
+                let keep = p.size_bytes.saturating_sub(carve_bytes);
+                blocks.push((p.label.clone(), keep, colour_for(&p.fstype), false));
+                blocks.push(("Manifest OS".into(), carve_bytes.min(p.size_bytes), (0.20, 0.52, 0.90), true));
+            } else {
+                blocks.push((p.label.clone(), p.size_bytes, colour_for(&p.fstype), false));
+            }
         }
-    }
-    if layout.free_bytes > GIB {
-        blocks.push(("Free".into(), layout.free_bytes, (0.75, 0.75, 0.75), false));
+        if m.layout.free_bytes > GIB {
+            blocks.push(("Free".into(), m.layout.free_bytes, (0.75, 0.75, 0.75), false));
+        }
     }
 
     for (label, bytes, (r, g, b), accent) in blocks {

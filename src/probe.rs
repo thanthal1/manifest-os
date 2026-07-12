@@ -24,10 +24,14 @@ fn default_swap() -> String {
 }
 
 /// A whole disk the system can be installed onto.
+#[derive(Clone)]
 pub struct Disk {
     pub name: String,
     pub size: String,
     pub model: String,
+    /// Removable media (USB stick, SD card) — not offered as an install target
+    /// by default (see [`list_install_disks`]).
+    pub removable: bool,
 }
 
 /// The daily-driver account a friendly install creates. Collected by the GUI
@@ -371,22 +375,48 @@ pub fn connect_wifi(dev: &str, ssid: &str, passphrase: &str) -> (bool, String) {
 // ---------------------------------------------------------------------------
 
 pub fn list_disks() -> Vec<Disk> {
-    let out = Command::new("lsblk").args(["-dpno", "NAME,SIZE,TYPE,MODEL"]).output();
+    // `-P` (key="value" pairs) so a model with spaces doesn't shift the columns,
+    // and we can read RM (removable) reliably to flag USB sticks / SD cards.
+    let out = Command::new("lsblk")
+        .args(["-dpn", "-o", "NAME,SIZE,TYPE,MODEL,RM", "-P"])
+        .output();
     let Ok(out) = out else { return Vec::new() };
+    let val = |line: &str, k: &str| -> String {
+        line.split(&format!("{k}=\""))
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string()
+    };
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let name = it.next()?.to_string();
-            let size = it.next()?.to_string();
-            let kind = it.next()?;
-            if kind != "disk" {
+            if val(l, "TYPE") != "disk" {
                 return None;
             }
-            let model = it.collect::<Vec<_>>().join(" ");
-            Some(Disk { name, size, model: if model.is_empty() { "disk".into() } else { model } })
+            let model = val(l, "MODEL");
+            Some(Disk {
+                name: val(l, "NAME"),
+                size: val(l, "SIZE"),
+                model: if model.is_empty() { "disk".into() } else { model },
+                removable: val(l, "RM") == "1",
+            })
         })
         .collect()
+}
+
+/// Non-removable install targets (excludes USB sticks / SD cards, so the live
+/// boot medium and other removable drives aren't offered as a target). Falls
+/// back to *all* disks only if every disk is removable (an all-USB machine),
+/// so the list is never empty.
+pub fn list_install_disks() -> Vec<Disk> {
+    let all = list_disks();
+    let fixed: Vec<Disk> = all.iter().filter(|d| !d.removable).cloned().collect();
+    if fixed.is_empty() {
+        all
+    } else {
+        fixed
+    }
 }
 
 /// One partition on a disk, for the installer's storage-layout visual.
@@ -444,6 +474,19 @@ pub fn disk_layout(disk: &str) -> DiskLayout {
     }
     layout.free_bytes = layout.total_bytes.saturating_sub(used);
     layout
+}
+
+impl DiskLayout {
+    /// The largest partition on this disk we know how to shrink to make room for
+    /// a side-by-side install, if any — what the storage bar carves the Manifest
+    /// OS slice from. `None` on a blank disk or one with no resizable filesystem
+    /// (then the whole disk is used).
+    pub fn shrink_target(&self) -> Option<&Partition> {
+        self.parts
+            .iter()
+            .filter(|p| is_shrinkable(&p.fstype))
+            .max_by_key(|p| p.size_bytes)
+    }
 }
 
 /// A short human label for a partition: its GPT partition label if any, else a
