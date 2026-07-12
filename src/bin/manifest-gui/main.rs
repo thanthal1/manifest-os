@@ -46,6 +46,7 @@ struct State {
     disk: String,
     install_mode: String,       // "erase" or "alongside" (dual boot with Windows)
     alongside_gib: Option<u32>, // GiB to give Manifest OS when dual-booting
+    shrink_part: Option<String>, // which existing partition to shrink (multi-OS)
     filesystem: String,
     swap: String,
     swap_size_gib: Option<u32>,
@@ -1369,6 +1370,7 @@ fn start_install(
             disk: st.disk.clone(),
             install_mode: st.install_mode.clone(),
             alongside_gib: st.alongside_gib,
+            shrink_part: st.shrink_part.clone(),
             filesystem: st.filesystem.clone(),
             swap: st.swap.clone(),
             swap_size_gib: st.swap_size_gib,
@@ -1728,15 +1730,25 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
         let scale = scale.clone();
         let summary = summary.clone();
         Rc::new(move || {
-            let (disk, alongside) = {
+            let (disk, alongside, chosen) = {
                 let st = state.borrow();
-                (st.disk.clone(), st.install_mode == "alongside")
+                (st.disk.clone(), st.install_mode == "alongside", st.shrink_part.clone())
             };
             if disk.is_empty() {
                 return;
             }
             let layout = probe::disk_layout(&disk);
-            let shrink = layout.shrink_target().map(|p| (p.name.clone(), p.size_bytes));
+            // Honor the partition the user clicked, if it's on this disk and
+            // resizable; otherwise fall back to the largest resizable one.
+            let shrink = chosen
+                .and_then(|want| {
+                    layout
+                        .parts
+                        .iter()
+                        .find(|p| p.name == want && p.shrinkable())
+                        .map(|p| (p.name.clone(), p.size_bytes))
+                })
+                .or_else(|| layout.shrink_target().map(|p| (p.name.clone(), p.size_bytes)));
             // Erase, or a disk with nothing resizable → the whole disk is used.
             let erase = !alongside || shrink.is_none();
 
@@ -1756,6 +1768,9 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
                 }
                 _ => scale.set_visible(false),
             }
+            // Record the effective carve source for the install plan.
+            state.borrow_mut().shrink_part =
+                if erase { None } else { shrink.as_ref().map(|(n, _)| n.clone()) };
             {
                 let mut m = model.borrow_mut();
                 m.layout = layout;
@@ -1767,6 +1782,46 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
             area.queue_draw();
         })
     };
+
+    // Click a partition in the bar to carve from *it* (multi-OS disks) — not just
+    // the largest. Clicking a non-resizable block (ESP, swap) or in erase mode
+    // does nothing.
+    let click = gtk::GestureClick::new();
+    click.connect_released({
+        let model = model.clone();
+        let state = state.clone();
+        let refresh = refresh.clone();
+        let area = area.clone();
+        move |_, _, x, _| {
+            let (total, blocks, erase) = {
+                let m = model.borrow();
+                let blocks: Vec<(String, u64, bool)> = m
+                    .layout
+                    .parts
+                    .iter()
+                    .map(|p| (p.name.clone(), p.size_bytes, p.shrinkable()))
+                    .collect();
+                (m.layout.total_bytes, blocks, m.erase)
+            };
+            let w = area.width() as f64;
+            if erase || total == 0 || w <= 0.0 {
+                return;
+            }
+            let click_bytes = (x / w * total as f64) as u64;
+            let mut acc = 0u64;
+            for (name, size, shrinkable) in blocks {
+                acc += size;
+                if click_bytes <= acc {
+                    if shrinkable {
+                        state.borrow_mut().shrink_part = Some(name);
+                        refresh();
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    area.add_controller(click);
 
     (container, refresh)
 }

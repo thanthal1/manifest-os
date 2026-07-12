@@ -488,6 +488,7 @@ fn run() -> Result<()> {
                     disk,
                     install_mode: mode,
                     alongside_gib,
+                    shrink_part: None,
                     filesystem,
                     swap,
                     swap_size_gib,

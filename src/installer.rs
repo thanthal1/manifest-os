@@ -889,7 +889,7 @@ fn partition_names(disk: &str, uefi: bool, has_swap: bool, has_home: bool) -> Pa
 /// references stay valid. NTFS is also gated on a clean `--no-action` pass so we
 /// never resize a hibernated / Fast-Startup Windows.
 fn carve_alongside(plan: &InstallPlan, ctx: &Ctx) -> Result<Parts> {
-    let os = crate::probe::detect_existing_os()
+    let os = crate::probe::detect_existing_os_on(plan.shrink_part.as_deref())
         .context("no existing OS was detected to install alongside")?;
     step("Making room alongside the existing system");
     println!(

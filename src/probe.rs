@@ -83,6 +83,11 @@ pub struct InstallPlan {
     /// sensible default).
     #[serde(default)]
     pub alongside_gib: Option<u32>,
+    /// For `alongside`: which existing partition to shrink (e.g. `/dev/sda3`).
+    /// `None` = the largest resizable one. Lets a multi-OS disk pick which OS to
+    /// shrink from the storage bar.
+    #[serde(default)]
+    pub shrink_part: Option<String>,
     #[serde(default = "default_filesystem")]
     pub filesystem: String,
     /// Persistent swap for the *installed* system, one of:
@@ -476,15 +481,23 @@ pub fn disk_layout(disk: &str) -> DiskLayout {
     layout
 }
 
+impl Partition {
+    /// Whether the installer can shrink this partition's filesystem to make room
+    /// for a side-by-side install (so the storage bar lets you carve from it).
+    pub fn shrinkable(&self) -> bool {
+        is_shrinkable(&self.fstype)
+    }
+}
+
 impl DiskLayout {
     /// The largest partition on this disk we know how to shrink to make room for
-    /// a side-by-side install, if any — what the storage bar carves the Manifest
-    /// OS slice from. `None` on a blank disk or one with no resizable filesystem
-    /// (then the whole disk is used).
+    /// a side-by-side install, if any — the storage bar's default carve source.
+    /// `None` on a blank disk or one with no resizable filesystem (then the whole
+    /// disk is used).
     pub fn shrink_target(&self) -> Option<&Partition> {
         self.parts
             .iter()
-            .filter(|p| is_shrinkable(&p.fstype))
+            .filter(|p| p.shrinkable())
             .max_by_key(|p| p.size_bytes)
     }
 }
@@ -624,6 +637,13 @@ pub struct ExistingOs {
 /// blank/unpartitioned disk returns `None`, so callers just offer a fresh
 /// whole-disk install. Read-only (mounts partitions briefly to peek).
 pub fn detect_existing_os() -> Option<ExistingOs> {
+    detect_existing_os_on(None)
+}
+
+/// Like [`detect_existing_os`], but if `preferred` names a shrinkable partition,
+/// carve from **that** one instead of the largest — so a multi-OS disk lets the
+/// user pick which OS to shrink. The disk holding `preferred` is tried first.
+pub fn detect_existing_os_on(preferred: Option<&str>) -> Option<ExistingOs> {
     let out = Command::new("lsblk")
         .args(["-P", "-p", "-b", "-o", "NAME,TYPE,FSTYPE,SIZE,PKNAME"])
         .output()
@@ -656,22 +676,36 @@ pub fn detect_existing_os() -> Option<ExistingOs> {
             disk,
         });
     }
-    let disks: Vec<String> = {
+    let mut disks: Vec<String> = {
         let mut d: Vec<String> = parts.iter().map(|p| p.disk.clone()).collect();
         d.sort();
         d.dedup();
         d
     };
+    // Try the disk holding the preferred partition first, so its explicit choice
+    // wins over a larger shrinkable partition on some other disk.
+    if let Some(want) = preferred {
+        disks.sort_by_key(|d| !parts.iter().any(|p| &p.disk == d && p.name == want));
+    }
     for disk in disks {
         let on = |p: &&P| p.disk == disk;
         // An in-use ESP (a vfat partition that actually holds an /EFI tree).
         let esp = parts.iter().filter(on).find(|p| p.fstype == "vfat" && is_esp(&p.name));
-        // The largest filesystem we know how to shrink.
-        let shrink = parts
-            .iter()
-            .filter(on)
-            .filter(|p| is_shrinkable(&p.fstype))
-            .max_by_key(|p| p.size);
+        // The chosen partition if it's here and resizable, else the largest.
+        let shrink = preferred
+            .and_then(|want| {
+                parts
+                    .iter()
+                    .filter(on)
+                    .find(|p| p.name == want && is_shrinkable(&p.fstype))
+            })
+            .or_else(|| {
+                parts
+                    .iter()
+                    .filter(on)
+                    .filter(|p| is_shrinkable(&p.fstype))
+                    .max_by_key(|p| p.size)
+            });
         if let (Some(esp), Some(shrink)) = (esp, shrink) {
             return Some(ExistingOs {
                 disk: disk.clone(),
