@@ -725,6 +725,27 @@ fn is_shrinkable(fs: &str) -> bool {
     matches!(fs, "ntfs" | "ext2" | "ext3" | "ext4" | "btrfs")
 }
 
+/// Bytes currently in use on `part` — mounted read-only, measured with `df`.
+/// The storage bar uses this as the floor for how far a partition can be shrunk
+/// (you can't shrink into occupied data). `None` if it can't be mounted (e.g. a
+/// hibernated / Fast-Startup NTFS), in which case callers use a fixed floor.
+pub fn partition_used_bytes(part: &str) -> Option<u64> {
+    with_ro_mount(part, |dir| {
+        let out = Command::new("df")
+            .args(["-B1", "--output=used"])
+            .arg(dir)
+            .output()
+            .ok()?;
+        // Line 1 is the "Used" header; line 2 is the number of bytes.
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .nth(1)?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    })
+}
+
 /// Mount a partition read-only and run `peek` against the mountpoint, then
 /// unmount. Returns `peek`'s value (or its default on a failed mount).
 fn with_ro_mount<T: Default>(part: &str, peek: impl FnOnce(&std::path::Path) -> T) -> T {

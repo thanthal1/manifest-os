@@ -16,7 +16,7 @@
 
 mod i18n;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -1659,6 +1659,11 @@ struct BarModel {
     shrink_part: Option<String>,
     carve_gib: u32,
     erase: bool,
+    // For dragging the divider directly on the bar:
+    shrink_offset: u64, // bytes on the disk before the shrink partition
+    shrink_size: u64,   // the shrink partition's size, bytes
+    carve_min: u32,     // GiB — floor (Manifest OS min / data used)
+    carve_max: u32,     // GiB — ceiling (leave the partition's used data)
 }
 
 /// The **reactive** storage bar: the selected disk drawn to scale, updating
@@ -1672,6 +1677,10 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
         shrink_part: None,
         carve_gib: 0,
         erase: true,
+        shrink_offset: 0,
+        shrink_size: 0,
+        carve_min: 0,
+        carve_max: 0,
     }));
 
     let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -1753,17 +1762,36 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
             let erase = !alongside || shrink.is_none();
 
             let mut carve = 0u32;
+            let mut carve_min = 0u32;
+            let mut carve_max = 0u32;
+            let mut shrink_offset = 0u64;
+            let mut shrink_size = 0u64;
             match (&shrink, erase) {
-                (Some((_, shrink_bytes)), false) => {
-                    // Leave the other partition ≥20 GiB; give Manifest OS ≥16.
+                (Some((name, shrink_bytes)), false) => {
                     let sg = (*shrink_bytes / GIB) as u32;
-                    let min = 16u32.min(sg.saturating_sub(1).max(1));
-                    let max = sg.saturating_sub(20).max(min + 1);
-                    let def = (sg / 2).clamp(min, max);
+                    // Floor for what the partition must keep: its actual used data
+                    // (+2 GiB headroom for filesystem metadata), or a 20 GiB guess
+                    // if we couldn't mount it to measure. Manifest OS gets ≥16 GiB.
+                    let keep_floor = match probe::partition_used_bytes(name) {
+                        Some(used) => (used / GIB) as u32 + 2,
+                        None => 20,
+                    };
+                    let max = sg.saturating_sub(keep_floor).max(1);
+                    let min = 16u32.min(max);
+                    let def = (max / 2).clamp(min, max);
                     scale.set_range(min as f64, max as f64);
                     scale.set_value(def as f64);
                     scale.set_visible(true);
                     carve = def;
+                    carve_min = min;
+                    carve_max = max;
+                    shrink_size = *shrink_bytes;
+                    shrink_offset = layout
+                        .parts
+                        .iter()
+                        .take_while(|p| &p.name != name)
+                        .map(|p| p.size_bytes)
+                        .sum::<u64>();
                     state.borrow_mut().alongside_gib = Some(def);
                 }
                 _ => scale.set_visible(false),
@@ -1777,22 +1805,73 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
                 m.shrink_part = if erase { None } else { shrink.map(|(n, _)| n) };
                 m.carve_gib = carve;
                 m.erase = erase;
+                m.shrink_offset = shrink_offset;
+                m.shrink_size = shrink_size;
+                m.carve_min = carve_min;
+                m.carve_max = carve_max;
             }
             update_summary(&summary, &model.borrow());
             area.queue_draw();
         })
     };
 
-    // Click a partition in the bar to carve from *it* (multi-OS disks) — not just
-    // the largest. Clicking a non-resizable block (ESP, swap) or in erase mode
-    // does nothing.
-    let click = gtk::GestureClick::new();
-    click.connect_released({
+    // Direct manipulation on the bar: **drag** the divider to resize the split
+    // (both sides at once), or **tap** a partition to carve from it instead (on
+    // a multi-OS disk). A tap that doesn't move ≥3px is treated as a select.
+    let drag = gtk::GestureDrag::new();
+    let start_x = Rc::new(Cell::new(0.0f64));
+    let moved = Rc::new(Cell::new(false));
+    drag.connect_drag_begin({
+        let start_x = start_x.clone();
+        let moved = moved.clone();
+        move |_, x, _| {
+            start_x.set(x);
+            moved.set(false);
+        }
+    });
+    drag.connect_drag_update({
+        let model = model.clone();
+        let area = area.clone();
+        let scale = scale.clone();
+        let start_x = start_x.clone();
+        let moved = moved.clone();
+        move |_, ox, _| {
+            if ox.abs() > 3.0 {
+                moved.set(true);
+            }
+            if !moved.get() {
+                return;
+            }
+            let (total, offset, size, cmin, cmax, erase) = {
+                let m = model.borrow();
+                (m.layout.total_bytes, m.shrink_offset, m.shrink_size, m.carve_min, m.carve_max, m.erase)
+            };
+            let w = area.width() as f64;
+            if erase || size == 0 || w <= 0.0 || total == 0 {
+                return;
+            }
+            // Map the pointer's x to a carve size: the divider sits at
+            // offset + (size - carve), so carve = size - (bytes_at_x - offset).
+            let x = (start_x.get() + ox).clamp(0.0, w);
+            let bytes_at_x = (x / w * total as f64) as u64;
+            let into_shrink = bytes_at_x.saturating_sub(offset);
+            let carve_bytes = size.saturating_sub(into_shrink);
+            let carve_gib = ((carve_bytes / GIB) as u32).clamp(cmin, cmax);
+            // Driving the slider updates the model + state + redraw in one place.
+            scale.set_value(carve_gib as f64);
+        }
+    });
+    drag.connect_drag_end({
         let model = model.clone();
         let state = state.clone();
         let refresh = refresh.clone();
         let area = area.clone();
-        move |_, _, x, _| {
+        let start_x = start_x.clone();
+        let moved = moved.clone();
+        move |_, _, _| {
+            if moved.get() {
+                return; // was a resize drag, not a select tap
+            }
             let (total, blocks, erase) = {
                 let m = model.borrow();
                 let blocks: Vec<(String, u64, bool)> = m
@@ -1807,11 +1886,11 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
             if erase || total == 0 || w <= 0.0 {
                 return;
             }
-            let click_bytes = (x / w * total as f64) as u64;
+            let tap_bytes = (start_x.get() / w * total as f64) as u64;
             let mut acc = 0u64;
             for (name, size, shrinkable) in blocks {
                 acc += size;
-                if click_bytes <= acc {
+                if tap_bytes <= acc {
                     if shrinkable {
                         state.borrow_mut().shrink_part = Some(name);
                         refresh();
@@ -1821,7 +1900,7 @@ fn storage_manager(state: &Rc<RefCell<State>>) -> (gtk::Box, Rc<dyn Fn()>) {
             }
         }
     });
-    area.add_controller(click);
+    area.add_controller(drag);
 
     (container, refresh)
 }
