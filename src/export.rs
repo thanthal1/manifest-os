@@ -41,6 +41,16 @@ pub fn run(output: Option<&Path>, install_hook: bool, ctx: &Ctx) -> Result<()> {
 
     match output {
         Some(path) => {
+            // Create the parent dir if needed — the pacman hook writes to
+            // /etc/manifest-os/system.json, which won't exist on a bare
+            // `pacman -S manifest-os` (only the full install flow makes it), and
+            // the hook shouldn't error on every `-Syu` until then.
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("creating {}", parent.display()))?;
+                }
+            }
             std::fs::write(path, &json)
                 .with_context(|| format!("writing manifest to {}", path.display()))?;
             println!("✓ Exported the current system to {}", path.display());
