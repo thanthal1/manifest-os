@@ -1790,25 +1790,22 @@ fn configure_updates(plan: &InstallPlan, ctx: &Ctx) {
         let _ = ctx.sudo("rm", &["-f", "/mnt/tmp/manifest-os.repo"]);
     }
 
-    // 3. Clear the unowned files stage_desktop_app wrote that the gui package
-    //    also ships, so pacman doesn't refuse with "exists in filesystem".
-    let _ = ctx.sudo(
-        "rm",
-        &[
-            "-f",
-            "/mnt/usr/share/applications/os.manifest.Snapshots.desktop",
-            "/mnt/usr/share/icons/hicolor/scalable/apps/os.manifest.Snapshots.svg",
-        ],
-    );
-
-    // 4. Install the components as packages.
+    // 3. Install the components as packages. `--overwrite` lets the gui package
+    //    replace the unowned launcher/icon that stage_desktop_app wrote (else
+    //    pacman refuses with "exists in filesystem"); doing it via --overwrite
+    //    rather than a pre-delete means a failed install leaves those files
+    //    intact, so we never strand the system without a launcher.
     let mut pkgs = String::from(
         "manifest-os-keyring manifest-os manifest-os-plugins manifest-os-examples",
     );
     if !plan.skip_desktop_app {
         pkgs.push_str(" manifest-os-gui");
     }
-    let install = format!("arch-chroot /mnt pacman -Sy --noconfirm --needed {pkgs}");
+    let install = format!(
+        "arch-chroot /mnt pacman -Sy --noconfirm --needed \
+         --overwrite /usr/share/applications/os.manifest.Snapshots.desktop \
+         --overwrite '/usr/share/icons/hicolor/scalable/apps/os.manifest.Snapshots.svg' {pkgs}"
+    );
     if ctx.shell(&install, true).is_err() {
         println!(
             "  · repo unreachable — the install uses the bundled binaries \
@@ -1817,7 +1814,7 @@ fn configure_updates(plan: &InstallPlan, ctx: &Ctx) {
         return;
     }
 
-    // 5. Success: the packages now own /usr/bin/manifest[-center] + the hook, so
+    // 4. Success: the packages now own /usr/bin/manifest[-center] + the hook, so
     //    remove the baked /usr/local/bin copies and the runtime hook to avoid
     //    PATH shadowing and a duplicate/stale hook.
     let _ = ctx.sudo(
