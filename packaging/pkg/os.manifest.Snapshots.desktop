@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=System Snapshots
+GenericName=Backup & Restore
+Comment=Save and restore your setup
+Exec=/usr/bin/manifest-center
+Icon=os.manifest.Snapshots
+Terminal=false
+StartupWMClass=os.manifest.Snapshots
+Categories=System;Settings;Utility;
+Keywords=snapshot;backup;restore;setup;

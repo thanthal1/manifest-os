@@ -69,15 +69,27 @@ bash packaging/publish-repo.sh        # gh release upload to the fixed `repo` ta
 
 ## What users do
 
+Every third-party repo has a one-time trust bootstrap (pacman won't install a
+`SigLevel = Required` repo until it trusts the key). The key isn't on a public
+keyserver, so import it straight from this repo:
+
 ```
-# add the repo (packaging/manifest-os.conf) to /etc/pacman.conf, then trust the
-# key once (the chicken-and-egg step every third-party repo has):
-sudo pacman-key --recv-keys <FPR> ; sudo pacman-key --lsign-key <FPR>
-#   — or on a Manifest OS install the ISO already shipped the keyring.
-sudo pacman -Sy manifest-os-keyring
+FPR=770823575E30BC11FC390790A61B8164C861A598
+curl -fsSL https://raw.githubusercontent.com/thanthal1/manifest-os/main/packaging/keyring/manifest-os.asc \
+  | sudo pacman-key --add -
+sudo pacman-key --lsign-key "$FPR"
+
+# add the repo (packaging/manifest-os.conf) to /etc/pacman.conf, then:
+sudo pacman -Sy manifest-os-keyring   # pins the key as a package so it survives
 sudo pacman -Syu manifest-os manifest-os-gui manifest-os-plugins
 ```
 
-From then on every component updates individually through normal
-`pacman -Syu`, and the ISO can stop baking loose binaries into
-`/usr/local/bin` and install these packages instead (future step).
+(On a Manifest OS install, the ISO can ship `manifest-os-keyring` pre-trusted so
+users skip the bootstrap entirely — that's the ISO-integration step.) From then
+on every component updates through normal `pacman -Syu`.
+
+> **Publishing a new version:** bump `$V`, re-run the build → sign → publish flow
+> above. pacman compares `pkgver-pkgrel`, so a higher version is picked up by
+> `pacman -Syu` automatically; the `repo` release tag and Server URL never
+> change. (Publishing the key to `keys.openpgp.org` too would let users bootstrap
+> with `pacman-key --recv-keys $FPR` instead of the curl above — optional.)

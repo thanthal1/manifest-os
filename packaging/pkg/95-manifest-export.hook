@@ -1,0 +1,14 @@
+# Managed by the manifest-os package — keep /etc/manifest-os/system.json in
+# sync with the installed package set. PostTransaction, so it can never abort
+# or roll back a pacman transaction; read-only w.r.t. packages.
+[Trigger]
+Operation = Install
+Operation = Remove
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Updating the Manifest OS system manifest...
+When = PostTransaction
+Exec = /usr/bin/manifest export --output /etc/manifest-os/system.json

@@ -155,6 +155,7 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     configure_autologin(plan, ctx)?;
     run_post_install_script(plan, ctx)?;
     stage_desktop_app(plan, ctx);
+    configure_updates(plan, ctx);
     sanitize_persisted_manifest(ctx);
     if alongside {
         enable_dual_boot(ctx);
@@ -1751,6 +1752,93 @@ fn stage_desktop_app(plan: &InstallPlan, ctx: &Ctx) {
         SNAPSHOTS_DESKTOP,
     );
 }
+
+/// Wire the installed system for component updates: trust the repo signing key,
+/// add the `[manifest-os]` repo, and install the components as **packages** (to
+/// `/usr/bin`, pacman-managed) so `pacman -Syu` keeps them current. On success
+/// the baked `/usr/local/bin` copies + the runtime tracking hook are removed so
+/// the package versions are canonical and nothing shadows them on `PATH`.
+///
+/// Best-effort and network-gated: if the repo can't be reached, the binaries
+/// staged earlier remain and the system still works (just not auto-updatable) —
+/// this never fails the install.
+fn configure_updates(plan: &InstallPlan, ctx: &Ctx) {
+    step("Setting up component updates");
+
+    // 1. Trust the repo signing key inside the target's keyring.
+    if ctx.write_root("/mnt/etc/manifest-os.asc", REPO_KEY).is_err() {
+        println!("  · couldn't stage the repo key — keeping the bundled binaries");
+        return;
+    }
+    let trust = format!(
+        "arch-chroot /mnt bash -c 'pacman-key --add /etc/manifest-os.asc && pacman-key --lsign-key {REPO_KEY_FPR}'"
+    );
+    let trusted = ctx.shell(&trust, true).is_ok();
+    let _ = ctx.sudo("rm", &["-f", "/mnt/etc/manifest-os.asc"]);
+    if !trusted {
+        println!("  · couldn't trust the repo key — keeping the bundled binaries");
+        return;
+    }
+
+    // 2. Add the repo to the target's pacman.conf (idempotent).
+    if ctx.write_root("/mnt/tmp/manifest-os.repo", REPO_CONF).is_ok() {
+        let _ = ctx.shell(
+            "grep -q '^\\[manifest-os\\]' /mnt/etc/pacman.conf || \
+             cat /mnt/tmp/manifest-os.repo >> /mnt/etc/pacman.conf",
+            true,
+        );
+        let _ = ctx.sudo("rm", &["-f", "/mnt/tmp/manifest-os.repo"]);
+    }
+
+    // 3. Clear the unowned files stage_desktop_app wrote that the gui package
+    //    also ships, so pacman doesn't refuse with "exists in filesystem".
+    let _ = ctx.sudo(
+        "rm",
+        &[
+            "-f",
+            "/mnt/usr/share/applications/os.manifest.Snapshots.desktop",
+            "/mnt/usr/share/icons/hicolor/scalable/apps/os.manifest.Snapshots.svg",
+        ],
+    );
+
+    // 4. Install the components as packages.
+    let mut pkgs = String::from(
+        "manifest-os-keyring manifest-os manifest-os-plugins manifest-os-examples",
+    );
+    if !plan.skip_desktop_app {
+        pkgs.push_str(" manifest-os-gui");
+    }
+    let install = format!("arch-chroot /mnt pacman -Sy --noconfirm --needed {pkgs}");
+    if ctx.shell(&install, true).is_err() {
+        println!(
+            "  · repo unreachable — the install uses the bundled binaries \
+             (update later with: sudo pacman -Syu {pkgs})"
+        );
+        return;
+    }
+
+    // 5. Success: the packages now own /usr/bin/manifest[-center] + the hook, so
+    //    remove the baked /usr/local/bin copies and the runtime hook to avoid
+    //    PATH shadowing and a duplicate/stale hook.
+    let _ = ctx.sudo(
+        "rm",
+        &[
+            "-f",
+            "/mnt/usr/local/bin/manifest",
+            "/mnt/usr/local/bin/manifest-center",
+            "/mnt/etc/pacman.d/hooks/95-manifest-export.hook",
+        ],
+    );
+    println!("  · components installed as packages — `pacman -Syu` keeps them updated");
+}
+
+/// The repo's public signing key + fingerprint + pacman.conf stanza, embedded so
+/// the installer is self-contained.
+const REPO_KEY: &str = include_str!("../packaging/keyring/manifest-os.asc");
+const REPO_KEY_FPR: &str = "770823575E30BC11FC390790A61B8164C861A598";
+const REPO_CONF: &str = "\n[manifest-os]\n\
+SigLevel = Required DatabaseOptional\n\
+Server = https://github.com/thanthal1/manifest-os/releases/download/repo\n";
 
 /// Embedded so the installer is self-contained (no dependency on the ISO's
 /// file layout).

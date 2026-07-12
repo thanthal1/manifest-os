@@ -37,6 +37,10 @@ package_manifest-os() {
                 'manifest-os-examples: example manifests')
     cd "$pkgbase-$pkgver"
     install -Dm755 target/release/manifest "$pkgdir/usr/bin/manifest"
+    # Package-owned package-tracking hook, pointing at the packaged binary — so
+    # it's always correct after upgrades (no dependence on /usr/local/bin).
+    install -Dm644 packaging/pkg/95-manifest-export.hook \
+        "$pkgdir/usr/share/libalpm/hooks/95-manifest-export.hook"
 }
 
 package_manifest-os-gui() {
@@ -45,6 +49,11 @@ package_manifest-os-gui() {
     cd "$pkgbase-$pkgver"
     install -Dm755 target/release/manifest-gui "$pkgdir/usr/bin/manifest-gui"
     install -Dm755 target/release/manifest-center "$pkgdir/usr/bin/manifest-center"
+    # Desktop launcher + icon, pointing at the packaged binary.
+    install -Dm644 packaging/pkg/os.manifest.Snapshots.desktop \
+        "$pkgdir/usr/share/applications/os.manifest.Snapshots.desktop"
+    install -Dm644 assets/os.manifest.Snapshots.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/os.manifest.Snapshots.svg"
 }
 
 package_manifest-os-plugins() {
