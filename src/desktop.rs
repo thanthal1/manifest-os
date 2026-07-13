@@ -420,6 +420,17 @@ pub fn switch_default(d: &Resolved, ctx: &Ctx) -> bool {
     true
 }
 
+/// tuigreet's `--theme` spec (component=named-ANSI-color pairs, semicolon
+/// separated — see the tuigreet README; hex colors aren't supported, only
+/// ratatui's named ANSI set). Plain black-and-white is the default with no
+/// `--theme` at all, which is what made the greetd login screen look bare.
+pub const TUIGREET_THEME: &str =
+    "border=magenta;text=white;prompt=green;time=cyan;action=magenta;button=white;container=black;input=white";
+
+const SDDM_THEME_QML: &str = include_str!("../assets/sddm-theme/Main.qml");
+const SDDM_THEME_CONF_DEFAULT: &str = include_str!("../assets/sddm-theme/theme.conf");
+const SDDM_THEME_METADATA: &str = include_str!("../assets/sddm-theme/metadata.desktop");
+
 /// Write whatever config a display manager needs to actually launch the chosen
 /// session. SDDM and GDM auto-detect sessions and need nothing.
 fn configure_display_manager(dm: &DisplayManager, session_exec: &str, ctx: &Ctx) -> Result<()> {
@@ -429,13 +440,25 @@ fn configure_display_manager(dm: &DisplayManager, session_exec: &str, ctx: &Ctx)
             "/etc/lightdm/lightdm.conf.d/50-manifest.conf",
             "[Seat:*]\ngreeter-session=lightdm-gtk-greeter\n",
         ),
+        // SDDM's bundled default theme is plain (no background, minimal
+        // styling) — install a themed one so login isn't bare black-and-white.
+        // A manifest can restyle it (accent/wallpaper) with a `files` entry
+        // overwriting theme.conf, applied after this step; see the flagship
+        // examples.
+        "sddm" => {
+            ctx.write_root("/usr/share/sddm/themes/manifest/Main.qml", SDDM_THEME_QML)?;
+            ctx.write_root("/usr/share/sddm/themes/manifest/theme.conf", SDDM_THEME_CONF_DEFAULT)?;
+            ctx.write_root("/usr/share/sddm/themes/manifest/metadata.desktop", SDDM_THEME_METADATA)?;
+            ctx.write_root("/etc/sddm.conf.d/10-manifest-theme.conf", "[Theme]\nCurrent=manifest\n")
+        }
         // greetd has no session picker of its own; tuigreet provides one, and
         // we can pre-select the environment via --cmd when we know it.
         "greetd" => {
+            let base = format!("tuigreet --time --remember --theme '{TUIGREET_THEME}'");
             let command = if session_exec.is_empty() {
-                "tuigreet --time --remember".to_string()
+                base
             } else {
-                format!("tuigreet --time --remember --cmd {session_exec}")
+                format!("{base} --cmd {session_exec}")
             };
             let toml = format!(
                 "[terminal]\nvt = 1\n\n[default_session]\ncommand = \"{command}\"\nuser = \"greeter\"\n"

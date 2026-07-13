@@ -195,6 +195,10 @@
       "path": "~/.local/bin/manifest-powermenu",
       "content": "#!/bin/sh\n# Power menu — wofi ships with the desktop. Wired from waybar's power button.\nchoice=$(printf '%s\n' '  Lock' '󰅃  Logout' '  Suspend' '  Reboot' '  Shutdown' \\n  | wofi --dmenu --prompt Power --width 240 --height 300 --cache-file /dev/null)\ncase \"$choice\" in\n  *Lock)     hyprlock ;;\n  *Logout)   hyprctl dispatch exit ;;\n  *Suspend)  systemctl suspend ;;\n  *Reboot)   systemctl reboot ;;\n  *Shutdown) systemctl poweroff ;;\nesac\n",
       "mode": "755"
+    },
+    {
+      "path": "/usr/share/sddm/themes/manifest/theme.conf",
+      "content": "[General]\nAccentColor=#ff9b54\nPanelColor=#1b1412\nFontFamily=Noto Sans\nBackground=/usr/share/backgrounds/manifest/current\n"
     }
   ],
   "conditional": [

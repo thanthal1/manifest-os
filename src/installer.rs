@@ -417,8 +417,9 @@ fn configure_autologin(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
                 .filter(|s| !s.is_empty());
             match session_exec {
                 Some(cmd) => {
+                    let theme = crate::desktop::TUIGREET_THEME;
                     let toml = format!(
-                        "[terminal]\nvt = 1\n\n[default_session]\ncommand = \"tuigreet --time --remember --cmd {cmd}\"\nuser = \"greeter\"\n\n[initial_session]\ncommand = \"{cmd}\"\nuser = \"{user}\"\n"
+                        "[terminal]\nvt = 1\n\n[default_session]\ncommand = \"tuigreet --time --remember --theme '{theme}' --cmd {cmd}\"\nuser = \"greeter\"\n\n[initial_session]\ncommand = \"{cmd}\"\nuser = \"{user}\"\n"
                     );
                     ctx.write_root("/mnt/etc/greetd/config.toml", &toml)?;
                 }

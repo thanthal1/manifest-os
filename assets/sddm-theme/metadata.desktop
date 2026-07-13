@@ -1,0 +1,13 @@
+[SddmGreeterTheme]
+Name=Manifest
+Description=Manifest OS login theme
+Author=Manifest OS
+Copyright=MIT
+License=MIT
+Type=sddm-theme
+Version=1.0
+Website=https://github.com/thanthal1/manifest-os
+MainScript=Main.qml
+ConfigFile=theme.conf
+TranslationsDirectory=translations
+Font=Noto Sans
