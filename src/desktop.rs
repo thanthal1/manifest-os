@@ -326,10 +326,43 @@ pub fn apply(d: &Resolved, ctx: &Ctx) -> Result<()> {
     // detects those GPUs at login and forces the software path; real GPUs are
     // untouched.
     ctx.write_root(GPU_FALLBACK_PATH, GPU_FALLBACK)?;
+
+    // Let wheel members actually use a power/logout button. logind gates
+    // poweroff/reboot/suspend behind polkit, and — this is the part that bites
+    // ricers — only the *-multiple-sessions actions require authentication when
+    // more than one session is registered (a second TTY, a lingering greeter
+    // session, some resume states). With a single session it's silent and
+    // works; with two it silently needs a prompt that may never appear (no
+    // agent, or the agent doesn't grab focus) — so the exact same power button
+    // "randomly" does nothing depending on session count. This is the standard
+    // Arch Wiki fix (Polkit § Allow users in wheel group to run power actions).
+    ctx.write_root(POLKIT_POWER_PATH, POLKIT_POWER_RULE)?;
     Ok(())
 }
 
 const GPU_FALLBACK_PATH: &str = "/etc/profile.d/manifest-gpu-fallback.sh";
+
+const POLKIT_POWER_PATH: &str = "/etc/polkit-1/rules.d/46-manifest-power.rules";
+
+const POLKIT_POWER_RULE: &str = r#"// Managed by Manifest OS — let wheel members power off/reboot/suspend without
+// a polkit prompt, even when more than one session is registered (the case
+// that otherwise makes a desktop's power/logout button silently do nothing).
+polkit.addRule(function(action, subject) {
+    var powerActions = [
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.suspend-multiple-sessions",
+        "org.freedesktop.login1.hibernate",
+        "org.freedesktop.login1.hibernate-multiple-sessions"
+    ];
+    if (powerActions.indexOf(action.id) !== -1 && subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
+"#;
 
 const GPU_FALLBACK: &str = r#"# Managed by Manifest OS — software rendering on virtual / 3D-less GPUs.
 # VirtualBox (vboxvideo/vmwgfx), VMware (vmwgfx) and QEMU (qxl/bochs/cirrus)
