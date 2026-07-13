@@ -157,6 +157,7 @@ fn run_steps(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
     stage_desktop_app(plan, ctx);
     configure_updates(plan, ctx);
     sanitize_persisted_manifest(ctx);
+    remove_bootstrap_user(ctx);
     if alongside {
         enable_dual_boot(ctx);
     }
@@ -1562,6 +1563,25 @@ fn create_bootstrap_user(ctx: &Ctx) -> Result<()> {
          echo \"installer ALL=(ALL) NOPASSWD: ALL\" > /etc/sudoers.d/00-installer'",
         true,
     )
+}
+
+/// Delete the bootstrap `installer` account and its passwordless-sudo drop-in
+/// once the install is done. It exists only to build paru/AUR packages as
+/// non-root; leaving it would ship the system with a `wheel` member that has
+/// `NOPASSWD: ALL` — a standing root hole. Remove the sudoers file first (kills
+/// the privilege even if the account can't be deleted), then the account+home.
+fn remove_bootstrap_user(ctx: &Ctx) {
+    step("Removing the installer account");
+    if ctx
+        .shell(
+            "arch-chroot /mnt bash -c 'rm -f /etc/sudoers.d/00-installer; \
+             pkill -9 -u installer 2>/dev/null; userdel -r -f installer 2>/dev/null || true'",
+            true,
+        )
+        .is_err()
+    {
+        println!("  · warning: couldn't fully remove the installer account — check `id installer`");
+    }
 }
 
 /// Place the chosen manifest somewhere the install runs from. Uses /etc (root-

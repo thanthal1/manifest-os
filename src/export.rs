@@ -219,9 +219,14 @@ fn active_dm_key() -> Option<String> {
 // pacman readers
 // ---------------------------------------------------------------------------
 
-/// Explicitly-installed packages (`pacman -Qqe`), sorted.
+/// Explicitly-installed packages (`pacman -Qqe`), sorted. Excludes `*-debug`
+/// packages: they're build byproducts (e.g. `paru-debug` from building paru
+/// from source) that exist only locally — no repo or the AUR carries them, so
+/// declaring one makes a later `paru -S` fail with "could not find all required
+/// packages". Never something a manifest should carry.
 fn installed_explicit() -> Vec<String> {
     let mut v = lines_of(&pacman(&["-Qqe"]));
+    v.retain(|p| !p.ends_with("-debug"));
     v.sort();
     v
 }

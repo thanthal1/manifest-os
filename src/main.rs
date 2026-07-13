@@ -285,8 +285,17 @@ fn run() -> Result<()> {
             // config/variables changed, do the fast targeted re-apply; if the
             // edit changed packages/desktop/users/services, fall back to a full
             // sync so nothing new is left uninstalled.
+            // Only fall back to a full sync when there's a recorded baseline AND
+            // it shows a heavy change (packages/desktop/users/services). With no
+            // baseline we can't say packages changed — and `reconfigure` was
+            // explicitly asked for (the Settings app), which is config-only — so
+            // regenerate config without the network-bound pacman steps rather
+            // than treating "everything" as new.
             let current = history::current();
-            if diff::requires_full_apply(&manifest, current.as_ref()) {
+            let needs_full = current
+                .as_ref()
+                .is_some_and(|c| diff::requires_full_apply(&manifest, Some(c)));
+            if needs_full {
                 println!("→ this edit changes packages/desktop/services — running a full sync\n");
                 install::sync(&manifest, &ctx)?;
             } else {
