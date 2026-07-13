@@ -22,6 +22,7 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.claude/
 vendor-archiso/
 
 # Packaging: built packages + the repo db live on the GitHub release, not in git.
