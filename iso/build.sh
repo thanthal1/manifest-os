@@ -128,6 +128,30 @@ while IFS= read -r -d '' f; do
 done < <(find "$profile/airootfs/etc/systemd/system" -type f -print0)
 echo "repaired systemd enablement symlinks"
 
+# Clean the work dir. CRITICAL: unmount anything mkarchiso left mounted under a
+# previous run first — otherwise `rm -rf` silently leaves a stale `airootfs.sfs`
+# behind, mkarchiso reuses it, and the ISO ships an OLD binary while everything
+# else looks fine (baked binary correct, build "succeeds"). Lazy, deepest-first.
+mount | awk -v w="$work" '$3 ~ w {print $3}' | sort -r | xargs -r -n1 umount -l 2>/dev/null || true
 rm -rf "$work"
 mkarchiso -v -w "$work" -o "$out" "$profile"
+
+# Fail loudly if the ISO's embedded binary isn't the one we just baked — the
+# only reliable guard against the stale-squashfs trap above.
+iso_file="$out/$(ls -t "$out" | grep -m1 '\.iso$')"
+if command -v unsquashfs &>/dev/null && [[ -f "$iso_file" ]]; then
+    _m=$(mktemp -d); _x=$(mktemp -d)
+    if mount -o loop,ro "$iso_file" "$_m" 2>/dev/null; then
+        _sfs=$(find "$_m" -name 'airootfs.sfs' -o -name 'airootfs.erofs' 2>/dev/null | head -1)
+        unsquashfs -f -d "$_x" "$_sfs" usr/local/bin/manifest &>/dev/null || true
+        if [[ -f "$_x/usr/local/bin/manifest" ]] &&
+           ! cmp -s "$_x/usr/local/bin/manifest" "$bin"; then
+            echo "ERROR: the ISO's baked-in manifest binary is STALE (mkarchiso reused an old squashfs)." >&2
+            echo "       Remove $work (after unmounting) and rebuild." >&2
+            umount "$_m" 2>/dev/null; rm -rf "$_m" "$_x"; exit 1
+        fi
+        umount "$_m" 2>/dev/null
+    fi
+    rm -rf "$_m" "$_x"
+fi
 echo "ISO written to: $out"
