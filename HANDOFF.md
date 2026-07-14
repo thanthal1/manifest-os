@@ -36,6 +36,7 @@ src/                     the engine + CLI (Rust)
   system.rs users.rs files.rs   hostname/locale/tz/keymap  /  useradd+sudoers+chpasswd  /  declarative writes
   dotfiles.rs snippets.rs       clone+place repos (list, subdir/into)  /  marker-block config fragments
   theming.rs keybindings.rs wallpaper.rs scaling.rs   cross-desktop theme / universal keybinds / wallpaper / HiDPI scale
+  gestures.rs            cross-desktop touchpad gestures (native workspace_swipe / niri built-in, else libinput-gestures + auto-pkg)
   survey.rs conditions.rs     author questions, {{id}} injection  /  Facts + when/conditional/detect engine
   plugins.rs             expand custom blocks (docker/tailscale/…) into core primitives; inline or from plugins/
   export.rs diff.rs history.rs  capture running system  /  preview changes (+ requires_full_apply) /  git-backed history + rollback
@@ -65,7 +66,8 @@ Three binaries: **`manifest`** (CLI, always), **`manifest-gui`** and
 
 `system`, `repos`, `packages`, `services`, `dotfiles` (one repo or a list, with
 `subdir`/`into` retargeting), `desktop` + `display_manager`, `boot`, `users`,
-`files`, `snippets`, `flatpak`, `defaults`, `wallpaper`, `keybindings`, `theme`,
+`files`, `snippets`, `flatpak`, `defaults`, `wallpaper`, `keybindings`,
+`gestures` (touchpad — native-first, else auto-installed libinput-gestures), `theme`,
 `display` (HiDPI `scale`), `login` (greeter theme — bundled SDDM theme styled by
 `accent`/`background`/…, or select another; tuigreet colours), and
 `pre_install`/`post_install` (the escape hatch —

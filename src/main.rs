@@ -581,6 +581,22 @@ fn load_manifest(
     facts.overlay(answered.pairs());
     manifest::conditions::resolve(&mut manifest, &facts);
 
+    // Touchpad gestures on a desktop without native support pull in the
+    // libinput-gestures daemon — fold those packages into the manifest AND the
+    // recorded JSON so they install now and a rollback/export reproduces them.
+    // (Done after `resolve`, so the desktop a `conditional` overlay might set is
+    // already final.)
+    let gesture_pkgs: Vec<String> =
+        manifest::gestures::required_packages(&manifest.gestures, manifest.desktop.as_deref())
+            .into_iter()
+            .filter(|p| !manifest.packages.contains(p))
+            .collect();
+    if !gesture_pkgs.is_empty() {
+        println!("gestures: +{} package(s) (libinput-gestures)", gesture_pkgs.len());
+        manifest.packages.extend(gesture_pkgs.iter().cloned());
+        recorded = merge_conditional_packages(&recorded, &gesture_pkgs).unwrap_or(recorded);
+    }
+
     Ok((manifest, recorded))
 }
 

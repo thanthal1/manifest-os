@@ -13,6 +13,7 @@ pub mod exec;
 pub mod export;
 pub mod files;
 pub mod flatpak;
+pub mod gestures;
 pub mod history;
 pub mod install;
 pub mod installer;

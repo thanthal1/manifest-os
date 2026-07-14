@@ -184,6 +184,26 @@ skips ours entirely — it's a default, never a lock-in. The lock screen
 (`hyprlock`/`swaylock`) is a separate, session-level thing you configure as an
 ordinary `files` entry.
 
+## Touchpad gestures
+
+Like `keybindings`, one `gestures` list works across environments — **native
+first**, daemon only where needed:
+
+```json
+"gestures": [
+  { "fingers": 3, "action": "workspace" },
+  { "fingers": 4, "direction": "up", "command": "swaync-client -t" }
+]
+```
+
+A `workspace` swipe uses each compositor's native support (Hyprland's
+`workspace_swipe`, niri's built-in swipes) — no extra packages. Anything else
+(custom `command`s, or any gesture on Sway/i3/…) is wired through the
+**`libinput-gestures`** daemon, which the engine installs, configures
+(`~/.config/libinput-gestures.conf` + `input` group + autostart), **and adds to
+the manifest's package list automatically** so the setup reproduces on the next
+install/rollback.
+
 ## Plugins (new blocks without bloating the core)
 
 The core schema stays small; new capabilities grow at the edges. A **plugin**

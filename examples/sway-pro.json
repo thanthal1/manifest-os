@@ -173,5 +173,11 @@
         }
       ]
     }
+  ],
+  "gestures": [
+    {
+      "fingers": 3,
+      "action": "workspace"
+    }
   ]
 }

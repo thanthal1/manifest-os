@@ -18,6 +18,7 @@ use crate::exec::Ctx;
 use crate::export;
 use crate::files;
 use crate::flatpak;
+use crate::gestures;
 use crate::keybindings;
 use crate::kernel;
 use crate::manifest::Manifest;
@@ -193,6 +194,11 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
     if !manifest.keybindings.is_empty() {
         step("Setting up keybindings");
         keybindings::apply(&manifest.keybindings, manifest.desktop.as_deref(), primary_user, ctx)?;
+    }
+
+    if !manifest.gestures.is_empty() {
+        step("Setting up touchpad gestures");
+        gestures::apply(&manifest.gestures, manifest.desktop.as_deref(), primary_user, ctx)?;
     }
 
     if full && !manifest.dotfiles.is_empty() {

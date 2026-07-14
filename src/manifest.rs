@@ -131,6 +131,14 @@ pub struct Manifest {
     #[serde(default)]
     pub keybindings: Vec<Keybinding>,
 
+    /// Touchpad gestures, applied the same cross-desktop way as `keybindings`:
+    /// prefer the environment's native support (Hyprland `workspace_swipe`,
+    /// niri's built-in swipes), and fall back to the `libinput-gestures` daemon
+    /// — auto-installed and recorded into the manifest — where there's none.
+    /// See [`crate::gestures`].
+    #[serde(default)]
+    pub gestures: Vec<Gesture>,
+
     /// Visual theme — GTK/widget theme, icons, cursor, fonts, dark preference —
     /// applied across whatever environment the manifest sets up. The theme
     /// packages themselves go in `packages`; this block only *selects* them.
@@ -444,6 +452,31 @@ pub struct Keybinding {
     pub keys: String,
     pub action: Option<String>,
     pub command: Option<String>,
+}
+
+/// One touchpad gesture. Either the built-in `action` (currently `"workspace"`
+/// — swipe to switch workspaces, native where supported) or a literal
+/// `command` should be set; `command` wins and always goes through
+/// libinput-gestures. See [`crate::gestures`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct Gesture {
+    /// Number of fingers (3 or 4). Defaults to 3.
+    #[serde(default = "default_fingers")]
+    pub fingers: u8,
+    /// Swipe direction — `"left"`/`"right"`/`"up"`/`"down"`. Required for a
+    /// `command` gesture; ignored for the `"workspace"` action (inherently a
+    /// horizontal swipe both ways).
+    #[serde(default)]
+    pub direction: String,
+    /// Built-in action. `"workspace"` = swipe horizontally to change workspace.
+    #[serde(default)]
+    pub action: String,
+    /// A shell command run on the swipe (used verbatim). Overrides `action`.
+    pub command: Option<String>,
+}
+
+fn default_fingers() -> u8 {
+    3
 }
 
 impl Wallpaper {
