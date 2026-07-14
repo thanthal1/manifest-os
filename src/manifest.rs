@@ -561,6 +561,14 @@ pub struct Display {
     /// token substitution.
     #[serde(default, deserialize_with = "de_scale")]
     pub scale: Option<f64>,
+    /// Let the desktop own HiDPI scaling instead of the OS layers. When `true`,
+    /// the installer skips [`crate::scaling`] entirely (no `GDK_SCALE`/
+    /// `QT_SCALE_FACTOR` env drop-in, no first-login `kscreen`/`gsettings`
+    /// script) and the running desktop scales itself. Set this for KDE Plasma,
+    /// whose per-output auto-scaling *stacks* on top of ours and pushes panels
+    /// off-screen. Defaults to `false` (the OS applies `scale`).
+    #[serde(default)]
+    pub native_scaling: bool,
 }
 
 /// Deserialize a scale as a number *or* a numeric string (empty → none), so a

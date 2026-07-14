@@ -181,20 +181,20 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
 
     // Display scale: an explicit `display.scale`, else the panel's auto-detected
     // default (so a HiDPI machine isn't left with a tiny UI). 1.0 is a no-op.
-    // NOT on Plasma: KDE auto-scales HiDPI per-output itself, and stacking our
-    // scale (QT_SCALE_FACTOR + kscreen ScaleFactor) on top double-scales and
-    // overflows the panel off-screen on some laptops. Let Plasma own its scaling.
+    // A manifest can hand scaling to the desktop with `display.native_scaling`
+    // (see the field docs) — e.g. Plasma, whose own per-output auto-scale would
+    // otherwise stack on ours and push the panel off-screen.
+    let native_scaling = manifest.display.as_ref().is_some_and(|d| d.native_scaling);
     let scale = manifest
         .display
         .as_ref()
         .and_then(|d| d.scale)
         .unwrap_or_else(crate::conditions::default_scale);
-    let is_plasma = manifest.desktop.as_deref() == Some("plasma");
-    if scale > 1.0 && !is_plasma {
+    if native_scaling {
+        println!("  · display.native_scaling — leaving HiDPI scaling to the desktop");
+    } else if scale > 1.0 {
         step("Setting display scale");
         scaling::apply(scale, ctx)?;
-    } else if scale > 1.0 && is_plasma {
-        println!("  · Plasma scales HiDPI itself — leaving display scaling to it");
     }
 
     if !manifest.keybindings.is_empty() {

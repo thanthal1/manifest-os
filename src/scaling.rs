@@ -101,8 +101,9 @@ fn runtime_script(scale: f64) -> String {
          \x20   # Deliberately nothing: Plasma auto-scales HiDPI per-output on\n\
          \x20   # its own. Forcing a scale on top (ScaleFactor/kscreen-doctor, plus\n\
          \x20   # the QT_SCALE_FACTOR env drop-in) double-scaled the UI and pushed\n\
-         \x20   # the panel off-screen on some laptops. `install` also skips this\n\
-         \x20   # whole step for a Plasma install; this is belt-and-suspenders.\n\
+         \x20   # the panel off-screen. A Plasma manifest should set\n\
+         \x20   # `display.native_scaling: true`, which skips this whole step; the\n\
+         \x20   # no-op here is belt-and-suspenders if scale is set without it.\n\
          \x20   : ;;\n\
          \x20 *xfce*)\n\
          \x20   xfconf-query -c xsettings -p /Xft/DPI -n -t int -s {dpi} 2>/dev/null ;;\n\

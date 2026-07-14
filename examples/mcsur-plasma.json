@@ -107,6 +107,9 @@
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
   },
+  "display": {
+    "native_scaling": true
+  },
   "wallpaper": {
     "source": "{{wallpaper}}",
     "mode": "fill"

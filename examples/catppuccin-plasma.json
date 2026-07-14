@@ -22,12 +22,6 @@
   },
   "settings": [
     {
-      "id": "scale",
-      "type": "scale",
-      "label": "Display scale",
-      "description": "UI scale for HiDPI screens. 100% auto-detects."
-    },
-    {
       "id": "accent",
       "type": "color",
       "label": "Accent colour",
@@ -111,7 +105,7 @@
     "dark": true
   },
   "display": {
-    "scale": "{{scale}}"
+    "native_scaling": true
   },
   "wallpaper": {
     "source": "{{wallpaper}}",
