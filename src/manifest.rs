@@ -402,6 +402,13 @@ pub enum Wallpaper {
 /// `/usr/share/icons` show); fonts are "Family Size" in GTK font syntax.
 #[derive(Debug, Deserialize)]
 pub struct Theme {
+    /// KDE Plasma **global theme** (look-and-feel) — one bundle that sets the
+    /// Plasma style, colours, icons, cursor and more at once, e.g. `"McSur-dark"`
+    /// or `"org.kde.breezedark.desktop"`. Applied with `plasma-apply-lookandfeel`
+    /// *before* the individual fields below (so those still override pieces). The
+    /// theme's package must be installed (declare it in `packages`). Plasma only;
+    /// ignored on other desktops.
+    pub global: Option<String>,
     /// GTK / widget theme name, e.g. "Adwaita-dark", "Materia".
     pub gtk: Option<String>,
     /// Icon theme name, e.g. "Papirus-Dark".
@@ -422,7 +429,8 @@ pub struct Theme {
 impl Theme {
     /// Whether the block sets anything at all.
     pub fn is_empty(&self) -> bool {
-        self.gtk.is_none()
+        self.global.is_none()
+            && self.gtk.is_none()
             && self.icons.is_none()
             && self.cursor.is_none()
             && self.cursor_size.is_none()

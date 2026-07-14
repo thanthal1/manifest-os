@@ -234,6 +234,11 @@ fn runtime_script(t: &Theme) -> String {
     // The GTK theme itself reaches KDE's GTK apps via our settings.ini layer.
     s.push_str("  *kde*|*plasma*)\n");
     s.push_str("    kw=kwriteconfig6; command -v $kw >/dev/null 2>&1 || kw=kwriteconfig5\n");
+    // A global theme (look-and-feel) first — it sets the whole look at once, so
+    // the per-piece overrides below still win where the manifest also sets them.
+    if let Some(v) = &t.global {
+        s.push_str(&format!("    plasma-apply-lookandfeel -a {} 2>/dev/null\n", sh_quote(v)));
+    }
     if let Some(v) = &t.icons {
         s.push_str(&format!("    $kw --file kdeglobals --group Icons --key Theme {} 2>/dev/null\n", sh_quote(v)));
     }
@@ -322,6 +327,7 @@ mod tests {
 
     fn full_theme() -> Theme {
         Theme {
+            global: Some("org.kde.breezedark.desktop".into()),
             gtk: Some("Materia-dark".into()),
             icons: Some("Papirus-Dark".into()),
             cursor: Some("Adwaita".into()),
@@ -347,6 +353,7 @@ mod tests {
     #[test]
     fn settings_ini_omits_unset_fields() {
         let t = Theme {
+            global: None,
             gtk: Some("Adwaita".into()),
             icons: None,
             cursor: None,
@@ -427,6 +434,7 @@ mod tests {
     #[test]
     fn empty_theme_is_detected() {
         let t = Theme {
+            global: None,
             gtk: None,
             icons: None,
             cursor: None,

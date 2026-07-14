@@ -98,17 +98,12 @@ fn runtime_script(scale: f64) -> String {
          \x20 *mate*)\n\
          \x20   gsettings set org.mate.interface window-scaling-factor {int_scale} 2>/dev/null ;;\n\
          \x20 *kde*|*plasma*)\n\
-         \x20   # KDE scales the whole UI itself. Use its scale factor — NOT\n\
-         \x20   # forceFontDPI, which scales fonts only and (atop Plasma's own\n\
-         \x20   # HiDPI auto-scale) overflows the panel off-screen. kscreen-doctor\n\
-         \x20   # applies it live on Wayland; ScaleFactor persists it for X11.\n\
-         \x20   kw=kwriteconfig6; command -v $kw >/dev/null 2>&1 || kw=kwriteconfig5\n\
-         \x20   $kw --file kdeglobals --group KScreen --key ScaleFactor {sc} 2>/dev/null\n\
-         \x20   if command -v kscreen-doctor >/dev/null 2>&1; then\n\
-         \x20     for o in $(kscreen-doctor -o 2>/dev/null | sed -n 's/^Output: [0-9]* \\([^ ]*\\).*/\\1/p'); do\n\
-         \x20       kscreen-doctor output.$o.scale.{sc} 2>/dev/null\n\
-         \x20     done\n\
-         \x20   fi ;;\n\
+         \x20   # Deliberately nothing: Plasma auto-scales HiDPI per-output on\n\
+         \x20   # its own. Forcing a scale on top (ScaleFactor/kscreen-doctor, plus\n\
+         \x20   # the QT_SCALE_FACTOR env drop-in) double-scaled the UI and pushed\n\
+         \x20   # the panel off-screen on some laptops. `install` also skips this\n\
+         \x20   # whole step for a Plasma install; this is belt-and-suspenders.\n\
+         \x20   : ;;\n\
          \x20 *xfce*)\n\
          \x20   xfconf-query -c xsettings -p /Xft/DPI -n -t int -s {dpi} 2>/dev/null ;;\n\
          \x20 *) exit 0 ;;\n\
@@ -161,13 +156,15 @@ mod tests {
             "gsettings set org.gnome.desktop.interface text-scaling-factor 2",
             "gsettings set org.cinnamon.desktop.interface scaling-factor 2",
             "gsettings set org.mate.interface window-scaling-factor 2",
-            "--file kdeglobals --group KScreen --key ScaleFactor 2",
-            "kscreen-doctor output.$o.scale.2",
             "xfconf-query -c xsettings -p /Xft/DPI -n -t int -s 192",
             "*) exit 0 ;;",
         ] {
             assert!(s.contains(needle), "missing: {needle}\n---\n{s}");
         }
+        // Plasma is deliberately a no-op — it scales HiDPI itself, and stacking
+        // ours on top overflowed the panel.
+        assert!(!s.contains("kscreen-doctor output"), "Plasma scaling should be removed:\n{s}");
+        assert!(!s.contains("KScreen --key ScaleFactor"), "Plasma scaling should be removed:\n{s}");
     }
 
     #[test]

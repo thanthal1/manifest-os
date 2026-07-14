@@ -141,6 +141,7 @@ fn list_changes(out: &mut Vec<Change>, category: &str, old: &[String], new: &[St
 
 fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>) {
     let none = Theme {
+        global: None,
         gtk: None,
         icons: None,
         cursor: None,
@@ -151,6 +152,7 @@ fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>
     };
     let o = old.unwrap_or(&none);
     let n = new.unwrap_or(&none);
+    value_change(out, "Global theme", o.global.as_deref(), n.global.as_deref());
     value_change(out, "App theme", o.gtk.as_deref(), n.gtk.as_deref());
     value_change(out, "Icons", o.icons.as_deref(), n.icons.as_deref());
     value_change(out, "Cursor", o.cursor.as_deref(), n.cursor.as_deref());
