@@ -16,6 +16,9 @@ __pycache__/
 *.pdb
 Cargo.lock.bak
 
+# Local agent notes — kept on disk, not shared to the remote.
+CLAUDE.md
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
