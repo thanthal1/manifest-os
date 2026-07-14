@@ -164,6 +164,26 @@ as a settings panel (scale, accent colour, wallpaper, opacity, …):
 "settings": [ { "id": "scale", "type": "scale", "label": "Display scale", "default": 1.0 } ]
 ```
 
+## Login screen
+
+The greeter (SDDM on GNOME/KDE/Hyprland, tuigreet on greetd desktops) is themed
+by an optional `login` block — omit it for a sensible default, style the bundled
+theme, or select a completely different one:
+
+```json
+"login": {
+  "accent": "{{accent}}",
+  "background": "/usr/share/backgrounds/manifest/current",
+  "tuigreet_theme": "border=magenta;text=white;prompt=green;time=cyan"
+}
+```
+
+`accent`/`panel`/`background`/`font` restyle the bundled SDDM theme;
+`"theme": "sugar-candy"` (with the package installed) selects *that* theme and
+skips ours entirely — it's a default, never a lock-in. The lock screen
+(`hyprlock`/`swaylock`) is a separate, session-level thing you configure as an
+ordinary `files` entry.
+
 ## Plugins (new blocks without bloating the core)
 
 The core schema stays small; new capabilities grow at the edges. A **plugin**

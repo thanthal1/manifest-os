@@ -66,7 +66,9 @@ Three binaries: **`manifest`** (CLI, always), **`manifest-gui`** and
 `system`, `repos`, `packages`, `services`, `dotfiles` (one repo or a list, with
 `subdir`/`into` retargeting), `desktop` + `display_manager`, `boot`, `users`,
 `files`, `snippets`, `flatpak`, `defaults`, `wallpaper`, `keybindings`, `theme`,
-`display` (HiDPI `scale`), and `pre_install`/`post_install` (the escape hatch —
+`display` (HiDPI `scale`), `login` (greeter theme — bundled SDDM theme styled by
+`accent`/`background`/…, or select another; tuigreet colours), and
+`pre_install`/`post_install` (the escape hatch —
 everything else is declarative). Plus the **adaptive** layer: `variables` +
 `survey`/`settings` questions (`{{token}}` substitution), auto-detected `detect`
 facts (gpu/cpu/virt/is_vm/firmware/scale), and `when`-gated `conditional`

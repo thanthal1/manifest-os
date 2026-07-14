@@ -406,10 +406,21 @@ fn configure_autologin(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
             // greetd has no separate "autologin" flag — an `[initial_session]`
             // block runs the session directly on the first VT, no greeter at
             // all. Re-use the desktop catalog to know what to run.
-            let desktop_key = std::fs::read_to_string("/mnt/etc/manifest-install.json")
+            let doc = std::fs::read_to_string("/mnt/etc/manifest-install.json")
                 .ok()
-                .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+                .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok());
+            let desktop_key = doc
+                .as_ref()
                 .and_then(|d| d.get("desktop").and_then(|v| v.as_str()).map(str::to_string));
+            // Honor a manifest `login.tuigreet_theme` here too (the greeter still
+            // shows for re-logins even with autologin), else the project default.
+            let theme = doc
+                .as_ref()
+                .and_then(|d| d.get("login"))
+                .and_then(|l| l.get("tuigreet_theme"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(crate::desktop::TUIGREET_THEME)
+                .to_string();
             let session_exec = desktop_key
                 .as_deref()
                 .and_then(crate::desktop::recipe)
@@ -417,7 +428,6 @@ fn configure_autologin(plan: &InstallPlan, ctx: &Ctx) -> Result<()> {
                 .filter(|s| !s.is_empty());
             match session_exec {
                 Some(cmd) => {
-                    let theme = crate::desktop::TUIGREET_THEME;
                     let toml = format!(
                         "[terminal]\nvt = 1\n\n[default_session]\ncommand = \"tuigreet --time --remember --theme '{theme}' --cmd {cmd}\"\nuser = \"greeter\"\n\n[initial_session]\ncommand = \"{cmd}\"\nuser = \"{user}\"\n"
                     );

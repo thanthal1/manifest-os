@@ -142,6 +142,12 @@ pub struct Manifest {
     /// each full DE's native setting). See [`crate::scaling`].
     pub display: Option<Display>,
 
+    /// Login screen (display-manager greeter) appearance. Omit it and you get
+    /// the bundled `manifest` SDDM theme / a sensible tuigreet colour scheme;
+    /// tweak its colours here, or name another installed SDDM theme to skip
+    /// ours entirely. See [`Login`] and [`crate::desktop`].
+    pub login: Option<Login>,
+
     /// Shell commands run *before* package installation. Escape hatch only.
     #[serde(default)]
     pub pre_install: Vec<String>,
@@ -473,6 +479,35 @@ pub struct Meta {
     /// "free" | "paid" — catalog metadata, ignored by the installer.
     #[serde(default)]
     pub license: String,
+}
+
+/// Login screen (display-manager greeter) appearance — see
+/// [`crate::desktop::configure_login`].
+///
+/// For **SDDM** (GNOME/KDE/Hyprland/Sway when it's the DM): with no `theme`, or
+/// `theme: "manifest"`, you get the bundled Manifest theme and can restyle it
+/// with `accent`/`panel`/`background`/`font`. Set `theme` to any *other*
+/// installed SDDM theme name (e.g. `"breeze"`, `"sugar-candy"` — install its
+/// package in `packages`) and ours is not shipped or selected at all. For
+/// **greetd/tuigreet** (Niri/Sway/i3 …), `tuigreet_theme` overrides the colour
+/// spec. Everything here is optional.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Login {
+    /// SDDM theme name. Unset / `"manifest"` = the bundled theme (styled by the
+    /// fields below); anything else selects that installed theme instead.
+    pub theme: Option<String>,
+    /// Bundled-theme accent colour (hex), e.g. `"#ff9b54"`.
+    pub accent: Option<String>,
+    /// Bundled-theme panel/card colour (hex).
+    pub panel: Option<String>,
+    /// Bundled-theme background image path, e.g.
+    /// `"/usr/share/backgrounds/manifest/current"` (where `wallpaper` lands).
+    pub background: Option<String>,
+    /// Bundled-theme font family, e.g. `"Inter"`.
+    pub font: Option<String>,
+    /// Override the greetd/tuigreet colour spec (see
+    /// [`crate::desktop::TUIGREET_THEME`] for the syntax).
+    pub tuigreet_theme: Option<String>,
 }
 
 /// Display / scaling settings.

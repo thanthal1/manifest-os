@@ -203,6 +203,8 @@ pub struct Resolved {
     pub services: Vec<String>,
     pub env: Vec<(&'static str, &'static str)>,
     pub aur: Vec<&'static str>,
+    /// The manifest's optional login-screen appearance settings.
+    pub login: Option<crate::manifest::Login>,
 }
 
 /// Expand `manifest.desktop` (+ optional `display_manager` override) into a
@@ -290,6 +292,7 @@ pub fn resolve(manifest: &Manifest) -> Result<Option<Resolved>> {
         services,
         env: r.env.to_vec(),
         aur: r.aur.to_vec(),
+        login: manifest.login.clone(),
     }))
 }
 
@@ -303,7 +306,7 @@ pub fn apply(d: &Resolved, ctx: &Ctx) -> Result<()> {
 
     if let Some(dm) = &d.dm {
         println!("  · display manager: {}", dm.key);
-        configure_display_manager(dm, d.session_exec, ctx)?;
+        configure_display_manager(dm, d.session_exec, d.login.as_ref(), ctx)?;
         // `--force` so re-applying (or switching from another DE) overwrites
         // the existing `display-manager.service` alias instead of erroring on
         // the conflicting symlink. `switch_default` disables the old DM first
@@ -428,33 +431,36 @@ pub const TUIGREET_THEME: &str =
     "border=magenta;text=white;prompt=green;time=cyan;action=magenta;button=white;container=black;input=white";
 
 const SDDM_THEME_QML: &str = include_str!("../assets/sddm-theme/Main.qml");
-const SDDM_THEME_CONF_DEFAULT: &str = include_str!("../assets/sddm-theme/theme.conf");
 const SDDM_THEME_METADATA: &str = include_str!("../assets/sddm-theme/metadata.desktop");
 
 /// Write whatever config a display manager needs to actually launch the chosen
-/// session. SDDM and GDM auto-detect sessions and need nothing.
-fn configure_display_manager(dm: &DisplayManager, session_exec: &str, ctx: &Ctx) -> Result<()> {
+/// session, and apply the manifest's [`Login`](crate::manifest::Login) theming.
+/// SDDM and GDM auto-detect sessions; SDDM additionally gets a theme.
+fn configure_display_manager(
+    dm: &DisplayManager,
+    session_exec: &str,
+    login: Option<&crate::manifest::Login>,
+    ctx: &Ctx,
+) -> Result<()> {
     match dm.key {
         // LightDM needs to be told which greeter to use.
         "lightdm" => ctx.write_root(
             "/etc/lightdm/lightdm.conf.d/50-manifest.conf",
             "[Seat:*]\ngreeter-session=lightdm-gtk-greeter\n",
         ),
-        // SDDM's bundled default theme is plain (no background, minimal
-        // styling) — install a themed one so login isn't bare black-and-white.
-        // A manifest can restyle it (accent/wallpaper) with a `files` entry
-        // overwriting theme.conf, applied after this step; see the flagship
-        // examples.
-        "sddm" => {
-            ctx.write_root("/usr/share/sddm/themes/manifest/Main.qml", SDDM_THEME_QML)?;
-            ctx.write_root("/usr/share/sddm/themes/manifest/theme.conf", SDDM_THEME_CONF_DEFAULT)?;
-            ctx.write_root("/usr/share/sddm/themes/manifest/metadata.desktop", SDDM_THEME_METADATA)?;
-            ctx.write_root("/etc/sddm.conf.d/10-manifest-theme.conf", "[Theme]\nCurrent=manifest\n")
-        }
+        // SDDM's own default theme is plain black-and-white. Pick a theme by the
+        // manifest's `login.theme`: unset / "manifest" ships the bundled theme
+        // (styled from `login.accent`/`panel`/`background`/`font`); any other
+        // name just *selects* that already-installed theme and skips ours
+        // entirely — so it's a default, never a lock-in.
+        "sddm" => configure_sddm(login, ctx),
         // greetd has no session picker of its own; tuigreet provides one, and
         // we can pre-select the environment via --cmd when we know it.
         "greetd" => {
-            let base = format!("tuigreet --time --remember --theme '{TUIGREET_THEME}'");
+            let theme = login
+                .and_then(|l| l.tuigreet_theme.as_deref())
+                .unwrap_or(TUIGREET_THEME);
+            let base = format!("tuigreet --time --remember --theme '{theme}'");
             let command = if session_exec.is_empty() {
                 base
             } else {
@@ -468,6 +474,35 @@ fn configure_display_manager(dm: &DisplayManager, session_exec: &str, ctx: &Ctx)
         // gdm, sddm, ly: nothing to write.
         _ => Ok(()),
     }
+}
+
+/// Apply the SDDM login theme per the manifest's [`Login`](crate::manifest::Login).
+/// A `login.theme` other than `"manifest"` just selects that installed theme and
+/// leaves ours off the disk; otherwise ship the bundled theme and build its
+/// `theme.conf` from the `login` colour fields (with sensible defaults).
+fn configure_sddm(login: Option<&crate::manifest::Login>, ctx: &Ctx) -> Result<()> {
+    let chosen = login.and_then(|l| l.theme.as_deref()).unwrap_or("manifest");
+    if chosen != "manifest" {
+        // Use a theme the manifest installed itself — don't ship or clobber it.
+        return ctx.write_root(
+            "/etc/sddm.conf.d/10-manifest-theme.conf",
+            &format!("[Theme]\nCurrent={chosen}\n"),
+        );
+    }
+    let get = |f: fn(&crate::manifest::Login) -> Option<&str>, default: &'static str| {
+        login.and_then(f).unwrap_or(default).to_string()
+    };
+    let theme_conf = format!(
+        "[General]\nAccentColor={}\nPanelColor={}\nFontFamily={}\nBackground={}\n",
+        get(|l| l.accent.as_deref(), "#7aa2f7"),
+        get(|l| l.panel.as_deref(), "#141414"),
+        get(|l| l.font.as_deref(), "Noto Sans"),
+        get(|l| l.background.as_deref(), ""),
+    );
+    ctx.write_root("/usr/share/sddm/themes/manifest/Main.qml", SDDM_THEME_QML)?;
+    ctx.write_root("/usr/share/sddm/themes/manifest/theme.conf", &theme_conf)?;
+    ctx.write_root("/usr/share/sddm/themes/manifest/metadata.desktop", SDDM_THEME_METADATA)?;
+    ctx.write_root("/etc/sddm.conf.d/10-manifest-theme.conf", "[Theme]\nCurrent=manifest\n")
 }
 
 /// Persist session environment variables to a login-time drop-in. Overwritten
