@@ -370,6 +370,81 @@ fn is_pkg_file(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// version pin — hold every package at its current version
+// ---------------------------------------------------------------------------
+//
+// Newest-by-default is the secure default, so this is opt-in. When on, a managed
+// `IgnorePkg = *` under pacman's `[options]` makes `pacman -Syu` hold everything
+// at its current version (upgrades are skipped, not applied) — "use exact
+// versions". Toggling off removes the line and upgrades flow again. The block is
+// marker-delimited so we only ever touch our own line.
+
+const PACMAN_CONF: &str = "/etc/pacman.conf";
+const PIN_BEGIN: &str = "# >>> Manifest OS version pin (managed) — hold all packages";
+const PIN_END: &str = "# <<< Manifest OS version pin";
+
+/// Whether the managed pin block is present in a pacman.conf's text.
+pub fn is_pinned(conf: &str) -> bool {
+    conf.lines().any(|l| l.trim() == PIN_BEGIN)
+}
+
+/// Return `conf` with the managed pin block added (`on`) or removed (`off`).
+/// Idempotent. Adding inserts the block right after the `[options]` header;
+/// `None` if there's no `[options]` section to anchor to.
+pub fn set_pin_text(conf: &str, on: bool) -> Option<String> {
+    // Always strip any existing managed block first (clean idempotent state).
+    let mut out: Vec<String> = Vec::new();
+    let mut skipping = false;
+    for line in conf.lines() {
+        let t = line.trim();
+        if t == PIN_BEGIN {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if t == PIN_END {
+                skipping = false;
+            }
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !on {
+        return Some(out.join("\n") + "\n");
+    }
+    // Insert the block after the [options] header.
+    let idx = out.iter().position(|l| l.trim() == "[options]")?;
+    let block = [
+        PIN_BEGIN.to_string(),
+        "IgnorePkg = *".to_string(),
+        PIN_END.to_string(),
+    ];
+    out.splice(idx + 1..idx + 1, block);
+    Some(out.join("\n") + "\n")
+}
+
+/// Read the pin state from the live pacman.conf.
+pub fn pin_status() -> bool {
+    std::fs::read_to_string(PACMAN_CONF).map(|c| is_pinned(&c)).unwrap_or(false)
+}
+
+/// Turn the version pin on or off in the live pacman.conf.
+pub fn set_pin(on: bool, ctx: &Ctx) -> Result<()> {
+    let conf = std::fs::read_to_string(PACMAN_CONF)
+        .with_context(|| format!("reading {PACMAN_CONF}"))?;
+    let updated = set_pin_text(&conf, on)
+        .context("no [options] section in pacman.conf to anchor the version pin")?;
+    ctx.write_root(PACMAN_CONF, &updated)?;
+    if on {
+        println!("✓ Version pin ON — `pacman -Syu` now holds every package at its current version.");
+        println!("  Turn it off with `manifest pin-versions off` to resume normal updates.");
+    } else {
+        println!("✓ Version pin OFF — normal (newest) updates resume.");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // runtime — the version-history git repo + listing
 // ---------------------------------------------------------------------------
 
@@ -493,6 +568,37 @@ mod tests {
         // a: changed → include at target ver. b: same → skip. gone: not installed
         // now → skip (don't reinstall). since: not in target → left alone.
         assert_eq!(t, vec![("a".into(), "1".into())]);
+    }
+
+    #[test]
+    fn pin_adds_and_removes_a_managed_block() {
+        let conf = "[options]\nHoldPkg = pacman glibc\nArchitecture = auto\n\n[core]\nInclude = /x\n";
+        let on = set_pin_text(conf, true).unwrap();
+        assert!(is_pinned(&on));
+        assert!(on.contains("IgnorePkg = *"));
+        // Inserted under [options], not into [core].
+        let opts = on.find("[options]").unwrap();
+        let core = on.find("[core]").unwrap();
+        assert!(on.find("IgnorePkg = *").unwrap() > opts);
+        assert!(on.find("IgnorePkg = *").unwrap() < core);
+        // Toggling off restores the original (idempotent, marker-clean).
+        let off = set_pin_text(&on, false).unwrap();
+        assert!(!is_pinned(&off));
+        assert!(!off.contains("IgnorePkg = *"));
+    }
+
+    #[test]
+    fn pin_on_is_idempotent() {
+        let conf = "[options]\nArchitecture = auto\n";
+        let once = set_pin_text(conf, true).unwrap();
+        let twice = set_pin_text(&once, true).unwrap();
+        assert_eq!(once, twice);
+        assert_eq!(twice.matches("IgnorePkg = *").count(), 1);
+    }
+
+    #[test]
+    fn pin_without_options_section_is_none() {
+        assert!(set_pin_text("[core]\nInclude = /x\n", true).is_none());
     }
 
     #[test]

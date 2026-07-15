@@ -126,6 +126,13 @@ enum Command {
     /// changed. Run automatically by a pacman hook after every transaction.
     #[command(hide = true)]
     SnapshotPackages,
+    /// Hold every package at its current version, or resume newest updates. With
+    /// no argument, prints the current state. Newest-by-default is the secure
+    /// default; pinning trades that for stability ("use exact versions").
+    PinVersions {
+        /// "on" to hold current versions, "off" to resume normal updates.
+        state: Option<String>,
+    },
     /// List the desktop environments / window managers the installer can set up.
     Desktops,
     /// List the kernels the installer can install.
@@ -340,6 +347,18 @@ fn run() -> Result<()> {
             pkglock::restore(reference.as_deref(), &Ctx::new(false))
         }
         Command::SnapshotPackages => pkglock::snapshot(&Ctx::new(false)),
+        Command::PinVersions { state } => match state.as_deref() {
+            Some("on") | Some("true") => pkglock::set_pin(true, &Ctx::new(false)),
+            Some("off") | Some("false") => pkglock::set_pin(false, &Ctx::new(false)),
+            None => {
+                println!(
+                    "Version pin is {}.\n  Enable:  manifest pin-versions on\n  Disable: manifest pin-versions off",
+                    if pkglock::pin_status() { "ON (holding current versions)" } else { "OFF (newest updates)" }
+                );
+                Ok(())
+            }
+            Some(other) => anyhow::bail!("unknown state `{other}` — use `on` or `off`"),
+        },
         Command::Verify { file } => {
             let raw = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading manifest at {}", file.display()))?;
