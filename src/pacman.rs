@@ -112,6 +112,27 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
         println!("  · paru already installed");
         return Ok(());
     }
+
+    // Fast path: a prebuilt `paru` package in the pacman cache — baked into the
+    // ISO, or saved by an earlier build on this machine (see the end of this
+    // fn). Building paru from source costs 20-30 min on modest hardware, so
+    // reusing one is a big win for repeat installs and the VM test rig. This is
+    // NOT the paru-bin trap: we *verify the binary actually runs* after
+    // installing it, so a cache built against an older libalpm (which won't run)
+    // cleanly falls back to a source build instead of shipping a broken paru.
+    if !ctx.dry_run {
+        if let Some(pkg) = cached_paru_pkg() {
+            println!("  · found a cached paru ({pkg}) — trying it before a source build");
+            let installed = ctx
+                .sudo("pacman", &["-U", "--noconfirm", &pkg])
+                .is_ok();
+            if installed && ctx.check("sh", &["-c", "paru --version >/dev/null 2>&1"]) {
+                println!("  · installed cached paru — skipped the ~20-30 min source build");
+                return Ok(());
+            }
+            println!("  · cached paru unusable (libalpm bump?) — building from source instead");
+        }
+    }
     // paru's PKGBUILD needs a Rust toolchain (`cargo` makedepend). That dep is
     // provided by BOTH `rust` and `rustup`; with `--noconfirm`, makepkg can pull
     // `rustup`, whose `cargo` is a shim that dies with "rustup could not choose a
@@ -153,9 +174,36 @@ pub fn bootstrap_paru(ctx: &Ctx) -> Result<()> {
          [ \"$jobs\" -lt 1 ] && jobs=1; \
          [ \"$jobs\" -gt \"$(nproc)\" ] && jobs=$(nproc); \
          echo \"  · building with $jobs parallel job(s)\"; \
-         MAKEFLAGS=-j$jobs CARGO_BUILD_JOBS=$jobs makepkg -si --noconfirm"
+         MAKEFLAGS=-j$jobs CARGO_BUILD_JOBS=$jobs makepkg -si --noconfirm && \
+         {{ sudo cp -f paru-[0-9]*.pkg.tar.* /var/cache/pacman/pkg/ 2>/dev/null || true; }}"
     );
     ctx.shell(&build, false)
+}
+
+/// The newest prebuilt `paru` package in the pacman cache, if any. Skips the
+/// `-debug` byproduct and `paru-bin` (the ABI-fragile prebuilt we never want) by
+/// requiring a digit right after `paru-` (i.e. a version). Returns a full path
+/// ready for `pacman -U`.
+fn cached_paru_pkg() -> Option<String> {
+    const CACHE: &str = "/var/cache/pacman/pkg";
+    let mut hits: Vec<String> = std::fs::read_dir(CACHE)
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|f| is_cached_paru(f))
+        .collect();
+    hits.sort();
+    hits.pop().map(|f| format!("{CACHE}/{f}"))
+}
+
+/// A cache filename that's a real source `paru` package: `paru-<digit>…` ending
+/// in `.pkg.tar.zst`/`.xz`, excluding `.sig`, `paru-bin-` and `paru-debug-`.
+fn is_cached_paru(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("paru-") else {
+        return false;
+    };
+    rest.starts_with(|c: char| c.is_ascii_digit())
+        && (name.ends_with(".pkg.tar.zst") || name.ends_with(".pkg.tar.xz"))
 }
 
 /// Step 6 — install every package (plus the kernel package) via paru. paru
@@ -194,4 +242,22 @@ pub fn install_packages(
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_cached_paru_matches_source_pkgs_only() {
+        assert!(is_cached_paru("paru-2.0.4-1-x86_64.pkg.tar.zst"));
+        assert!(is_cached_paru("paru-1.11.2-1-x86_64.pkg.tar.xz"));
+        // Not the ABI-fragile prebuilt, the debug byproduct, or a signature.
+        assert!(!is_cached_paru("paru-bin-2.0.4-1-x86_64.pkg.tar.zst"));
+        assert!(!is_cached_paru("paru-debug-2.0.4-1-x86_64.pkg.tar.zst"));
+        assert!(!is_cached_paru("paru-2.0.4-1-x86_64.pkg.tar.zst.sig"));
+        // Unrelated packages.
+        assert!(!is_cached_paru("parui-0.1-1-x86_64.pkg.tar.zst"));
+        assert!(!is_cached_paru("firefox-1-1-x86_64.pkg.tar.zst"));
+    }
 }
