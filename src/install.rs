@@ -105,8 +105,9 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         step("Updating system");
         pacman::sync_system(ctx)?;
 
-        step("Bootstrapping paru");
-        pacman::bootstrap_paru(ctx)?;
+        // paru is no longer bootstrapped up front — `install_packages` builds it
+        // lazily, and only if the manifest actually needs an AUR package (that
+        // build is 20-30 min, so an all-official install skips it entirely).
 
         run_hooks("pre_install", &manifest.pre_install, ctx)?;
 
@@ -115,7 +116,17 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         if kernel.key != crate::kernel::DEFAULT_KEY {
             println!("  · note: non-default kernel — ensure the bootloader has an entry for it");
         }
-        let desktop_pkgs = desktop.as_ref().map(|d| d.packages.clone()).unwrap_or_default();
+        // The desktop recipe's own packages, plus any AUR ones it declares (e.g.
+        // Wayfire's wf-shell) — install_packages routes each to pacman or paru by
+        // repo membership, so the AUR ones land correctly.
+        let desktop_pkgs = desktop
+            .as_ref()
+            .map(|d| {
+                let mut v = d.packages.clone();
+                v.extend(d.aur.iter().map(|s| s.to_string()));
+                v
+            })
+            .unwrap_or_default();
         if let Some(d) = &desktop {
             println!("  · desktop: {} (+{} packages)", d.display_name, d.packages.len());
         }

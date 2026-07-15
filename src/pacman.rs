@@ -7,6 +7,7 @@ use crate::exec::Ctx;
 use crate::kernel::Kernel;
 use crate::manifest::Manifest;
 use anyhow::Result;
+use std::collections::HashSet;
 
 const PACMAN_CONF: &str = "/etc/pacman.conf";
 // Bootstrap from the *source* paru package, not paru-bin. The prebuilt -bin
@@ -217,15 +218,42 @@ pub fn install_packages(
 ) -> Result<()> {
     // Order: kernel + headers, then desktop-recipe packages, then the
     // manifest's own list. De-duplicated, first occurrence wins.
-    let mut pkgs: Vec<&str> = vec![kernel.package, kernel.headers];
+    let mut pkgs: Vec<String> = vec![kernel.package.to_string(), kernel.headers.to_string()];
     for p in extra.iter().chain(manifest.packages.iter()) {
-        if !pkgs.contains(&p.as_str()) {
-            pkgs.push(p.as_str());
+        if !pkgs.iter().any(|x| x == p) {
+            pkgs.push(p.clone());
         }
     }
+    println!("  {} package(s) total", pkgs.len());
 
-    println!("  installing {} package(s)", pkgs.len());
+    // Route official-repo packages through plain `pacman` and only the rest
+    // through the AUR. paru — a 20-30 min source build — is bootstrapped ONLY
+    // when a package actually comes from the AUR, so an all-official manifest
+    // (most of them) never pays for it. Membership comes from the enabled sync
+    // databases; if they can't be read, everything falls back to paru, which
+    // resolves both. (Groups/virtual names aren't literal package names, so they
+    // route to paru too — correct, just not as fast.)
+    let (official, aur) = partition_packages(&pkgs, &official_packages(ctx));
 
+    if !official.is_empty() {
+        println!("  · {} from official repos → pacman", official.len());
+        let mut args: Vec<String> =
+            ["-S", "--needed", "--noconfirm", "--disable-download-timeout"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        args.extend(official);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        ctx.sudo("pacman", &argv)?;
+    }
+
+    if aur.is_empty() {
+        println!("  · no AUR packages — skipping the paru bootstrap");
+        return Ok(());
+    }
+
+    println!("  · {} from the AUR → bootstrapping paru first", aur.len());
+    bootstrap_paru(ctx)?;
     let mut args = vec![
         "MAKEFLAGS=-j1".to_string(),
         "CARGO_BUILD_JOBS=1".to_string(),
@@ -236,8 +264,28 @@ pub fn install_packages(
         // don't let one slow mirror's trickle abort the whole desktop install
         "--disable-download-timeout".to_string(),
     ];
-    args.extend(pkgs.into_iter().map(shell_quote));
+    args.extend(aur.iter().map(|s| shell_quote(s)));
     ctx.shell(&args.join(" "), false)
+}
+
+/// Every package name available in the enabled sync repos (`pacman -Slq`), as a
+/// set. Empty if the databases can't be read — the caller then treats every
+/// package as AUR, the safe fallback that always resolves via paru. Read-only,
+/// so no root needed.
+fn official_packages(ctx: &Ctx) -> HashSet<String> {
+    ctx.output(false, "pacman", &["-Slq"])
+        .map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// Split packages into `(official, aur)` by sync-repo membership. An empty
+/// `official` set (databases unreadable) routes everything to AUR so paru still
+/// resolves the lot — never a false "official" that would make `pacman -S` fail.
+fn partition_packages(pkgs: &[String], official: &HashSet<String>) -> (Vec<String>, Vec<String>) {
+    if official.is_empty() {
+        return (Vec::new(), pkgs.to_vec());
+    }
+    pkgs.iter().cloned().partition(|p| official.contains(p))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -247,6 +295,28 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn partitions_packages_by_sync_membership() {
+        let official = set(&["firefox", "linux", "mesa"]);
+        let pkgs: Vec<String> =
+            ["firefox", "paru", "wf-shell", "linux"].iter().map(|s| s.to_string()).collect();
+        let (off, aur) = partition_packages(&pkgs, &official);
+        assert_eq!(off, vec!["firefox".to_string(), "linux".to_string()]);
+        assert_eq!(aur, vec!["paru".to_string(), "wf-shell".to_string()]);
+    }
+
+    #[test]
+    fn empty_official_set_routes_everything_to_aur() {
+        // db unreadable → nothing classified official → paru resolves all.
+        let (off, aur) = partition_packages(&["a".to_string(), "b".to_string()], &HashSet::new());
+        assert!(off.is_empty());
+        assert_eq!(aur, vec!["a".to_string(), "b".to_string()]);
+    }
 
     #[test]
     fn is_cached_paru_matches_source_pkgs_only() {
