@@ -15,6 +15,7 @@
 mod designer;
 mod settings;
 mod snapshots;
+mod updates;
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -60,6 +61,7 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&snap_page, Some("snapshots"), "Snapshots")
         .set_icon_name(Some("document-open-recent-symbolic"));
     build_apply(&window, &stack, &toasts);
+    build_updates(&window, &stack, &toasts);
     settings::build(&window, &stack, &toasts);
     designer::build(&window, &stack, &toasts);
 
@@ -292,6 +294,128 @@ fn confirm_restore(
             &toasts,
             "Restoring your snapshot",
             vec!["sync".into(), path_str.clone()],
+        );
+    });
+    dialog.present();
+}
+
+// ---------------------------------------------------------------------------
+// Updates — package-version history + the "hold versions" switch
+// ---------------------------------------------------------------------------
+
+fn build_updates(
+    window: &adw::ApplicationWindow,
+    stack: &std::rc::Rc<adw::ViewStack>,
+    toasts: &adw::ToastOverlay,
+) {
+    let page = adw::PreferencesPage::new();
+
+    // The pin switch: newest-by-default is the secure default, so this is off
+    // unless the user chose stability. Flipping it edits pacman.conf (root).
+    let pin_group = adw::PreferencesGroup::builder()
+        .title("Updates")
+        .description("Normally your apps update to the newest version (best for security). Turn this on to hold everything at its current version instead.")
+        .build();
+    let pin = adw::SwitchRow::builder()
+        .title("Hold current versions")
+        .subtitle("Skip updates until you turn this back off")
+        .active(updates::pinned())
+        .build();
+    {
+        let window = window.clone();
+        let stack = stack.clone();
+        let toasts = toasts.clone();
+        pin.connect_active_notify(move |row| {
+            let state = if row.is_active() { "on" } else { "off" };
+            run_privileged(
+                &window,
+                &stack,
+                &toasts,
+                "Changing update setting",
+                vec!["pin-versions".into(), state.into()],
+            );
+        });
+    }
+    pin_group.add(&pin);
+    page.add(&pin_group);
+
+    // The version-snapshot history — restore any past set of versions.
+    let group = adw::PreferencesGroup::builder()
+        .title("Version history")
+        .description("Each time your packages change, the exact versions are saved here. If an update broke something, restore the set from before it.")
+        .build();
+
+    let snaps = updates::list();
+    if snaps.is_empty() {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("No version history yet")
+                .subtitle("It starts building the next time your packages change.")
+                .build(),
+        );
+    } else {
+        for s in snaps {
+            let row = adw::ActionRow::builder()
+                .title(if s.label.is_empty() { "Package change".to_string() } else { s.label.clone() })
+                .subtitle(&s.date)
+                .build();
+            let restore = gtk::Button::builder().label("Restore").valign(gtk::Align::Center).build();
+            restore.add_css_class("flat");
+            let id = s.id.clone();
+            let label = s.label.clone();
+            let win = window.clone();
+            let stack2 = stack.clone();
+            let toasts2 = toasts.clone();
+            restore.connect_clicked(move |_| {
+                confirm_restore_versions(&win, &stack2, &toasts2, &id, &label);
+            });
+            row.add_suffix(&restore);
+            row.set_activatable_widget(Some(&restore));
+            group.add(&row);
+        }
+    }
+    page.add(&group);
+
+    stack.add_titled(&page, Some("updates"), "Updates")
+        .set_icon_name(Some("software-update-available-symbolic"));
+}
+
+/// Confirm, then downgrade to a recorded version snapshot (via `pkexec`).
+fn confirm_restore_versions(
+    window: &adw::ApplicationWindow,
+    stack: &std::rc::Rc<adw::ViewStack>,
+    toasts: &adw::ToastOverlay,
+    id: &str,
+    label: &str,
+) {
+    let body = if label.is_empty() {
+        "Your packages will be moved back to the exact versions from this point. Anything that can't be found in the cache stays as-is.".to_string()
+    } else {
+        format!("Your packages will be moved back to the versions from “{label}”. Anything that can't be found in the cache stays as-is.")
+    };
+    let dialog = adw::MessageDialog::new(
+        Some(window),
+        Some("Restore these versions?"),
+        Some(&body),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("restore", "Restore");
+    dialog.set_response_appearance("restore", adw::ResponseAppearance::Destructive);
+
+    let window = window.clone();
+    let stack = stack.clone();
+    let toasts = toasts.clone();
+    let id = id.to_string();
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "restore" {
+            return;
+        }
+        run_privileged(
+            &window,
+            &stack,
+            &toasts,
+            "Restoring package versions",
+            vec!["restore-versions".into(), id.clone()],
         );
     });
     dialog.present();

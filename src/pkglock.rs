@@ -467,7 +467,11 @@ pub fn show() -> Result<()> {
 
 fn ensure_repo(ctx: &Ctx) -> Result<()> {
     ctx.sudo("mkdir", &["-p", DIR])?;
-    ctx.sudo("chmod", &["700", DIR])?;
+    // World-readable, unlike the manifest history (0700): a version lockfile is
+    // just `pacman -Q` output — no secrets — and the desktop app lists snapshots
+    // from here without needing root (only restoring, which changes the system,
+    // does). Restore still goes through pkexec.
+    ctx.sudo("chmod", &["755", DIR])?;
     if !ctx.check("sudo", &["test", "-d", &format!("{DIR}/.git")]) {
         ctx.sudo("git", &["-C", DIR, "init", "-q"])?;
         ctx.sudo("git", &["-C", DIR, "config", "user.name", "Manifest OS"])?;
