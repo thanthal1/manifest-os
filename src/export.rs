@@ -374,6 +374,11 @@ pub fn enable_tracking(ctx: &Ctx) -> Result<()> {
     let json = serde_json::to_string_pretty(&capture())? + "\n";
     ctx.write_root(SYSTEM_MANIFEST, &json)?;
     println!("  · package tracking on — {SYSTEM_MANIFEST} refreshes on every pacman change");
+    // Also start version-history tracking (a second hook), so a bad `-Syu` is
+    // revertible. Best-effort — its own failure shouldn't fail the install.
+    if let Err(e) = crate::pkglock::enable_hook(ctx) {
+        println!("  · note: couldn't enable package-version tracking ({e:#})");
+    }
     Ok(())
 }
 

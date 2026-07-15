@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
-use manifest::{desktop, diff, export, history, install, installer, kernel, survey, tui};
+use manifest::{desktop, diff, export, history, install, installer, kernel, pkglock, survey, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -97,8 +97,13 @@ enum Command {
         #[arg(long)]
         answers: Option<PathBuf>,
     },
-    /// List the manifests applied to this system (the rollback history).
-    History,
+    /// List the manifests applied to this system (the rollback history), or the
+    /// package-version snapshots with `--versions`.
+    History {
+        /// Show package-version snapshots instead of applied manifests.
+        #[arg(long)]
+        versions: bool,
+    },
     /// Undo a manifest change: re-apply a previously-recorded manifest.
     /// Defaults to the one before the current; pass a git ref or "N applies
     /// ago" as a bare number (e.g. `manifest rollback 2`).
@@ -109,6 +114,18 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Restore the exact package versions from a recorded snapshot — the fix for
+    /// a `pacman -Syu` that broke something. Downgrades from the local package
+    /// cache, falling back to the Arch Linux Archive. Defaults to the snapshot
+    /// before the current; pass a git ref or "N snapshots ago" as a bare number.
+    RestoreVersions {
+        /// Which version snapshot to restore (default: the previous one).
+        reference: Option<String>,
+    },
+    /// Snapshot the current package versions into the rollback history if they
+    /// changed. Run automatically by a pacman hook after every transaction.
+    #[command(hide = true)]
+    SnapshotPackages,
     /// List the desktop environments / window managers the installer can set up.
     Desktops,
     /// List the kernels the installer can install.
@@ -309,10 +326,20 @@ fn run() -> Result<()> {
             diff::run(&manifest, history::current().as_ref());
             Ok(())
         }
-        Command::History => history::show(),
+        Command::History { versions } => {
+            if versions {
+                pkglock::show()
+            } else {
+                history::show()
+            }
+        }
         Command::Rollback { reference, dry_run } => {
             history::rollback(reference.as_deref(), dry_run)
         }
+        Command::RestoreVersions { reference } => {
+            pkglock::restore(reference.as_deref(), &Ctx::new(false))
+        }
+        Command::SnapshotPackages => pkglock::snapshot(&Ctx::new(false)),
         Command::Verify { file } => {
             let raw = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading manifest at {}", file.display()))?;
