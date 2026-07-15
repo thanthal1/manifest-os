@@ -1907,6 +1907,7 @@ fn write_answers(plan: &InstallPlan, ctx: &Ctx) -> Result<Option<String>> {
 /// feeding it the survey answers file.
 fn run_manifest(manifest_in_root: &str, answers: Option<&str>, ctx: &Ctx) -> Result<()> {
     step("Applying the manifest");
+    seed_paru_cache(ctx);
     let args = match answers {
         Some(a) => format!("install {manifest_in_root} --answers {a}"),
         None => format!("install {manifest_in_root}"),
@@ -1920,6 +1921,22 @@ fn run_manifest(manifest_in_root: &str, answers: Option<&str>, ctx: &Ctx) -> Res
         let _ = std::fs::remove_file("/mnt/etc/manifest-answers.json");
     }
     result
+}
+
+/// Bridge a prebuilt `paru` baked into the live ISO's package cache into the
+/// target root's cache, so the chroot install's `bootstrap_paru` fast-path can
+/// `pacman -U` it (after verifying it runs) instead of spending 20-30 min
+/// compiling paru from source. Best-effort: with no baked paru — or if the copy
+/// fails — the install just builds paru the usual way.
+fn seed_paru_cache(ctx: &Ctx) {
+    if ctx.dry_run {
+        return;
+    }
+    let _ = ctx.shell(
+        "mkdir -p /mnt/var/cache/pacman/pkg && \
+         cp -n /var/cache/pacman/pkg/paru-[0-9]*.pkg.tar.* /mnt/var/cache/pacman/pkg/ 2>/dev/null || true",
+        true,
+    );
 }
 
 /// The manifest we leave at `/etc/manifest-install.json` is world-readable (the

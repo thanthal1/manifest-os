@@ -50,4 +50,8 @@ iso/out/
 iso/manifest-os/airootfs/usr/local/bin/manifest
 
 iso/manifest-os/airootfs/usr/share/manifest-os/
+# Prebuilt paru baked into the live ISO's pacman cache so a fresh install skips
+# the 20-30 min source build (bootstrap_paru picks it up, verifies it runs, and
+# falls back to a source build if the ABI moved). Large + machine-specific.
+iso/manifest-os/airootfs/var/cache/pacman/pkg/
 vmdisks/
