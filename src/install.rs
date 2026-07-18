@@ -95,7 +95,9 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
 
     // Resolve kernel + desktop up front so bad names fail before we touch the
     // system. The kernel defaults to stock Arch `linux` when unset.
-    let kernel = kernel::resolve(manifest.system.kernel.as_deref())?;
+    // `resolve_bootable`, not `resolve`: a manifest asking for a CPU-optimized
+    // kernel this machine can't run must not produce an unbootable system.
+    let kernel = kernel::resolve_bootable(manifest.system.kernel.as_deref())?;
     let desktop = desktop::resolve(manifest)?;
 
     if full {
