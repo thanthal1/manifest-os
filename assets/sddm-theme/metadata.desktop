@@ -9,5 +9,10 @@ Version=1.0
 Website=https://github.com/thanthal1/manifest-os
 MainScript=Main.qml
 ConfigFile=theme.conf
+# Without this SDDM assumes a Qt5 theme and execs `sddm-greeter`, which Arch's
+# Qt6 build doesn't ship (only sddm-greeter-qt6) — the helper then dies with
+# exit 127 and the login screen is just a black panel. Boot-debugged on real
+# hardware; the VM's sddm log (`HelperExitStatus(127)`) was the same bug.
+QtVersion=6
 TranslationsDirectory=translations
 Font=Noto Sans
