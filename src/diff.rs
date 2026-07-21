@@ -142,6 +142,8 @@ fn list_changes(out: &mut Vec<Change>, category: &str, old: &[String], new: &[St
 fn theme_changes(out: &mut Vec<Change>, old: Option<&Theme>, new: Option<&Theme>) {
     let none = Theme {
         global: None,
+        global_source: None,
+        global_install: None,
         gtk: None,
         icons: None,
         cursor: None,

@@ -96,11 +96,9 @@
     "git",
     "wl-clipboard"
   ],
-  "post_install": [
-    "git clone --depth 1 https://github.com/yeyushengfan258/McSur-kde /tmp/McSur-kde && sudo /tmp/McSur-kde/install.sh && rm -rf /tmp/McSur-kde"
-  ],
   "theme": {
     "global": "com.github.yeyushengfan258.McSur-dark",
+    "global_source": "https://github.com/yeyushengfan258/McSur-kde",
     "font": "Noto Sans 11",
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true

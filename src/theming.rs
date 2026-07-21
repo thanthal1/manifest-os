@@ -58,6 +58,13 @@ pub fn apply(theme: &Theme, desktop: Option<&str>, primary_user: Option<&str>, c
     }
     files::apply(&specs, ctx)?;
 
+    // 1b) A global theme that isn't packaged: clone its repo and run its
+    // installer now, so the first-login setter can select it. Declarative
+    // stand-in for a post_install hook.
+    if let Some(url) = &theme.global_source {
+        install_global_source(url, theme.global_install.as_deref(), ctx)?;
+    }
+
     // 2) Cursor env for Qt apps and compositors that skip the GTK files.
     if theme.cursor.is_some() || theme.cursor_size.is_some() {
         ctx.write_root(ENV_PATH, &env_dropin(theme))?;
@@ -69,6 +76,25 @@ pub fn apply(theme: &Theme, desktop: Option<&str>, primary_user: Option<&str>, c
     ctx.write_root(AUTOSTART_PATH, AUTOSTART)?;
     println!("  · theme set: GTK files now, desktop-native settings at first login");
     Ok(())
+}
+
+/// Clone a `theme.global_source` repo and run its installer, so a global theme
+/// that isn't in the repos/AUR lands on the system without a `post_install`
+/// hook. Runs at user level; the installer command escalates with `sudo` itself
+/// (the default, and how these theme `install.sh` scripts do a system-wide
+/// install). The clone is a temp dir, removed afterwards.
+fn install_global_source(url: &str, install: Option<&str>, ctx: &Ctx) -> Result<()> {
+    // Default matches the near-universal convention of these theme repos: an
+    // `install.sh` at the root that copies system-wide when run as root. `sh`
+    // (not `./`) so a lost exec bit doesn't matter.
+    let run = install.unwrap_or("sudo sh ./install.sh");
+    println!("  · installing global theme from {url}");
+    let cmd = format!(
+        "d=$(mktemp -d) && git clone --depth 1 {url} \"$d/theme\" && \
+         cd \"$d/theme\" && {run}; rc=$?; cd /; rm -rf \"$d\"; exit $rc",
+        url = sh_quote(url),
+    );
+    ctx.shell(&cmd, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +368,8 @@ mod tests {
     fn full_theme() -> Theme {
         Theme {
             global: Some("org.kde.breezedark.desktop".into()),
+            global_source: None,
+            global_install: None,
             gtk: Some("Materia-dark".into()),
             icons: Some("Papirus-Dark".into()),
             cursor: Some("Adwaita".into()),
@@ -368,6 +396,8 @@ mod tests {
     fn settings_ini_omits_unset_fields() {
         let t = Theme {
             global: None,
+            global_source: None,
+            global_install: None,
             gtk: Some("Adwaita".into()),
             icons: None,
             cursor: None,
@@ -471,6 +501,8 @@ mod tests {
     fn empty_theme_is_detected() {
         let t = Theme {
             global: None,
+            global_source: None,
+            global_install: None,
             gtk: None,
             icons: None,
             cursor: None,

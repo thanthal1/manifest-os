@@ -409,6 +409,15 @@ pub struct Theme {
     /// theme's package must be installed (declare it in `packages`). Plasma only;
     /// ignored on other desktops.
     pub global: Option<String>,
+    /// Git URL of a global theme that isn't packaged (not in the repos or AUR),
+    /// e.g. `"https://github.com/yeyushengfan258/McSur-kde"`. During install the
+    /// engine clones it and runs its installer (system-wide), so `global` can
+    /// then select it — a declarative alternative to a `post_install` hook.
+    pub global_source: Option<String>,
+    /// Command run inside the freshly-cloned `global_source` checkout to install
+    /// it. Defaults to the near-universal `sudo sh ./install.sh`; override for a
+    /// repo that installs differently (e.g. `"make install"`).
+    pub global_install: Option<String>,
     /// GTK / widget theme name, e.g. "Adwaita-dark", "Materia".
     pub gtk: Option<String>,
     /// Icon theme name, e.g. "Papirus-Dark".
@@ -430,6 +439,7 @@ impl Theme {
     /// Whether the block sets anything at all.
     pub fn is_empty(&self) -> bool {
         self.global.is_none()
+            && self.global_source.is_none()
             && self.gtk.is_none()
             && self.icons.is_none()
             && self.cursor.is_none()
