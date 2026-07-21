@@ -42,12 +42,68 @@ pub fn enable_repos(manifest: &Manifest, kernel: &Kernel, ctx: &Ctx) -> Result<(
         } else {
             println!("  · adding cachyos repo + signing key");
             add_cachyos_repo(ctx)?;
-        }
-        if repos.cachy_optimized_packages {
-            println!("  · cachyos-v3/v4 optimized repos handled by cachyos-repo script");
+            // The cachyos-repo script enables the v3/v4 *optimized package* repos
+            // whenever the CPU supports them — which reroutes the whole base
+            // system (gcc, pipewire, …) through the single CachyOS CDN. That's an
+            // install-killing single point of failure when the CDN is flaky, and
+            // usually not what someone who just set `kernel: "cachy"` wanted. So
+            // unless they explicitly opted into optimized packages, disable those
+            // repos: linux-cachyos still installs from plain [cachyos], and every
+            // other package comes from Arch's many mirrors. Done here (freshly
+            // added) so a re-sync doesn't reprocess an already-edited config.
+            if repos.cachy_optimized_packages {
+                println!("  · keeping CachyOS v3/v4 optimized package repos (opted in)");
+            } else {
+                disable_optimized_cachyos_repos(ctx)?;
+            }
         }
     }
     Ok(())
+}
+
+/// Comment out the CachyOS *optimized* repos (`[cachyos-v3]`, `[cachyos-v4]`,
+/// `[cachyos-core-v3]`, `[cachyos-znver4]`, …) in the live pacman.conf, leaving
+/// plain `[cachyos]` (which carries linux-cachyos) intact.
+fn disable_optimized_cachyos_repos(ctx: &Ctx) -> Result<()> {
+    let conf = std::fs::read_to_string(PACMAN_CONF).unwrap_or_default();
+    if conf.is_empty() {
+        return Ok(());
+    }
+    let edited = without_optimized_cachyos(&conf);
+    if edited != conf {
+        println!(
+            "  · disabled CachyOS v3/v4 optimized repos — base packages come from Arch mirrors\n\
+             \x20   (set repos.cachy_optimized_packages: true to keep the optimized builds)"
+        );
+        ctx.write_root(PACMAN_CONF, &edited)?;
+    }
+    Ok(())
+}
+
+/// Return `conf` with every CachyOS *optimized* repo block commented out, plain
+/// `[cachyos]` untouched. A block is its `[header]` plus the following lines up
+/// to the next section header or a blank line. Pure — unit-tested.
+fn without_optimized_cachyos(conf: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in conf.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            let name = &t[1..t.len() - 1];
+            // An *optimized* CachyOS repo: cachyos + a v3/v4/znver ISA marker.
+            // Plain "cachyos" (the kernel repo) has none, so it's kept.
+            skipping = name.starts_with("cachyos")
+                && (name.contains("v3") || name.contains("v4") || name.contains("znver"));
+        } else if t.is_empty() {
+            skipping = false; // blank line ends the block
+        }
+        if skipping && !t.is_empty() && !t.starts_with('#') {
+            out.push('#');
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Full system upgrade. Run after enabling repos and before building any AUR
@@ -58,7 +114,26 @@ pub fn enable_repos(manifest: &Manifest, kernel: &Kernel, ctx: &Ctx) -> Result<(
 pub fn sync_system(ctx: &Ctx) -> Result<()> {
     // --disable-download-timeout: don't abort a slow-but-progressing download
     // (a busy mirror trickling bytes) — pacman's default kills it at <1 B/s.
-    ctx.sudo("pacman", &["-Syu", "--noconfirm", "--disable-download-timeout"])
+    // Retried: a mirror blip mid-`-Syu` shouldn't sink the install.
+    ctx.shell(
+        &with_retries("pacman -Syu --noconfirm --disable-download-timeout", 3),
+        true,
+    )
+}
+
+/// Wrap a package command in a bounded retry loop. A single flaky mirror — the
+/// CachyOS CDN especially, which pacman drops for a whole transaction after a
+/// few errors ("too many errors from …, skipping") — must not sink an install on
+/// a transient blip. pacman/paru resume cleanly (`--needed`), so re-running is
+/// safe. `cmd` runs under `sh -c`; keep it a single pipeline.
+fn with_retries(cmd: &str, tries: u32) -> String {
+    format!(
+        "n=0; until {cmd}; do \
+           n=$((n+1)); \
+           if [ \"$n\" -ge {tries} ]; then echo '  · still failing after {tries} attempts — giving up' >&2; exit 1; fi; \
+           echo \"  · package step failed (mirror hiccup?) — retry $n/{tries} in 12s\"; sleep 12; \
+         done"
+    )
 }
 
 /// Whether a named repo is configured in pacman.conf.
@@ -237,14 +312,9 @@ pub fn install_packages(
 
     if !official.is_empty() {
         println!("  · {} from official repos → pacman", official.len());
-        let mut args: Vec<String> =
-            ["-S", "--needed", "--noconfirm", "--disable-download-timeout"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        args.extend(official);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        ctx.sudo("pacman", &argv)?;
+        let list = official.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
+        let cmd = format!("pacman -S --needed --noconfirm --disable-download-timeout {list}");
+        ctx.shell(&with_retries(&cmd, 3), true)?;
     }
 
     if aur.is_empty() {
@@ -254,18 +324,12 @@ pub fn install_packages(
 
     println!("  · {} from the AUR → bootstrapping paru first", aur.len());
     bootstrap_paru(ctx)?;
-    let mut args = vec![
-        "MAKEFLAGS=-j1".to_string(),
-        "CARGO_BUILD_JOBS=1".to_string(),
-        "paru".to_string(),
-        "-S".to_string(),
-        "--needed".to_string(),
-        "--noconfirm".to_string(),
-        // don't let one slow mirror's trickle abort the whole desktop install
-        "--disable-download-timeout".to_string(),
-    ];
-    args.extend(aur.iter().map(|s| shell_quote(s)));
-    ctx.shell(&args.join(" "), false)
+    let list = aur.iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
+    // don't let one slow mirror's trickle abort the whole desktop install
+    let cmd = format!(
+        "MAKEFLAGS=-j1 CARGO_BUILD_JOBS=1 paru -S --needed --noconfirm --disable-download-timeout {list}"
+    );
+    ctx.shell(&with_retries(&cmd, 3), false)
 }
 
 /// Every package name available in the enabled sync repos (`pacman -Slq`), as a
@@ -316,6 +380,50 @@ mod tests {
         let (off, aur) = partition_packages(&["a".to_string(), "b".to_string()], &HashSet::new());
         assert!(off.is_empty());
         assert_eq!(aur, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn without_optimized_cachyos_comments_v3_v4_keeps_plain() {
+        let conf = "\
+[options]
+HoldPkg = pacman
+
+[cachyos-v3]
+Include = /etc/pacman.d/cachyos-v3-mirrorlist
+
+[cachyos-core-v3]
+Include = /etc/pacman.d/cachyos-v3-mirrorlist
+
+[cachyos]
+Include = /etc/pacman.d/cachyos-mirrorlist
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+";
+        let out = without_optimized_cachyos(conf);
+        // Optimized repos + their Include lines are commented.
+        assert!(out.contains("#[cachyos-v3]"), "{out}");
+        assert!(out.contains("#[cachyos-core-v3]"), "{out}");
+        assert!(out.contains("#Include = /etc/pacman.d/cachyos-v3-mirrorlist"), "{out}");
+        // Plain cachyos (the kernel repo), core and options are untouched.
+        assert!(!out.contains("#[cachyos]"), "{out}");
+        assert!(!out.contains("#[core]"), "{out}");
+        assert!(!out.contains("#[options]"), "{out}");
+        assert!(out.contains("\nInclude = /etc/pacman.d/cachyos-mirrorlist"), "{out}");
+    }
+
+    #[test]
+    fn without_optimized_cachyos_is_a_noop_without_cachy_repos() {
+        let conf = "[options]\nHoldPkg = pacman\n\n[core]\nInclude = /x\n";
+        assert_eq!(without_optimized_cachyos(conf), conf);
+    }
+
+    #[test]
+    fn with_retries_loops_and_bounds() {
+        let s = with_retries("pacman -S foo", 3);
+        assert!(s.contains("until pacman -S foo; do"));
+        assert!(s.contains("-ge 3"));
+        assert!(s.contains("exit 1"));
     }
 
     #[test]
