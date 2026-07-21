@@ -234,19 +234,33 @@ fn runtime_script(t: &Theme) -> String {
     // The GTK theme itself reaches KDE's GTK apps via our settings.ini layer.
     s.push_str("  *kde*|*plasma*)\n");
     s.push_str("    kw=kwriteconfig6; command -v $kw >/dev/null 2>&1 || kw=kwriteconfig5\n");
-    // A global theme (look-and-feel) first — it sets the whole look at once, so
-    // the per-piece overrides below still win where the manifest also sets them.
     if let Some(v) = &t.global {
+        // A global theme (look-and-feel) sets the WHOLE look at once — colors,
+        // widget style, window decorations, icons, plasma theme, cursor — from
+        // the theme's own `defaults`. Apply it, and also record it as the
+        // default so System Settings shows it selected even if the live apply is
+        // partial. Runs from the session's autostart, so DBus/plasmashell are up.
         s.push_str(&format!("    plasma-apply-lookandfeel -a {} 2>/dev/null\n", sh_quote(v)));
+        s.push_str(&format!(
+            "    $kw --file kdeglobals --group KDE --key LookAndFeelPackage {} 2>/dev/null\n",
+            sh_quote(v)
+        ));
     }
-    if let Some(v) = &t.icons {
-        s.push_str(&format!("    $kw --file kdeglobals --group Icons --key Theme {} 2>/dev/null\n", sh_quote(v)));
+    // Per-piece colour/icon settings would CLOBBER the look a global theme just
+    // applied (e.g. forcing Papirus/BreezeDark over the theme's own icons and
+    // colours), so only apply them when no global theme owns the look.
+    if t.global.is_none() {
+        if let Some(v) = &t.icons {
+            s.push_str(&format!("    $kw --file kdeglobals --group Icons --key Theme {} 2>/dev/null\n", sh_quote(v)));
+        }
+        if let Some(true) = t.dark {
+            s.push_str("    plasma-apply-colorscheme BreezeDark 2>/dev/null\n");
+        }
     }
+    // Cursor and fonts are additive — safe to set alongside a global theme
+    // (only applied when the manifest explicitly asks for them).
     if let Some(v) = &t.cursor {
         s.push_str(&format!("    plasma-apply-cursortheme {} 2>/dev/null\n", sh_quote(v)));
-    }
-    if let Some(true) = t.dark {
-        s.push_str("    plasma-apply-colorscheme BreezeDark 2>/dev/null\n");
     }
     if let Some(v) = &t.font {
         let (family, size) = split_font(v);
@@ -396,6 +410,9 @@ mod tests {
 
     #[test]
     fn runtime_script_covers_every_de_family() {
+        // full_theme() has a `global`, so the KDE branch applies the look-and-feel
+        // (not per-piece Icons/colorscheme overrides — see the global-vs-per-piece
+        // test below). These needles cover the other DE families + additive bits.
         let script = runtime_script(&full_theme());
         for needle in [
             "gsettings set org.gnome.desktop.interface gtk-theme 'Materia-dark'",
@@ -404,9 +421,7 @@ mod tests {
             "gsettings set org.cinnamon.theme name 'Materia-dark'",
             "gsettings set org.mate.interface gtk-theme",
             "gsettings set org.mate.peripherals-mouse cursor-theme",
-            "--file kdeglobals --group Icons --key Theme 'Papirus-Dark'",
             "plasma-apply-cursortheme 'Adwaita'",
-            "plasma-apply-colorscheme BreezeDark",
             "'Noto Sans,11,-1,5,50,0,0,0,0,0'",
             "xfconf-query -c xsettings -p /Net/ThemeName",
             "xfconf-query -c xfwm4 -p /general/theme",
@@ -414,6 +429,27 @@ mod tests {
         ] {
             assert!(script.contains(needle), "script missing: {needle}\n---\n{script}");
         }
+    }
+
+    #[test]
+    fn kde_global_theme_applies_and_records_default_without_clobbering() {
+        // With a global theme, apply the look-and-feel + record it as the KDE
+        // default, and DON'T let per-piece icons/colorscheme override its look.
+        let script = runtime_script(&full_theme()); // global = org.kde.breezedark.desktop
+        assert!(script.contains("plasma-apply-lookandfeel -a 'org.kde.breezedark.desktop'"));
+        assert!(script.contains("--group KDE --key LookAndFeelPackage 'org.kde.breezedark.desktop'"));
+        assert!(!script.contains("--key Theme 'Papirus-Dark'"), "global theme must not be clobbered by icons override");
+        assert!(!script.contains("plasma-apply-colorscheme BreezeDark"), "global theme must not be clobbered by colorscheme override");
+    }
+
+    #[test]
+    fn kde_without_global_still_sets_pieces() {
+        // No global → the per-piece KDE setters (icons, dark colorscheme) apply.
+        let t = Theme { global: None, ..full_theme() };
+        let script = runtime_script(&t);
+        assert!(script.contains("--file kdeglobals --group Icons --key Theme 'Papirus-Dark'"));
+        assert!(script.contains("plasma-apply-colorscheme BreezeDark"));
+        assert!(!script.contains("plasma-apply-lookandfeel"));
     }
 
     #[test]

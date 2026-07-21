@@ -101,8 +101,6 @@
   ],
   "theme": {
     "global": "com.github.yeyushengfan258.McSur-dark",
-    "icons": "Papirus-Dark",
-    "cursor_size": 24,
     "font": "Noto Sans 11",
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
