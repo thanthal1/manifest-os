@@ -1,14 +1,14 @@
 {
   "schema_version": "1.0.0",
   "meta": {
-    "name": "McSur Plasma",
+    "name": "WhiteSur Plasma",
     "author": "Manifest OS",
-    "description": "A macOS-style KDE Plasma desktop built on the McSur global theme (dark). The whole look — window decorations, widgets, colours, icons and cursors — comes from one look-and-feel package, applied declaratively via `theme.global`; a post-install hook fetches McSur system-wide. No forced UI scaling: Plasma handles HiDPI itself.",
+    "description": "A macOS-style KDE Plasma desktop built on the WhiteSur global theme (dark). The whole look — window decorations, widgets, colours and cursors — comes from one look-and-feel package, selected declaratively via `theme.global`; `theme.global_source` clones and installs WhiteSur system-wide during setup, so there's no post-install hook. No forced UI scaling: Plasma handles HiDPI itself.",
     "tags": [
       "plasma",
       "kde",
       "macos",
-      "mcsur",
+      "whitesur",
       "dark",
       "desktop"
     ],
@@ -43,7 +43,7 @@
     }
   ],
   "system": {
-    "hostname": "mcsur",
+    "hostname": "whitesur",
     "locale": "en_US.UTF-8",
     "timezone": "UTC",
     "keymap": "us",
@@ -97,8 +97,8 @@
     "wl-clipboard"
   ],
   "theme": {
-    "global": "com.github.yeyushengfan258.McSur-dark",
-    "global_source": "https://github.com/yeyushengfan258/McSur-kde",
+    "global": "com.github.vinceliuice.WhiteSur-dark",
+    "global_source": "https://github.com/vinceliuice/WhiteSur-kde",
     "font": "Noto Sans 11",
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true
@@ -114,22 +114,22 @@
     {
       "path": "/home/kai/.config/konsolerc",
       "owner": "kai:kai",
-      "content": "[Desktop Entry]\nDefaultProfile=McSur.profile\n\n[General]\nConfigVersion=1\n\n[MainWindow]\nMenuBar=Disabled\nToolBarsMovable=Disabled\n"
+      "content": "[Desktop Entry]\nDefaultProfile=WhiteSur.profile\n\n[General]\nConfigVersion=1\n\n[MainWindow]\nMenuBar=Disabled\nToolBarsMovable=Disabled\n"
     },
     {
-      "path": "/home/kai/.local/share/konsole/McSur.profile",
+      "path": "/home/kai/.local/share/konsole/WhiteSur.profile",
       "owner": "kai:kai",
-      "content": "[Appearance]\nFont=JetBrainsMono Nerd Font,12,-1,5,50,0,0,0,0,0\n\n[General]\nName=McSur\nParent=FALLBACK/\nTerminalColumns=110\nTerminalRows=30\n\n[Scrolling]\nHistoryMode=2\n\n[Terminal Features]\nBlinkingCursorEnabled=true\n"
+      "content": "[Appearance]\nFont=JetBrainsMono Nerd Font,12,-1,5,50,0,0,0,0,0\n\n[General]\nName=WhiteSur\nParent=FALLBACK/\nTerminalColumns=110\nTerminalRows=30\n\n[Scrolling]\nHistoryMode=2\n\n[Terminal Features]\nBlinkingCursorEnabled=true\n"
     },
     {
       "path": "/home/kai/.zshrc",
       "owner": "kai:kai",
-      "content": "# McSur Plasma — Manifest OS\nexport EDITOR=nano\nexport HISTFILE=~/.zsh_history\nexport HISTSIZE=10000\nexport SAVEHIST=10000\nsetopt HIST_IGNORE_ALL_DUPS SHARE_HISTORY\n\nalias ls='eza --icons --group-directories-first'\nalias ll='eza -lah --icons --group-directories-first'\nalias cat='bat --paging=never'\nalias grep='grep --color=auto'\nalias update='sudo pacman -Syu'\n\n[ -f /usr/share/fzf/key-bindings.zsh ] && source /usr/share/fzf/key-bindings.zsh\n[ -f /usr/share/fzf/completion.zsh ] && source /usr/share/fzf/completion.zsh\n\nautoload -Uz compinit && compinit\neval \"$(starship init zsh)\"\ncommand -v fastfetch >/dev/null && fastfetch\n"
+      "content": "# WhiteSur Plasma — Manifest OS\nexport EDITOR=nano\nexport HISTFILE=~/.zsh_history\nexport HISTSIZE=10000\nexport SAVEHIST=10000\nsetopt HIST_IGNORE_ALL_DUPS SHARE_HISTORY\n\nalias ls='eza --icons --group-directories-first'\nalias ll='eza -lah --icons --group-directories-first'\nalias cat='bat --paging=never'\nalias grep='grep --color=auto'\nalias update='sudo pacman -Syu'\n\n[ -f /usr/share/fzf/key-bindings.zsh ] && source /usr/share/fzf/key-bindings.zsh\n[ -f /usr/share/fzf/completion.zsh ] && source /usr/share/fzf/completion.zsh\n\nautoload -Uz compinit && compinit\neval \"$(starship init zsh)\"\ncommand -v fastfetch >/dev/null && fastfetch\n"
     },
     {
       "path": "/home/kai/.config/starship.toml",
       "owner": "kai:kai",
-      "content": "# McSur — Manifest OS\nadd_newline = true\nformat = \"\"\"\n[](surface0)$os$username[](bg:surface1 fg:surface0)$directory[](fg:surface1 bg:none) $git_branch$git_status\n$character\"\"\"\n\npalette = 'mcsur'\n\n[palettes.mcsur]\nsurface0 = '#2b2b2b'\nsurface1 = '#3a3a3a'\nblue = '{{accent}}'\ngreen = '#31c48d'\ntext = '#e6e6e6'\n\n[os]\ndisabled = false\nstyle = 'bg:surface0 fg:blue'\n[os.symbols]\nArch = ' '\n\n[username]\nshow_always = true\nstyle_user = 'bg:surface0 fg:text'\nstyle_root = 'bg:surface0 fg:red'\nformat = '[ $user ]($style)'\n\n[directory]\nstyle = 'bg:surface1 fg:text'\nformat = '[ $path ]($style)'\ntruncation_length = 3\n\n[git_branch]\nsymbol = ' '\nstyle = 'fg:blue'\nformat = '[$symbol$branch]($style) '\n\n[git_status]\nstyle = 'fg:blue'\n\n[character]\nsuccess_symbol = '[❯](bold green)'\nerror_symbol = '[❯](bold red)'\n"
+      "content": "# WhiteSur — Manifest OS\nadd_newline = true\nformat = \"\"\"\n[](surface0)$os$username[](bg:surface1 fg:surface0)$directory[](fg:surface1 bg:none) $git_branch$git_status\n$character\"\"\"\n\npalette = 'whitesur'\n\n[palettes.whitesur]\nsurface0 = '#2b2b2b'\nsurface1 = '#3a3a3a'\nblue = '{{accent}}'\ngreen = '#31c48d'\ntext = '#e6e6e6'\n\n[os]\ndisabled = false\nstyle = 'bg:surface0 fg:blue'\n[os.symbols]\nArch = ' '\n\n[username]\nshow_always = true\nstyle_user = 'bg:surface0 fg:text'\nstyle_root = 'bg:surface0 fg:red'\nformat = '[ $user ]($style)'\n\n[directory]\nstyle = 'bg:surface1 fg:text'\nformat = '[ $path ]($style)'\ntruncation_length = 3\n\n[git_branch]\nsymbol = ' '\nstyle = 'fg:blue'\nformat = '[$symbol$branch]($style) '\n\n[git_status]\nstyle = 'fg:blue'\n\n[character]\nsuccess_symbol = '[❯](bold green)'\nerror_symbol = '[❯](bold red)'\n"
     },
     {
       "path": "/home/kai/.config/fastfetch/config.jsonc",

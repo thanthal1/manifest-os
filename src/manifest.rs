@@ -410,7 +410,7 @@ pub struct Theme {
     /// ignored on other desktops.
     pub global: Option<String>,
     /// Git URL of a global theme that isn't packaged (not in the repos or AUR),
-    /// e.g. `"https://github.com/yeyushengfan258/McSur-kde"`. During install the
+    /// e.g. `"https://github.com/vinceliuice/WhiteSur-kde"`. During install the
     /// engine clones it and runs its installer (system-wide), so `global` can
     /// then select it — a declarative alternative to a `post_install` hook.
     pub global_source: Option<String>,
