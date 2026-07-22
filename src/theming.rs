@@ -58,11 +58,11 @@ pub fn apply(theme: &Theme, desktop: Option<&str>, primary_user: Option<&str>, c
     }
     files::apply(&specs, ctx)?;
 
-    // 1b) A global theme that isn't packaged: clone its repo and run its
-    // installer now, so the first-login setter can select it. Declarative
-    // stand-in for a post_install hook.
-    if let Some(url) = &theme.global_source {
-        install_global_source(url, theme.global_install.as_deref(), ctx)?;
+    // 1b) Unpackaged theme assets (global theme, icons, cursors): clone each
+    // repo and run its installer now, so the name fields below/at first login
+    // can select them. Declarative stand-in for a post_install hook.
+    for src in &theme.sources {
+        install_source(src.url(), src.run(), ctx)?;
     }
 
     // 2) Cursor env for Qt apps and compositors that skip the GTK files.
@@ -78,17 +78,18 @@ pub fn apply(theme: &Theme, desktop: Option<&str>, primary_user: Option<&str>, c
     Ok(())
 }
 
-/// Clone a `theme.global_source` repo and run its installer, so a global theme
-/// that isn't in the repos/AUR lands on the system without a `post_install`
-/// hook. Runs at user level; the installer command escalates with `sudo` itself
-/// (the default, and how these theme `install.sh` scripts do a system-wide
-/// install). The clone is a temp dir, removed afterwards.
-fn install_global_source(url: &str, install: Option<&str>, ctx: &Ctx) -> Result<()> {
+/// Clone a `theme.sources` repo and run its installer, so a theme asset that
+/// isn't in the repos/AUR (a global theme, icon set, cursors, …) lands on the
+/// system without a `post_install` hook. Runs at user level; the installer
+/// command escalates with `sudo` itself (the default, and how these theme
+/// `install.sh` scripts do a system-wide install). The clone is a temp dir,
+/// removed afterwards.
+fn install_source(url: &str, install: Option<&str>, ctx: &Ctx) -> Result<()> {
     // Default matches the near-universal convention of these theme repos: an
     // `install.sh` at the root that copies system-wide when run as root. `sh`
     // (not `./`) so a lost exec bit doesn't matter.
     let run = install.unwrap_or("sudo sh ./install.sh");
-    println!("  · installing global theme from {url}");
+    println!("  · installing theme asset from {url}");
     let cmd = format!(
         "d=$(mktemp -d) && git clone --depth 1 {url} \"$d/theme\" && \
          cd \"$d/theme\" && {run}; rc=$?; cd /; rm -rf \"$d\"; exit $rc",
@@ -368,8 +369,7 @@ mod tests {
     fn full_theme() -> Theme {
         Theme {
             global: Some("org.kde.breezedark.desktop".into()),
-            global_source: None,
-            global_install: None,
+            sources: Vec::new(),
             gtk: Some("Materia-dark".into()),
             icons: Some("Papirus-Dark".into()),
             cursor: Some("Adwaita".into()),
@@ -396,8 +396,7 @@ mod tests {
     fn settings_ini_omits_unset_fields() {
         let t = Theme {
             global: None,
-            global_source: None,
-            global_install: None,
+            sources: Vec::new(),
             gtk: Some("Adwaita".into()),
             icons: None,
             cursor: None,
@@ -501,8 +500,7 @@ mod tests {
     fn empty_theme_is_detected() {
         let t = Theme {
             global: None,
-            global_source: None,
-            global_install: None,
+            sources: Vec::new(),
             gtk: None,
             icons: None,
             cursor: None,

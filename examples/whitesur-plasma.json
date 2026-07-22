@@ -98,7 +98,11 @@
   ],
   "theme": {
     "global": "com.github.vinceliuice.WhiteSur-dark",
-    "global_source": "https://github.com/vinceliuice/WhiteSur-kde",
+    "icons": "WhiteSur-dark",
+    "sources": [
+      "https://github.com/vinceliuice/WhiteSur-kde",
+      "https://github.com/vinceliuice/WhiteSur-icon-theme"
+    ],
     "font": "Noto Sans 11",
     "monospace_font": "JetBrainsMono Nerd Font 11",
     "dark": true

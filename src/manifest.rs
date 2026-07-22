@@ -409,15 +409,15 @@ pub struct Theme {
     /// theme's package must be installed (declare it in `packages`). Plasma only;
     /// ignored on other desktops.
     pub global: Option<String>,
-    /// Git URL of a global theme that isn't packaged (not in the repos or AUR),
-    /// e.g. `"https://github.com/vinceliuice/WhiteSur-kde"`. During install the
-    /// engine clones it and runs its installer (system-wide), so `global` can
-    /// then select it — a declarative alternative to a `post_install` hook.
-    pub global_source: Option<String>,
-    /// Command run inside the freshly-cloned `global_source` checkout to install
-    /// it. Defaults to the near-universal `sudo sh ./install.sh`; override for a
-    /// repo that installs differently (e.g. `"make install"`).
-    pub global_install: Option<String>,
+    /// Theme assets that aren't packaged (not in the repos or AUR) — a global
+    /// theme, an icon set, cursors, … — given as git URLs. During install the
+    /// engine clones each and runs its installer (system-wide), so the name
+    /// fields (`global`, `icons`, `cursor`) can then select what they provide.
+    /// A declarative stand-in for a `post_install` hook. Each entry is a URL
+    /// string, or `{ "url": …, "run": … }` to override the install command
+    /// (default `sudo sh ./install.sh`, the convention these theme repos use).
+    #[serde(default)]
+    pub sources: Vec<ThemeSource>,
     /// GTK / widget theme name, e.g. "Adwaita-dark", "Materia".
     pub gtk: Option<String>,
     /// Icon theme name, e.g. "Papirus-Dark".
@@ -439,7 +439,7 @@ impl Theme {
     /// Whether the block sets anything at all.
     pub fn is_empty(&self) -> bool {
         self.global.is_none()
-            && self.global_source.is_none()
+            && self.sources.is_empty()
             && self.gtk.is_none()
             && self.icons.is_none()
             && self.cursor.is_none()
@@ -447,6 +447,39 @@ impl Theme {
             && self.font.is_none()
             && self.monospace_font.is_none()
             && self.dark.is_none()
+    }
+}
+
+/// An unpackaged theme asset to clone + install (see [`Theme::sources`]).
+/// Accepted as a bare URL string, or an object with a custom install command.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ThemeSource {
+    /// Just a git URL — installed with the default `sudo sh ./install.sh`.
+    Url(String),
+    /// A URL plus an install command to run inside the clone (e.g. an installer
+    /// with flags, or `make install`).
+    Detailed {
+        url: String,
+        #[serde(default)]
+        run: Option<String>,
+    },
+}
+
+impl ThemeSource {
+    /// The git URL to clone.
+    pub fn url(&self) -> &str {
+        match self {
+            ThemeSource::Url(u) => u,
+            ThemeSource::Detailed { url, .. } => url,
+        }
+    }
+    /// The command to run inside the clone, if the manifest overrode it.
+    pub fn run(&self) -> Option<&str> {
+        match self {
+            ThemeSource::Url(_) => None,
+            ThemeSource::Detailed { run, .. } => run.as_deref(),
+        }
     }
 }
 
