@@ -401,9 +401,17 @@ distro/suite/mirror/expose recovered from the rootfs + shims; in-stratum
 via shared Wayland/X socket (proves `share` end-to-end), System Snapshots UI
 awareness.
 
-**Phase 3 — Fedora (dnf backend) + Alpine (musl, self-contained).**
-Second bootstrap backend; musl stratum used only through its own shims (no
-cross-musl-to-glibc promise).
+**Phase 3 — Fedora (dnf backend) ✅ + Alpine (musl, self-contained).**
+Fedora backend built + VM-validated: `dnf5 --installroot` bootstraps a verified
+rootfs (gpgcheck + `distribution-gpg-keys`), in-stratum `dnf install` and
+`tree`/`rpm`/`dnf` shims run against Fedora's own libs alongside `pacman`. Four
+VM findings fixed — single-baseurl gave no mirror failover (now a metalink
+`.repo`); Arch's `dnf` pkg is dnf4 and conflicts with dnf5 (use `dnf5`);
+arch-chroot skips a resolv.conf when the target's is a dangling symlink, which
+Fedora ships (plant one first). **Still open: Alpine** — needs `apk-tools-static`
++ `alpine-keys` (neither in Arch's official repos, unlike dnf/keys for Fedora),
+and the musl stratum is used only through its own shims (no cross-musl-to-glibc
+promise).
 
 **Phase 4 — crossfs (only if Phases 1–2 proved demand).**
 Transparent `/usr/lib`/`/etc`/`/usr/share` + per-file resolution for GUI polish.

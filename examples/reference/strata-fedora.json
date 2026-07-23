@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Fedora stratum demo",
+    "description": "A Fedora foreign-distro stratum (dnf backend): bootstraps a Fedora rootfs under Arch and exposes tree/dnf/rpm on the host PATH. Binaries run against Fedora's own libraries via the generated chroot shims — glibc skew can't break them."
+  },
+  "strata": [
+    {
+      "name": "fedora",
+      "distro": "fedora",
+      "suite": "42",
+      "packages": ["tree"],
+      "expose": ["tree", "dnf", "rpm"]
+    }
+  ]
+}

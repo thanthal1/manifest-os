@@ -463,7 +463,8 @@ STRATA_TRUSTED_HOSTS = {
                "security.debian.org"),
     "ubuntu": ("archive.ubuntu.com", "ports.ubuntu.com", "security.ubuntu.com",
                "snapshot.ubuntu.com"),
-    "fedora": ("dl.fedoraproject.org", "download.fedoraproject.org"),
+    "fedora": ("dl.fedoraproject.org", "download.fedoraproject.org",
+               "mirrors.fedoraproject.org"),
     "alpine": ("dl-cdn.alpinelinux.org",),
 }
 # Exposing one of these from a foreign stratum onto the host PATH puts a
