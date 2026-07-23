@@ -42,15 +42,21 @@ pub const DEFAULT_SHARES: &[&str] = &["home", "resolv", "tmp", "x11", "wayland"]
 const ALWAYS_BOUND: &[&str] = &["proc", "sys", "dev", "run"];
 
 /// Which bootstrap backend a `distro` string selects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Backend {
     /// Debian/Ubuntu family — `debootstrap`, glibc, `apt`.
     Debootstrap,
-    /// Fedora family — `dnf --installroot`. Parsed but not implemented (Phase 3).
+    /// Fedora family — `dnf --installroot`, glibc, `dnf`/`rpm`.
     Dnf,
     /// Alpine — static `apk`, musl. Parsed but not implemented (Phase 3+).
     Apk,
 }
+
+/// Default Fedora release used when a fedora stratum doesn't pin one via `suite`.
+/// Bump on new stable releases (same maintenance as the ubuntu `noble` default);
+/// `distribution-gpg-keys` ships keys well ahead, so this only needs to track
+/// what's actually released.
+const FEDORA_DEFAULT_RELEASE: &str = "42";
 
 /// Map a manifest `distro` string to a backend. Unknown distros are an error the
 /// caller surfaces; known-but-unimplemented ones map to a backend so the caller
@@ -92,11 +98,11 @@ pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
     if strata.is_empty() {
         return Ok(());
     }
-    // Host-side tools the whole feature needs: debootstrap (bootstrap), the
-    // arch-install-scripts (arch-chroot for the in-stratum package install),
-    // and util-linux's `unshare` (base, always present). Installed once,
-    // idempotently, like flatpak.rs / gestures.rs auto-add their deps.
-    ensure_host_tools(ctx)?;
+    // Host-side tools the feature needs, as the union over the backends actually
+    // used: arch-install-scripts (arch-chroot + the enter helper's chroot) always,
+    // debootstrap for debian/ubuntu, dnf + distribution-gpg-keys for fedora.
+    // Installed once, idempotently, like flatpak.rs / gestures.rs auto-add deps.
+    ensure_host_tools(strata, ctx)?;
 
     // Resolve bare-name shim ownership once, across all strata: two strata that
     // expose the same binary name would otherwise collide at /bedrock/bin/<name>
@@ -119,14 +125,13 @@ pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
 
 fn apply_one(s: &Stratum, bare_winners: &std::collections::HashSet<(String, String)>, ctx: &Ctx) -> Result<()> {
     let backend = match backend_for(&s.distro) {
-        Some(Backend::Debootstrap) => Backend::Debootstrap,
-        Some(other) => bail!(
-            "stratum '{}': distro '{}' ({:?}) is recognized but not implemented yet \
-             — Phase 1 supports debian/ubuntu only (see docs/strata-design.md)",
-            s.name,
-            s.distro,
-            other
+        Some(Backend::Apk) => bail!(
+            "stratum '{}': alpine (musl) is recognized but not implemented yet — the \
+             debootstrap (debian/ubuntu) and dnf (fedora) backends are (see \
+             docs/strata-design.md §10)",
+            s.name
         ),
+        Some(b) => b,
         None => bail!(
             "stratum '{}': unknown distro '{}' (expected debian/ubuntu/fedora/alpine)",
             s.name,
@@ -137,18 +142,34 @@ fn apply_one(s: &Stratum, bare_winners: &std::collections::HashSet<(String, Stri
     let root = stratum_root(&s.name);
     println!("  · stratum '{}' ({}) → {root}", s.name, s.distro);
 
-    if s.snapshot.is_none() {
-        println!(
-            "  · warning: stratum '{}' has no `snapshot` pin — it will bootstrap \
-             \"latest at install time\" and is NOT reproducible (see docs/strata-design.md §6)",
-            s.name
-        );
-    }
+    // Verification is enforced per backend before any bytes land: debootstrap
+    // gets an explicit --keyring; dnf verifies against distribution-gpg-keys.
+    // Never bootstrap a root-privileged foreign rootfs unverified.
+    let keyring = match backend {
+        Backend::Debootstrap => {
+            if s.snapshot.is_none() {
+                println!(
+                    "  · warning: stratum '{}' has no `snapshot` pin — it will bootstrap \
+                     \"latest at install time\" and is NOT reproducible (docs §6)",
+                    s.name
+                );
+            }
+            Some(ensure_keyring(s, ctx)?)
+        }
+        Backend::Dnf => {
+            ensure_fedora_key(s, ctx)?;
+            if s.snapshot.is_some() {
+                println!(
+                    "  · note: `snapshot` pins aren't supported for fedora — ignoring \
+                     (fedora has no debian-style snapshot archive)"
+                );
+            }
+            None
+        }
+        Backend::Apk => unreachable!("apk bails above"),
+    };
 
-    // Ensure signature verification is possible *before* bootstrapping — never
-    // pull a foreign rootfs unverified.
-    let keyring = ensure_keyring(s, ctx)?;
-    bootstrap(s, backend, &root, &keyring, ctx)?;
+    bootstrap(s, backend, &root, keyring.as_deref(), ctx)?;
     install_in_stratum(s, backend, &root, ctx)?;
     write_enter_helper(s, ctx)?;
     write_shims(s, bare_winners, ctx)?;
@@ -183,28 +204,61 @@ fn ensure_keyring(s: &Stratum, ctx: &Ctx) -> Result<String> {
     Ok(path.to_string())
 }
 
-/// Ensure debootstrap + arch-chroot are available on the host.
-fn ensure_host_tools(ctx: &Ctx) -> Result<()> {
-    if ctx.check("sh", &["-c", "command -v debootstrap && command -v arch-chroot"]) {
-        println!("  · strata host tools already present");
-        return Ok(());
+/// Ensure the host tools every used backend needs are installed (idempotent
+/// `pacman -S --needed`). arch-chroot is always required (in-stratum install +
+/// the enter helper); debootstrap and dnf/distribution-gpg-keys are added only
+/// when a stratum actually uses that backend.
+fn ensure_host_tools(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
+    let backends = used_backends(strata);
+    let mut pkgs = vec!["arch-install-scripts"];
+    if backends.contains(&Backend::Debootstrap) {
+        pkgs.push("debootstrap");
     }
-    println!("  · installing strata host tools (debootstrap, arch-install-scripts)");
-    ctx.sudo(
-        "pacman",
-        &["-S", "--needed", "--noconfirm", "debootstrap", "arch-install-scripts"],
-    )
+    if backends.contains(&Backend::Dnf) {
+        pkgs.push("dnf");
+        pkgs.push("distribution-gpg-keys");
+    }
+    println!("  · ensuring strata host tools: {}", pkgs.join(", "));
+    let mut args = vec!["-S", "--needed", "--noconfirm"];
+    args.extend(pkgs);
+    ctx.sudo("pacman", &args)
+}
+
+/// The set of backends actually referenced by the (non-empty) strata.
+fn used_backends(strata: &[Stratum]) -> std::collections::HashSet<Backend> {
+    strata
+        .iter()
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| backend_for(&s.distro))
+        .collect()
+}
+
+/// Verify the pinned Fedora release's signing key is present (from
+/// `distribution-gpg-keys`, installed by [`ensure_host_tools`]) before letting
+/// dnf bootstrap. A missing key almost always means an unknown/typo release — we
+/// refuse rather than let the bootstrap fall back to unverified.
+fn ensure_fedora_key(s: &Stratum, ctx: &Ctx) -> Result<()> {
+    let rel = s.suite.clone().unwrap_or_else(|| FEDORA_DEFAULT_RELEASE.to_string());
+    let key = fedora_key_path(&rel);
+    if !ctx.dry_run && !ctx.check("test", &["-f", &key]) {
+        bail!(
+            "stratum '{}': Fedora signing key not found at {key} — unknown release '{rel}'? \
+             (distribution-gpg-keys ships current ones) — refusing to bootstrap unverified",
+            s.name
+        );
+    }
+    Ok(())
 }
 
 /// Bootstrap the rootfs if it isn't already there. Idempotent: an existing
-/// `<root>/etc/os-release` means "already bootstrapped, skip".
-fn bootstrap(s: &Stratum, backend: Backend, root: &str, keyring: &str, ctx: &Ctx) -> Result<()> {
+/// os-release (or alpine-release) means "already bootstrapped, skip".
+fn bootstrap(s: &Stratum, backend: Backend, root: &str, keyring: Option<&str>, ctx: &Ctx) -> Result<()> {
     if ctx.check("test", &["-f", &format!("{root}/etc/os-release")]) {
-        println!("  · rootfs already bootstrapped — skipping debootstrap");
+        println!("  · rootfs already bootstrapped — skipping");
         return Ok(());
     }
     println!("  · bootstrapping rootfs (this pulls a base system — minutes)");
-    let cmd = bootstrap_cmd(s, backend, root, keyring);
+    let cmd = bootstrap_cmd(s, backend, root, keyring)?;
     ctx.shell(&cmd, true)
 }
 
@@ -366,7 +420,23 @@ fn default_mirror(backend: Backend, distro: &str) -> String {
 fn default_suite(distro: &str) -> &'static str {
     match distro.trim().to_ascii_lowercase().as_str() {
         "ubuntu" => "noble",
+        "fedora" => FEDORA_DEFAULT_RELEASE,
         _ => "stable",
+    }
+}
+
+/// Build the bootstrap command line for a backend. debootstrap needs the caller
+/// to have resolved a keyring path; dnf bakes its verification into the command.
+fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str, keyring: Option<&str>) -> Result<String> {
+    match backend {
+        Backend::Debootstrap => {
+            let keyring = keyring.ok_or_else(|| {
+                anyhow::anyhow!("internal: debootstrap bootstrap without a resolved keyring")
+            })?;
+            Ok(debootstrap_cmd(s, root, keyring))
+        }
+        Backend::Dnf => Ok(dnf_bootstrap_cmd(s, root)),
+        Backend::Apk => bail!("internal: apk backend has no bootstrap command yet"),
     }
 }
 
@@ -376,10 +446,9 @@ fn default_suite(distro: &str) -> &'static str {
 /// unverified, so [`ensure_keyring`] installs the keyring and we point at it here
 /// (never `--no-check-gpg` — a manifest disabling verification is a marketplace
 /// finding, see docs §9).
-fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str, keyring: &str) -> String {
-    debug_assert_eq!(backend, Backend::Debootstrap, "only debootstrap is wired in Phase 1");
+fn debootstrap_cmd(s: &Stratum, root: &str, keyring: &str) -> String {
     let suite = s.suite.clone().unwrap_or_else(|| default_suite(&s.distro).to_string());
-    let mirror = resolve_mirror(s, backend);
+    let mirror = resolve_mirror(s, Backend::Debootstrap);
     format!(
         "debootstrap --variant=minbase --keyring={} {} {} {}",
         shell_quote(keyring),
@@ -387,6 +456,59 @@ fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str, keyring: &str) -> St
         shell_quote(root),
         shell_quote(&mirror),
     )
+}
+
+/// The path to a Fedora release's primary signing key, shipped by Arch's
+/// `distribution-gpg-keys` package.
+fn fedora_key_path(releasever: &str) -> String {
+    format!("/usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-{releasever}-primary")
+}
+
+/// The (repo-id, baseurl) pairs a Fedora bootstrap installs from: the release
+/// tree plus updates. `mirror` overrides the base path (default: the redirector).
+fn fedora_repos(releasever: &str, mirror: Option<&str>) -> Vec<(String, String)> {
+    let base = mirror.unwrap_or("https://download.fedoraproject.org/pub/fedora/linux");
+    vec![
+        ("fedora".to_string(), format!("{base}/releases/{releasever}/Everything/x86_64/os/")),
+        ("updates".to_string(), format!("{base}/updates/{releasever}/Everything/x86_64/")),
+    ]
+}
+
+/// The `dnf --installroot` bootstrap command line. Runs from the Arch host with
+/// no Fedora repos configured, so both repos are supplied via `--repofrompath`
+/// and each is pinned to its `distribution-gpg-keys` signing key with
+/// `gpgcheck=1` — verification is enforced, never `--nogpgcheck`. `--releasever`
+/// is required (dnf can't detect it off an Arch host); `install_weak_deps=False`
+/// and `reposdir=/dev/null` keep the tree minimal and ignore the host's (empty)
+/// repo config.
+fn dnf_bootstrap_cmd(s: &Stratum, root: &str) -> String {
+    let rel = s.suite.clone().unwrap_or_else(|| FEDORA_DEFAULT_RELEASE.to_string());
+    let key = fedora_key_path(&rel);
+    let repos = fedora_repos(&rel, s.mirror.as_deref());
+
+    let mut t: Vec<String> = vec!["dnf".into(), "-y".into()];
+    t.push(shell_quote(&format!("--installroot={root}")));
+    t.push(shell_quote(&format!("--releasever={rel}")));
+    t.push(shell_quote("--setopt=install_weak_deps=False"));
+    t.push(shell_quote("--setopt=reposdir=/dev/null"));
+
+    let mut ids = Vec::new();
+    for (id, url) in &repos {
+        t.push(shell_quote(&format!("--repofrompath={id},{url}")));
+        t.push(shell_quote(&format!("--setopt={id}.gpgkey=file://{key}")));
+        t.push(shell_quote(&format!("--setopt={id}.gpgcheck=1")));
+        ids.push(id.clone());
+    }
+    t.push(shell_quote("--disablerepo=*"));
+    t.push(shell_quote(&format!("--enablerepo={}", ids.join(","))));
+
+    t.push("install".into());
+    // Minimal but functional: enough to run the stratum's own dnf for later
+    // in-stratum installs.
+    for p in ["fedora-release", "dnf", "coreutils", "bash"] {
+        t.push(shell_quote(p));
+    }
+    t.join(" ")
 }
 
 /// The command run *inside* the stratum to install its `packages`.
@@ -559,7 +681,7 @@ mod tests {
         let mut s = stratum("debian", "debian");
         s.suite = Some("bookworm".into());
         let (_, keyring) = keyring_for("debian").unwrap();
-        let cmd = bootstrap_cmd(&s, Backend::Debootstrap, "/bedrock/strata/debian", keyring);
+        let cmd = debootstrap_cmd(&s, "/bedrock/strata/debian", keyring);
         assert!(cmd.contains("debootstrap --variant=minbase"), "{cmd}");
         assert!(cmd.contains("'bookworm'"), "{cmd}");
         assert!(cmd.contains("'/bedrock/strata/debian'"), "{cmd}");
@@ -587,12 +709,69 @@ mod tests {
     fn default_suite_per_distro() {
         let s = stratum("ubuntu", "ubuntu");
         let (_, uk) = keyring_for("ubuntu").unwrap();
-        let cmd = bootstrap_cmd(&s, Backend::Debootstrap, "/r", uk);
+        let cmd = debootstrap_cmd(&s, "/r", uk);
         assert!(cmd.contains("'noble'"), "{cmd}"); // ubuntu default
         let d = stratum("debian", "debian");
         let (_, dk) = keyring_for("debian").unwrap();
-        let cmd = bootstrap_cmd(&d, Backend::Debootstrap, "/r", dk);
+        let cmd = debootstrap_cmd(&d, "/r", dk);
         assert!(cmd.contains("'stable'"), "{cmd}"); // debian default
+    }
+
+    #[test]
+    fn backend_selection_maps_fedora_and_used_backends() {
+        assert_eq!(backend_for("fedora"), Some(Backend::Dnf));
+        let d = stratum("debian", "debian");
+        let f = stratum("fedora", "fedora");
+        let used = used_backends(&[d, f]);
+        assert!(used.contains(&Backend::Debootstrap));
+        assert!(used.contains(&Backend::Dnf));
+        assert!(!used.contains(&Backend::Apk));
+    }
+
+    #[test]
+    fn dnf_bootstrap_verifies_and_pins_releasever() {
+        // Default release when suite is unset.
+        let s = stratum("fedora", "fedora");
+        let cmd = dnf_bootstrap_cmd(&s, "/bedrock/strata/fedora");
+        assert!(cmd.starts_with("dnf -y"), "{cmd}");
+        assert!(cmd.contains(&format!("'--releasever={FEDORA_DEFAULT_RELEASE}'")), "{cmd}");
+        assert!(cmd.contains("'--installroot=/bedrock/strata/fedora'"), "{cmd}");
+        assert!(cmd.contains("'--setopt=install_weak_deps=False'"), "{cmd}");
+        // Both repos are supplied and enabled, wildcard disable is quoted.
+        assert!(cmd.contains("'--repofrompath=fedora,"), "{cmd}");
+        assert!(cmd.contains("'--repofrompath=updates,"), "{cmd}");
+        assert!(cmd.contains("'--disablerepo=*'"), "no unquoted glob: {cmd}");
+        assert!(cmd.contains("'--enablerepo=fedora,updates'"), "{cmd}");
+        // Verification enforced: gpgcheck on + the distribution-gpg-keys file, never off.
+        assert!(cmd.contains("'--setopt=fedora.gpgcheck=1'"), "{cmd}");
+        assert!(cmd.contains(&format!(
+            "'--setopt=fedora.gpgkey=file://{}'",
+            fedora_key_path(FEDORA_DEFAULT_RELEASE)
+        )), "{cmd}");
+        assert!(!cmd.contains("nogpgcheck") && !cmd.contains("gpgcheck=0"), "{cmd}");
+    }
+
+    #[test]
+    fn dnf_bootstrap_honors_pinned_release_and_mirror() {
+        let mut s = stratum("fedora", "fedora");
+        s.suite = Some("41".into());
+        s.mirror = Some("https://my.mirror/fedora".into());
+        let cmd = dnf_bootstrap_cmd(&s, "/r");
+        assert!(cmd.contains("'--releasever=41'"), "{cmd}");
+        assert!(cmd.contains("'--repofrompath=fedora,https://my.mirror/fedora/releases/41/Everything/x86_64/os/'"), "{cmd}");
+        assert!(cmd.contains(&fedora_key_path("41")), "{cmd}");
+    }
+
+    #[test]
+    fn in_stratum_install_dnf_and_apk_shapes() {
+        assert_eq!(
+            in_stratum_install_cmd(Backend::Dnf, &["git".into()]),
+            "dnf install -y 'git'"
+        );
+        assert_eq!(
+            in_stratum_install_cmd(Backend::Apk, &["git".into()]),
+            "apk add 'git'"
+        );
     }
 
     #[test]
