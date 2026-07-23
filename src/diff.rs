@@ -50,6 +50,7 @@ pub fn compute(new: &Manifest, current: Option<&Manifest>) -> Vec<Change> {
     theme_changes(&mut out, old.theme.as_ref(), new.theme.as_ref());
     flatpak_changes(&mut out, old, new);
     defaults_changes(&mut out, old, new);
+    strata_changes(&mut out, old, new);
 
     if old.keybindings.len() != new.keybindings.len() {
         out.push(changed(
@@ -88,6 +89,32 @@ pub fn requires_full_apply(new: &Manifest, current: Option<&Manifest>) -> bool {
         || set(&old.services.user) != set(&new.services.user)
         || flatpak_apps(old) != flatpak_apps(new)
         || users(old) != users(new)
+        || strata_sig(old) != strata_sig(new)
+}
+
+/// A comparable signature of every stratum's install-affecting state — its name,
+/// distro, suite, snapshot pin, in-stratum packages and exposed binaries. Any
+/// change here means a bootstrap/install/shim step must re-run, so it forces a
+/// full apply. Order-independent (sorted) so a reordered list isn't a change.
+fn strata_sig(m: &Manifest) -> std::collections::BTreeSet<String> {
+    m.strata
+        .iter()
+        .map(|s| {
+            let mut pkgs = s.packages.clone();
+            pkgs.sort();
+            let mut exp = s.expose.clone();
+            exp.sort();
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                s.name,
+                s.distro,
+                s.suite.as_deref().unwrap_or(""),
+                s.snapshot.as_deref().unwrap_or(""),
+                pkgs.join(","),
+                exp.join(","),
+            )
+        })
+        .collect()
 }
 
 /// Print the diff (CLI `manifest diff`).
@@ -183,6 +210,31 @@ fn flatpak_changes(out: &mut Vec<Change>, old: &Manifest, new: &Manifest) {
         .map(|f| f.remotes.iter().map(|r| r.name.clone()).collect())
         .unwrap_or_default();
     list_changes(out, "Flatpak remotes", &old_remotes, &new_remotes);
+}
+
+/// Strata added/removed (by name), plus an exposed-binary count change for a
+/// stratum present in both. Package/suite/snapshot edits don't get their own row
+/// here (they'd be noisy), but they *do* force a full apply via [`strata_sig`].
+fn strata_changes(out: &mut Vec<Change>, old: &Manifest, new: &Manifest) {
+    let old_names: Vec<String> = old.strata.iter().map(|s| s.name.clone()).collect();
+    let new_names: Vec<String> = new.strata.iter().map(|s| s.name.clone()).collect();
+    list_changes(out, "Strata", &old_names, &new_names);
+
+    for ns in &new.strata {
+        if let Some(os) = old.strata.iter().find(|s| s.name == ns.name) {
+            if os.expose.len() != ns.expose.len() {
+                out.push(changed(
+                    "Strata",
+                    &format!(
+                        "{}: {} → {} exposed binary(ies)",
+                        ns.name,
+                        os.expose.len(),
+                        ns.expose.len()
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 fn defaults_changes(out: &mut Vec<Change>, old: &Manifest, new: &Manifest) {
