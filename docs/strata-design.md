@@ -401,6 +401,16 @@ distro/suite/mirror/expose recovered from the rootfs + shims; in-stratum
 via shared Wayland/X socket (proves `share` end-to-end), System Snapshots UI
 awareness.
 
+**Ergonomics — command-not-found → add a stratum.** Strata are *never* installed
+by default (the engine's strata step no-ops on an empty list; the ISO bakes no
+stratum). But a shell handler (`strata::cnf_handler_script`, written to
+`/etc/profile.d` on every install) maps an uninstalled package manager to its
+distro — `apt`/`dpkg`→debian, `dnf`/`rpm`→fedora — and offers to add it:
+`sudo manifest strata add <distro> --expose <cmd>`. That subcommand captures the
+system as a manifest, upserts the stratum (`export::add_stratum`), applies just
+the strata step, and records the result to the rollback history. Only
+bootstrappable distros are offered, so the prompt never dead-ends.
+
 **Phase 3 — Fedora (dnf backend) ✅ + Alpine (musl, self-contained).**
 Fedora backend built + VM-validated: `dnf5 --installroot` bootstraps a verified
 rootfs (gpgcheck + `distribution-gpg-keys`), in-stratum `dnf install` and

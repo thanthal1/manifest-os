@@ -148,6 +148,11 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
             step("Setting up strata");
             strata::apply(&manifest.strata, ctx)?;
         }
+
+        // Ship the command-not-found helper on every system (even with no strata
+        // declared) so the first time someone types an uninstalled `apt`/`dnf`
+        // it offers to add that distro's stratum. Cheap, idempotent file write.
+        strata::write_cnf_handler(ctx)?;
     }
 
     if !manifest.system.is_empty() {

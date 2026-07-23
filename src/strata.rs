@@ -338,6 +338,16 @@ fn write_profile_d(ctx: &Ctx) -> Result<()> {
     ctx.write_root(PROFILE_D, &profile_d_script())
 }
 
+/// profile.d drop-in that ships the command-not-found handler.
+const CNF_HANDLER: &str = "/etc/profile.d/09-manifest-strata-cnf.sh";
+
+/// Install the "command not found → offer a stratum" shell handler. Written on
+/// every install (not just when strata are declared) so a fresh system can offer
+/// to add Debian/Fedora the first time someone types `apt`/`dnf`. Idempotent.
+pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
+    ctx.write_root(CNF_HANDLER, cnf_handler_script())
+}
+
 // ---------------------------------------------------------------------------
 // Pure logic (unit-tested; no side effects)
 // ---------------------------------------------------------------------------
@@ -587,6 +597,36 @@ fn shim_script(stratum: &str, bin: &str) -> String {
         helper = enter_helper_path(stratum),
         bin_q = shell_quote(bin),
     )
+}
+
+/// The command-not-found handler shell text. When an uninstalled package manager
+/// (`apt`, `dnf`, …) is run, map it to its distro and offer to add a stratum.
+/// Defines both bash (`command_not_found_handle`) and zsh
+/// (`command_not_found_handler`) hooks; only distros the engine can bootstrap are
+/// mapped, so the offer never leads to a "not implemented" error.
+fn cnf_handler_script() -> &'static str {
+    "# ManifestOS strata — offer to add a foreign-distro stratum when an\n\
+     # uninstalled package manager is invoked. Generated; edits are overwritten.\n\
+     __manifest_cnf() {\n  \
+       cmd=$1\n  \
+       case $cmd in\n    \
+         apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;\n    \
+         dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;\n    \
+         *) return 127 ;;\n  \
+       esac\n  \
+       printf '\\n%s is not installed — it comes from %s.\\n' \"$cmd\" \"$distro\" >&2\n  \
+       if [ -t 0 ] && [ -t 2 ]; then\n    \
+         printf 'Add a %s stratum and put %s on your PATH? [y/N] ' \"$distro\" \"$cmd\" >&2\n    \
+         read -r __r\n    \
+         case $__r in\n      \
+           [yY]|[yY][eE][sS]) sudo manifest strata add \"$distro\" --expose \"$cmd\"; return $? ;;\n    \
+         esac\n  \
+       fi\n  \
+       printf 'Add it with:  sudo manifest strata add %s --expose %s\\n' \"$distro\" \"$cmd\" >&2\n  \
+       return 127\n\
+     }\n\
+     command_not_found_handle() { __manifest_cnf \"$@\"; }\n\
+     command_not_found_handler() { __manifest_cnf \"$@\"; }\n"
 }
 
 /// profile.d drop-in adding the shim dir to PATH for login shells.
@@ -841,6 +881,19 @@ mod tests {
         let shim = shim_script("debian", "apt");
         assert!(shim.starts_with("#!/bin/sh"), "{shim}");
         assert!(shim.contains("exec sudo /bedrock/libexec/enter-debian 'apt' \"$@\""), "{shim}");
+    }
+
+    #[test]
+    fn cnf_handler_maps_pkg_managers_and_defines_both_hooks() {
+        let s = cnf_handler_script();
+        assert!(s.contains("apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian"), "{s}");
+        assert!(s.contains("dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora"), "{s}");
+        // Only bootstrappable distros are offered (no alpine → no dead-end offer).
+        assert!(!s.contains("alpine"), "{s}");
+        // Both shells' hooks + the actionable command.
+        assert!(s.contains("command_not_found_handle()"), "bash hook: {s}");
+        assert!(s.contains("command_not_found_handler()"), "zsh hook: {s}");
+        assert!(s.contains("sudo manifest strata add \"$distro\" --expose \"$cmd\""), "{s}");
     }
 
     #[test]

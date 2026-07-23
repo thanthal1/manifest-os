@@ -73,6 +73,55 @@ pub fn capture_manifest() -> crate::manifest::Manifest {
         .expect("captured manifest is always schema-valid")
 }
 
+/// The current system captured as a mutable manifest [`Value`], the base for
+/// `manifest strata add` (which adds a stratum and re-records the result).
+pub fn capture_value() -> Value {
+    capture()
+}
+
+/// Insert or update a stratum in a manifest [`Value`]. If one with `name` already
+/// exists, merge in the `expose` binaries (deduped) and leave the rest; otherwise
+/// append a new stratum. Ensures `root["strata"]` is an array. Pure — unit-tested.
+pub fn add_stratum(root: &mut Value, name: &str, distro: &str, suite: Option<&str>, expose: &[String]) {
+    let arr = root
+        .as_object_mut()
+        .expect("manifest root is a JSON object")
+        .entry("strata")
+        .or_insert_with(|| Value::Array(vec![]))
+        .as_array_mut()
+        .expect("strata is a JSON array");
+
+    if let Some(existing) = arr
+        .iter_mut()
+        .find(|s| s.get("name").and_then(Value::as_str) == Some(name))
+    {
+        let list = existing
+            .as_object_mut()
+            .expect("stratum is an object")
+            .entry("expose")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("expose is an array");
+        for b in expose {
+            if !list.iter().any(|v| v.as_str() == Some(b.as_str())) {
+                list.push(json!(b));
+            }
+        }
+        return;
+    }
+
+    let mut s = Map::new();
+    s.insert("name".into(), json!(name));
+    s.insert("distro".into(), json!(distro));
+    if let Some(su) = suite {
+        s.insert("suite".into(), json!(su));
+    }
+    if !expose.is_empty() {
+        s.insert("expose".into(), json!(expose));
+    }
+    arr.push(Value::Object(s));
+}
+
 /// Build the manifest describing the current system.
 fn capture() -> Value {
     let mut m = Map::new();
@@ -560,6 +609,27 @@ mod tests {
             Some("https://deb.debian.org/debian")
         );
         assert_eq!(parse_first_deb_mirror("# only comments\n"), None);
+    }
+
+    #[test]
+    fn add_stratum_appends_then_merges_expose() {
+        let mut root = json!({ "schema_version": "1.0.0", "meta": { "name": "t" } });
+        add_stratum(&mut root, "debian", "debian", Some("bookworm"), &["apt".into()]);
+        let arr = root["strata"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["distro"], "debian");
+        assert_eq!(arr[0]["suite"], "bookworm");
+        assert_eq!(arr[0]["expose"], json!(["apt"]));
+
+        // Same name → merge expose, dedup apt, keep one entry.
+        add_stratum(&mut root, "debian", "debian", None, &["apt".into(), "dpkg".into()]);
+        let arr = root["strata"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["expose"], json!(["apt", "dpkg"]));
+
+        // Different name → new entry.
+        add_stratum(&mut root, "fedora", "fedora", None, &["dnf".into()]);
+        assert_eq!(root["strata"].as_array().unwrap().len(), 2);
     }
 
     #[test]
