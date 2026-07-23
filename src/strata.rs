@@ -338,14 +338,40 @@ fn write_profile_d(ctx: &Ctx) -> Result<()> {
     ctx.write_root(PROFILE_D, &profile_d_script())
 }
 
-/// profile.d drop-in that ships the command-not-found handler.
-const CNF_HANDLER: &str = "/etc/profile.d/09-manifest-strata-cnf.sh";
+/// The handler function lives here; interactive shells source it from this path.
+const CNF_LIB: &str = "/etc/manifest-os/strata-cnf.sh";
+/// Marker so the source line is added at most once per rc file.
+const CNF_MARKER: &str = "manifest-os-strata-cnf";
 
 /// Install the "command not found → offer a stratum" shell handler. Written on
 /// every install (not just when strata are declared) so a fresh system can offer
-/// to add Debian/Fedora the first time someone types `apt`/`dnf`. Idempotent.
+/// to add Debian/Fedora the first time someone types `apt`/`dnf`.
+///
+/// It must load in **interactive** shells, so a single `/etc/profile.d` drop-in
+/// is not enough: zsh never sources `/etc/profile.d`, and it only covers login
+/// shells anyway. We keep the handler in one lib and source it from the files
+/// interactive shells actually read — `/etc/bash.bashrc` (bash), `/etc/zsh/zshrc`
+/// (zsh) — plus a profile.d shim for login bash. Idempotent.
 pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
-    ctx.write_root(CNF_HANDLER, cnf_handler_script())
+    ctx.write_root(CNF_LIB, cnf_handler_script())?;
+    let src = format!("[ -r {CNF_LIB} ] && . {CNF_LIB}  # {CNF_MARKER}");
+    // profile.d shim (login bash): a plain file that just sources the lib.
+    ctx.write_root("/etc/profile.d/09-manifest-strata-cnf.sh", &format!("{src}\n"))?;
+    // Interactive bash + zsh: append the source line once, guarded by the marker.
+    for rc in ["/etc/bash.bashrc", "/etc/zsh/zshrc"] {
+        let dir = rc.rsplit_once('/').map(|(d, _)| d).unwrap_or("/etc");
+        ctx.shell(
+            &format!(
+                "mkdir -p {dir}; touch {rc}; grep -q {marker} {rc} 2>/dev/null || printf '%s\\n' {src} >> {rc}",
+                dir = shell_quote(dir),
+                rc = shell_quote(rc),
+                marker = shell_quote(CNF_MARKER),
+                src = shell_quote(&src),
+            ),
+            true,
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
