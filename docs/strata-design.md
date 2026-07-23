@@ -1,9 +1,13 @@
 # Strata — multi-distro package access (design)
 
-> Status: **Phase 1 built + VM-validated** (2026-07-22). Arch + Debian bookworm
-> stratum bootstrapped via debootstrap in the `manifest-build` VM; `dpkg` 1.21.23
-> (Debian) and `pacman` v7.1.0 (Arch) confirmed running from one PATH; enter-helper
-> mounts auto-clean with no leaks; DNS share works. Draft 1. Owner: (you).
+> Status: **Phase 1 + Phase 2 built + VM-validated** (2026-07-22). Debian bookworm
+> and Ubuntu 24.04 strata bootstrapped (verified, snapshot-pinnable) in the
+> `manifest-build` VM; `dpkg`/`tree`/`apt` (Debian & Ubuntu) run from one PATH
+> alongside `pacman`; enter-helper mounts auto-clean with no leaks; DNS share
+> works. Two VM findings fixed: debootstrap silently bootstrapping unverified
+> (now `ensure_keyring` + `--keyring`), and same-name shim collisions across
+> strata (now `<stratum>-<bin>` aliases + first-in-order bare name). Draft 1.
+> Owner: (you).
 > Cross-refs: [`src/flatpak.rs`](../src/flatpak.rs) (the module this copies its
 > shape from), [`src/install.rs`](../src/install.rs) (`apply()` step order),
 > [`src/exec.rs`](../src/exec.rs) (`Ctx`), [`src/plugins.rs`](../src/plugins.rs)
