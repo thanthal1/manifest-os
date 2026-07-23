@@ -358,7 +358,10 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
     // profile.d shim (login bash): a plain file that just sources the lib.
     ctx.write_root("/etc/profile.d/09-manifest-strata-cnf.sh", &format!("{src}\n"))?;
     // Interactive bash + zsh: append the source line once, guarded by the marker.
-    for rc in ["/etc/bash.bashrc", "/etc/zsh/zshrc"] {
+    // Both /etc/zsh/zshrc (vanilla zsh) and /etc/zsh/zshrc.local (sourced by
+    // grml-zsh-config, which owns /etc/zsh/zshrc on our images) so it loads
+    // whichever zsh setup the system ended up with.
+    for rc in ["/etc/bash.bashrc", "/etc/zsh/zshrc", "/etc/zsh/zshrc.local"] {
         let dir = rc.rsplit_once('/').map(|(d, _)| d).unwrap_or("/etc");
         ctx.shell(
             &format!(
