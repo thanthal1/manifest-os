@@ -98,11 +98,18 @@ pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
     // idempotently, like flatpak.rs / gestures.rs auto-add their deps.
     ensure_host_tools(ctx)?;
 
+    // Resolve bare-name shim ownership once, across all strata: two strata that
+    // expose the same binary name would otherwise collide at /bedrock/bin/<name>
+    // (last applied silently wins). First in manifest order gets the bare name;
+    // every exposed binary also gets an unambiguous <stratum>-<bin> alias.
+    let bare_winners: std::collections::HashSet<(String, String)> =
+        bare_shim_winners(strata).into_iter().collect();
+
     for s in strata {
         if s.is_empty() {
             continue;
         }
-        apply_one(s, ctx)?;
+        apply_one(s, &bare_winners, ctx)?;
     }
 
     // One profile.d drop-in puts all shims on PATH for every login shell.
@@ -110,7 +117,7 @@ pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn apply_one(s: &Stratum, ctx: &Ctx) -> Result<()> {
+fn apply_one(s: &Stratum, bare_winners: &std::collections::HashSet<(String, String)>, ctx: &Ctx) -> Result<()> {
     let backend = match backend_for(&s.distro) {
         Some(Backend::Debootstrap) => Backend::Debootstrap,
         Some(other) => bail!(
@@ -144,7 +151,7 @@ fn apply_one(s: &Stratum, ctx: &Ctx) -> Result<()> {
     bootstrap(s, backend, &root, &keyring, ctx)?;
     install_in_stratum(s, backend, &root, ctx)?;
     write_enter_helper(s, ctx)?;
-    write_shims(s, ctx)?;
+    write_shims(s, bare_winners, ctx)?;
     Ok(())
 }
 
@@ -221,17 +228,42 @@ fn write_enter_helper(s: &Stratum, ctx: &Ctx) -> Result<()> {
     ctx.sudo("chmod", &["0755", &path])
 }
 
-/// Write one shim per exposed binary and mark each executable.
-fn write_shims(s: &Stratum, ctx: &Ctx) -> Result<()> {
+/// Write shims for a stratum's exposed binaries. Each binary always gets an
+/// unambiguous `<stratum>-<bin>` shim; the bare `<bin>` name goes to whichever
+/// stratum won it in manifest order (`bare_winners`), and a collision on a later
+/// stratum warns instead of silently overwriting.
+fn write_shims(
+    s: &Stratum,
+    bare_winners: &std::collections::HashSet<(String, String)>,
+    ctx: &Ctx,
+) -> Result<()> {
     if s.expose.is_empty() {
         println!("  · no `expose` list — stratum installed but nothing on host PATH");
         return Ok(());
     }
     for bin in &s.expose {
-        let path = shim_path(bin);
-        println!("  · expose {bin} → {path}");
-        ctx.write_root(&path, &shim_script(&s.name, bin))?;
-        ctx.sudo("chmod", &["0755", &path])?;
+        let script = shim_script(&s.name, bin);
+
+        // Always: a stratum-prefixed alias, reachable even when the bare name is
+        // claimed by another stratum.
+        let alias = shim_path(&prefixed_name(&s.name, bin));
+        println!("  · expose {} → {alias}", prefixed_name(&s.name, bin));
+        ctx.write_root(&alias, &script)?;
+        ctx.sudo("chmod", &["0755", &alias])?;
+
+        // The bare name: only the winning stratum writes it; others warn.
+        if bare_winners.contains(&(s.name.clone(), bin.clone())) {
+            let bare = shim_path(bin);
+            ctx.write_root(&bare, &script)?;
+            ctx.sudo("chmod", &["0755", &bare])?;
+            println!("    also on PATH as `{bin}`");
+        } else {
+            println!(
+                "  · note: `{bin}` is already exposed by an earlier stratum — this one \
+                 is reachable as `{}` (bare `{bin}` unchanged)",
+                prefixed_name(&s.name, bin)
+            );
+        }
     }
     Ok(())
 }
@@ -255,6 +287,33 @@ fn enter_helper_path(name: &str) -> String {
 
 fn shim_path(bin: &str) -> String {
     format!("{BIN_DIR}/{bin}")
+}
+
+/// The unambiguous per-stratum alias name for an exposed binary, e.g.
+/// `debian-apt`. Always generated so every exposed binary is reachable even when
+/// two strata expose the same bare name.
+fn prefixed_name(stratum: &str, bin: &str) -> String {
+    format!("{stratum}-{bin}")
+}
+
+/// Decide which stratum owns each bare binary name across all strata: the first
+/// stratum in manifest order to expose a name wins it; later strata reach their
+/// version only via the prefixed alias. Returns the winning `(stratum, bin)`
+/// pairs. Pure — unit-tested.
+fn bare_shim_winners(strata: &[Stratum]) -> Vec<(String, String)> {
+    let mut claimed = std::collections::HashSet::new();
+    let mut winners = Vec::new();
+    for s in strata {
+        if s.is_empty() {
+            continue;
+        }
+        for bin in &s.expose {
+            if claimed.insert(bin.clone()) {
+                winners.push((s.name.clone(), bin.clone()));
+            }
+        }
+    }
+    winners
 }
 
 /// The bind list for a stratum: the always-bound set plus any shared mount that
@@ -564,6 +623,25 @@ mod tests {
         s.share = vec!["home".into()]; // no resolv
         let script = enter_helper_script(&s);
         assert!(!script.contains("cp -Lf /etc/resolv.conf"), "{script}");
+    }
+
+    #[test]
+    fn bare_shim_winner_is_first_stratum_in_order() {
+        let mut d = stratum("debian", "debian");
+        d.expose = vec!["apt".into(), "tree".into()];
+        let mut u = stratum("ubuntu", "ubuntu");
+        u.expose = vec!["apt".into()]; // collides with debian's apt
+        let winners = bare_shim_winners(&[d, u]);
+        // debian wins bare `apt` and `tree`; ubuntu's apt gets no bare shim.
+        assert!(winners.contains(&("debian".into(), "apt".into())));
+        assert!(winners.contains(&("debian".into(), "tree".into())));
+        assert!(!winners.contains(&("ubuntu".into(), "apt".into())));
+        assert_eq!(winners.len(), 2);
+    }
+
+    #[test]
+    fn prefixed_name_is_stratum_dash_bin() {
+        assert_eq!(prefixed_name("ubuntu", "apt"), "ubuntu-apt");
     }
 
     #[test]

@@ -212,7 +212,7 @@ declarative block the engine orchestrates. Proposed shape:
 | `mirror` | package mirror; defaults per-distro |
 | `snapshot` | **reproducibility pin** — see §6. Optional but recommended. |
 | `packages` | installed **inside** the stratum with **its own** package manager |
-| `expose` | binaries to shim onto the host PATH (explicit allowlist, never blanket) |
+| `expose` | binaries to shim onto the host PATH (explicit allowlist, never blanket). Each also gets an unambiguous `<stratum>-<bin>` alias; if two strata expose the same bare name the **first in manifest order** wins it and the later one warns (VM finding — a naive last-writer-wins silently shadowed Debian's `apt` with Ubuntu's). |
 | `share` | which host↔stratum bind-mounts to set up (`home`/`resolv`/`x11`/`wayland`/`tmp`); sensible default set if omitted |
 
 ### 5.1 Core block vs plugin
