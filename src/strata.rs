@@ -272,8 +272,17 @@ fn install_in_stratum(s: &Stratum, backend: Backend, root: &str, ctx: &Ctx) -> R
     }
     println!("  · installing {} package(s) inside the stratum", s.packages.len());
     let inner = in_stratum_install_cmd(backend, &s.packages);
-    // arch-chroot sets up proc/sys/dev/run + resolv.conf for the duration.
-    let cmd = format!("arch-chroot {} /bin/sh -c {}", shell_quote(root), shell_quote(&inner));
+    // Plant a real resolv.conf first: arch-chroot only bind-mounts one if the
+    // target's already exists as a real file, and Fedora ships /etc/resolv.conf
+    // as a *dangling* symlink (→ systemd-resolved's stub), so the package manager
+    // inside can't resolve mirrors. rm the symlink, then copy the host's.
+    let cmd = format!(
+        "rm -f {root}/etc/resolv.conf; cp -L /etc/resolv.conf {root}/etc/resolv.conf 2>/dev/null || true; \
+         arch-chroot {root_q} /bin/sh -c {inner_q}",
+        root = root,
+        root_q = shell_quote(root),
+        inner_q = shell_quote(&inner),
+    );
     ctx.shell(&cmd, true)
 }
 
@@ -536,7 +545,9 @@ fn enter_helper_script(s: &Stratum) -> String {
     let root = stratum_root(&s.name);
     let binds = bind_mounts(s).join(" ");
     let copy_resolv = if effective_shares(s).iter().any(|x| x == "resolv") {
-        "cp -Lf /etc/resolv.conf \"$root/etc/resolv.conf\" 2>/dev/null || true\n  "
+        // rm first: the stratum's resolv.conf may be a dangling symlink (Fedora),
+        // which `cp` onto would try to follow. Remove, then copy the host's file.
+        "rm -f \"$root/etc/resolv.conf\"; cp -L /etc/resolv.conf \"$root/etc/resolv.conf\" 2>/dev/null || true\n  "
     } else {
         ""
     };
@@ -792,7 +803,7 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh"), "{script}");
         assert!(script.contains("unshare --mount --propagation private"), "{script}");
         assert!(script.contains("mount --rbind"), "{script}");
-        assert!(script.contains("cp -Lf /etc/resolv.conf"), "{script}"); // resolv shared
+        assert!(script.contains("cp -L /etc/resolv.conf"), "{script}"); // resolv shared
         assert!(script.contains("exec chroot \"$root\" /usr/bin/env \"$@\""), "{script}");
         // Base binds + the shared home/tmp all appear in the mount loop.
         assert!(script.contains("for m in proc sys dev run home tmp;"), "{script}");
@@ -803,7 +814,7 @@ mod tests {
         let mut s = stratum("debian", "debian");
         s.share = vec!["home".into()]; // no resolv
         let script = enter_helper_script(&s);
-        assert!(!script.contains("cp -Lf /etc/resolv.conf"), "{script}");
+        assert!(!script.contains("cp -L /etc/resolv.conf"), "{script}");
     }
 
     #[test]
