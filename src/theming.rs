@@ -65,6 +65,16 @@ pub fn apply(theme: &Theme, desktop: Option<&str>, primary_user: Option<&str>, c
         install_source(src.url(), src.run(), ctx)?;
     }
 
+    // 1c) Pre-seed a KDE global theme's own defaults (window decorations,
+    // colours, widget style, cursor, …) into the user's config NOW, so the
+    // first Plasma session boots fully themed instead of needing the "Apply
+    // desktop & window layout" click in System Settings.
+    if matches!(desktop, Some("plasma") | Some("kde")) {
+        if let Some(global) = &theme.global {
+            seed_kde_global_defaults(global, primary_user, ctx)?;
+        }
+    }
+
     // 2) Cursor env for Qt apps and compositors that skip the GTK files.
     if theme.cursor.is_some() || theme.cursor_size.is_some() {
         ctx.write_root(ENV_PATH, &env_dropin(theme))?;
@@ -96,6 +106,72 @@ fn install_source(url: &str, install: Option<&str>, ctx: &Ctx) -> Result<()> {
         url = sh_quote(url),
     );
     ctx.shell(&cmd, false)
+}
+
+/// Pre-seed a KDE global theme's own `defaults` into the primary user's config
+/// at install time, so the first Plasma session boots with the theme fully
+/// applied — window decorations included — rather than needing the "Apply
+/// desktop & window layout" click. Reads the installed look-and-feel's
+/// `contents/defaults` (which maps `[configfile][group] key=value`) and writes
+/// each key with `kwriteconfig`, run as the user. Best-effort: a theme with no
+/// defaults file just falls back to the first-login `plasma-apply-lookandfeel`.
+fn seed_kde_global_defaults(global: &str, user: Option<&str>, ctx: &Ctx) -> Result<()> {
+    let Some(user) = user else { return Ok(()) };
+    // Where the look-and-feel's defaults land (system-wide install first).
+    let candidates = [
+        format!("/usr/share/plasma/look-and-feel/{global}/contents/defaults"),
+        format!("/home/{user}/.local/share/plasma/look-and-feel/{global}/contents/defaults"),
+    ];
+    let Some(defaults) = candidates.iter().find_map(|p| std::fs::read_to_string(p).ok()) else {
+        return Ok(()); // package/theme without a defaults file — nothing to seed.
+    };
+    let cmds = kwrite_cmds_from_defaults(&defaults, global);
+    if cmds.trim().is_empty() {
+        return Ok(());
+    }
+    println!("  · pre-seeding {global} defaults (window decorations, colours, …) for {user}");
+    // Run the whole batch as the target user so files land in *their* ~/.config.
+    ctx.shell(&format!("runuser -l {} -c {}", sh_quote(user), sh_quote(&cmds)), true)
+}
+
+/// Turn a look-and-feel `defaults` file into a batch of `kwriteconfig` commands.
+/// The format is stanzas headed by `[configfile][group]`, then `key=value`
+/// lines. Also records the look-and-feel as the KDE default so System Settings
+/// shows it selected. Pure — unit-tested.
+fn kwrite_cmds_from_defaults(defaults: &str, global: &str) -> String {
+    let mut out = String::new();
+    // The default global theme, so the KCM shows it selected.
+    out.push_str(&write_line("kdeglobals", "KDE", "LookAndFeelPackage", global));
+
+    let mut current: Option<(String, String)> = None;
+    for line in defaults.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // A stanza header: `[file][group]` (exactly two bracketed parts).
+        if let Some(rest) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            if let Some((file, group)) = rest.split_once("][") {
+                if !file.contains('[') && !group.contains(']') {
+                    current = Some((file.to_string(), group.to_string()));
+                    continue;
+                }
+            }
+        }
+        if let (Some((file, group)), Some((key, val))) = (&current, line.split_once('=')) {
+            out.push_str(&write_line(file, group, key.trim(), val.trim()));
+        }
+    }
+    out
+}
+
+/// One `kwriteconfig` line, preferring the Qt6 tool and falling back to Qt5.
+fn write_line(file: &str, group: &str, key: &str, value: &str) -> String {
+    let (f, g, k, v) = (sh_quote(file), sh_quote(group), sh_quote(key), sh_quote(value));
+    format!(
+        "kw=kwriteconfig6; command -v $kw >/dev/null 2>&1 || kw=kwriteconfig5; \
+         $kw --file {f} --group {g} --key {k} {v} 2>/dev/null\n"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +551,47 @@ mod tests {
         assert!(script.contains("--group KDE --key LookAndFeelPackage 'org.kde.breezedark.desktop'"));
         assert!(script.contains("--file kdeglobals --group Icons --key Theme 'Papirus-Dark'"), "explicit icons apply on KDE too");
         assert!(!script.contains("plasma-apply-colorscheme BreezeDark"), "global theme owns the colour scheme");
+    }
+
+    #[test]
+    fn lnf_defaults_become_kwriteconfig_incl_window_deco() {
+        // A trimmed WhiteSur-dark `defaults` file.
+        let defaults = "\
+[kcminputrc][Mouse]
+cursorTheme=WhiteSur-cursors
+
+[kdeglobals][General]
+ColorScheme=WhiteSurDark
+
+[kdeglobals][KDE]
+widgetStyle=kvantum-dark
+
+[kwinrc][org.kde.kdecoration2]
+library=org.kde.kwin.aurorae
+theme=__aurorae__svg__WhiteSur-dark
+
+[plasmarc][Theme]
+name=WhiteSur-dark
+";
+        let cmds = kwrite_cmds_from_defaults(defaults, "com.github.vinceliuice.WhiteSur-dark");
+        // Records the theme as the KDE default.
+        assert!(cmds.contains("--file 'kdeglobals' --group 'KDE' --key 'LookAndFeelPackage' 'com.github.vinceliuice.WhiteSur-dark'"), "{cmds}");
+        // The window-decoration bits (the piece that needed the manual click).
+        assert!(cmds.contains("--file 'kwinrc' --group 'org.kde.kdecoration2' --key 'library' 'org.kde.kwin.aurorae'"), "{cmds}");
+        assert!(cmds.contains("--file 'kwinrc' --group 'org.kde.kdecoration2' --key 'theme' '__aurorae__svg__WhiteSur-dark'"), "{cmds}");
+        // Colours, widget style, cursor, plasma theme.
+        assert!(cmds.contains("--file 'kdeglobals' --group 'General' --key 'ColorScheme' 'WhiteSurDark'"), "{cmds}");
+        assert!(cmds.contains("--file 'kdeglobals' --group 'KDE' --key 'widgetStyle' 'kvantum-dark'"), "{cmds}");
+        assert!(cmds.contains("--file 'kcminputrc' --group 'Mouse' --key 'cursorTheme' 'WhiteSur-cursors'"), "{cmds}");
+        assert!(cmds.contains("--file 'plasmarc' --group 'Theme' --key 'name' 'WhiteSur-dark'"), "{cmds}");
+    }
+
+    #[test]
+    fn lnf_defaults_empty_yields_only_the_default_record() {
+        // No stanzas → just the LookAndFeelPackage record, no crash.
+        let cmds = kwrite_cmds_from_defaults("", "x.y.Z");
+        assert!(cmds.contains("--key 'LookAndFeelPackage' 'x.y.Z'"));
+        assert_eq!(cmds.matches("--file").count(), 1);
     }
 
     #[test]
