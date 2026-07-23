@@ -352,9 +352,15 @@ must learn about `strata`:
 - **Foreign mirror URL** — flag non-official mirrors (anything but the distro's
   canonical hosts / snapshot archives); a hostile `mirror` is a supply-chain hole
   as bad as an untrusted `repos` entry.
-- **Foreign signing keys** — debootstrap verifies with the Debian keyring; ensure
-  we never pass `--no-check-gpg`. A manifest that disables verification is a
-  HIGH finding.
+- **Foreign signing keys** — **VM finding (Phase 2):** debootstrap does *not*
+  fail when its archive keyring is absent — it prints `W: Cannot check Release
+  signature; keyring file not available` and bootstraps the rootfs **unverified**.
+  A bare Arch box has neither the Debian nor Ubuntu keyring, so Phase 1's "GPG on
+  by default" was false comfort. The engine now installs the distro's keyring
+  (`debian-archive-keyring` / `ubuntu-keyring`, both in Arch's official repos) and
+  passes `--keyring=<path>` explicitly, hard-failing if the keyring is still
+  missing (`strata::ensure_keyring`). We never pass `--no-check-gpg`; a manifest
+  that disables verification is a HIGH finding.
 - **`expose` blast radius** — exposing `sudo`, `su`, a shell, or a setuid binary
   from a foreign stratum onto the host PATH is worth a finding (it's a privilege
   path the host's own tooling doesn't audit).

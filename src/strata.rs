@@ -64,6 +64,29 @@ fn backend_for(distro: &str) -> Option<Backend> {
     }
 }
 
+/// The Arch package + installed keyring path that lets debootstrap *verify* a
+/// distro's package signatures. Both are in Arch's official repos. Returns
+/// `(package, keyring_path)`.
+///
+/// This exists because debootstrap does NOT fail when its keyring is absent — it
+/// prints `W: Cannot check Release signature; keyring file not available` and
+/// bootstraps the rootfs **unverified**. That's a silent supply-chain hole, so
+/// we install the keyring and pass `--keyring` explicitly (see [`ensure_keyring`]
+/// / [`bootstrap_cmd`]).
+fn keyring_for(distro: &str) -> Option<(&'static str, &'static str)> {
+    match distro.trim().to_ascii_lowercase().as_str() {
+        "debian" => Some((
+            "debian-archive-keyring",
+            "/usr/share/keyrings/debian-archive-keyring.gpg",
+        )),
+        "ubuntu" => Some((
+            "ubuntu-keyring",
+            "/usr/share/keyrings/ubuntu-archive-keyring.gpg",
+        )),
+        _ => None,
+    }
+}
+
 /// Apply every stratum in order. The engine step (`install.rs::apply`).
 pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
     if strata.is_empty() {
@@ -115,11 +138,42 @@ fn apply_one(s: &Stratum, ctx: &Ctx) -> Result<()> {
         );
     }
 
-    bootstrap(s, backend, &root, ctx)?;
+    // Ensure signature verification is possible *before* bootstrapping — never
+    // pull a foreign rootfs unverified.
+    let keyring = ensure_keyring(s, ctx)?;
+    bootstrap(s, backend, &root, &keyring, ctx)?;
     install_in_stratum(s, backend, &root, ctx)?;
     write_enter_helper(s, ctx)?;
     write_shims(s, ctx)?;
     Ok(())
+}
+
+/// Ensure the distro's archive keyring is installed so debootstrap actually
+/// verifies package signatures, and return its path. debootstrap only *warns*
+/// and proceeds unverified when the keyring is absent, so we install it from
+/// Arch's official repos and hard-fail if it's still missing — refusing to
+/// bootstrap a root-privileged foreign rootfs from unverified packages.
+fn ensure_keyring(s: &Stratum, ctx: &Ctx) -> Result<String> {
+    let (pkg, path) = keyring_for(&s.distro).ok_or_else(|| {
+        anyhow::anyhow!(
+            "stratum '{}': no known archive keyring for distro '{}' — cannot verify \
+             signatures, refusing to bootstrap",
+            s.name,
+            s.distro
+        )
+    })?;
+    if !ctx.check("test", &["-f", path]) {
+        println!("  · installing {pkg} so the bootstrap can verify package signatures");
+        ctx.sudo("pacman", &["-S", "--needed", "--noconfirm", pkg])?;
+    }
+    if !ctx.dry_run && !ctx.check("test", &["-f", path]) {
+        bail!(
+            "stratum '{}': archive keyring {path} still missing after installing {pkg} — \
+             refusing to bootstrap unverified (a supply-chain risk)",
+            s.name
+        );
+    }
+    Ok(path.to_string())
 }
 
 /// Ensure debootstrap + arch-chroot are available on the host.
@@ -137,13 +191,13 @@ fn ensure_host_tools(ctx: &Ctx) -> Result<()> {
 
 /// Bootstrap the rootfs if it isn't already there. Idempotent: an existing
 /// `<root>/etc/os-release` means "already bootstrapped, skip".
-fn bootstrap(s: &Stratum, backend: Backend, root: &str, ctx: &Ctx) -> Result<()> {
+fn bootstrap(s: &Stratum, backend: Backend, root: &str, keyring: &str, ctx: &Ctx) -> Result<()> {
     if ctx.check("test", &["-f", &format!("{root}/etc/os-release")]) {
         println!("  · rootfs already bootstrapped — skipping debootstrap");
         return Ok(());
     }
     println!("  · bootstrapping rootfs (this pulls a base system — minutes)");
-    let cmd = bootstrap_cmd(s, backend, root);
+    let cmd = bootstrap_cmd(s, backend, root, keyring);
     ctx.shell(&cmd, true)
 }
 
@@ -257,15 +311,19 @@ fn default_suite(distro: &str) -> &'static str {
     }
 }
 
-/// The `debootstrap` command line. `--variant=minbase` keeps the rootfs small;
-/// GPG verification is left ON deliberately (never `--no-check-gpg` — a manifest
-/// disabling it is a marketplace finding, see docs §9).
-fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str) -> String {
+/// The `debootstrap` command line. `--variant=minbase` keeps the rootfs small.
+/// `--keyring=<path>` is passed explicitly so signatures are actually verified:
+/// debootstrap does NOT fail on a missing keyring, it warns and bootstraps
+/// unverified, so [`ensure_keyring`] installs the keyring and we point at it here
+/// (never `--no-check-gpg` — a manifest disabling verification is a marketplace
+/// finding, see docs §9).
+fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str, keyring: &str) -> String {
     debug_assert_eq!(backend, Backend::Debootstrap, "only debootstrap is wired in Phase 1");
     let suite = s.suite.clone().unwrap_or_else(|| default_suite(&s.distro).to_string());
     let mirror = resolve_mirror(s, backend);
     format!(
-        "debootstrap --variant=minbase {} {} {}",
+        "debootstrap --variant=minbase --keyring={} {} {} {}",
+        shell_quote(keyring),
         shell_quote(&suite),
         shell_quote(root),
         shell_quote(&mirror),
@@ -438,24 +496,43 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_cmd_is_minbase_and_never_disables_gpg() {
+    fn bootstrap_cmd_is_minbase_and_verifies_signatures() {
         let mut s = stratum("debian", "debian");
         s.suite = Some("bookworm".into());
-        let cmd = bootstrap_cmd(&s, Backend::Debootstrap, "/bedrock/strata/debian");
+        let (_, keyring) = keyring_for("debian").unwrap();
+        let cmd = bootstrap_cmd(&s, Backend::Debootstrap, "/bedrock/strata/debian", keyring);
         assert!(cmd.contains("debootstrap --variant=minbase"), "{cmd}");
         assert!(cmd.contains("'bookworm'"), "{cmd}");
         assert!(cmd.contains("'/bedrock/strata/debian'"), "{cmd}");
         assert!(cmd.contains("'https://deb.debian.org/debian'"), "{cmd}");
+        // Signature verification must be enforced: an explicit --keyring, never
+        // --no-check-gpg (debootstrap silently skips verification without one).
+        assert!(cmd.contains("--keyring='/usr/share/keyrings/debian-archive-keyring.gpg'"), "{cmd}");
         assert!(!cmd.contains("--no-check-gpg"), "GPG verification must stay on: {cmd}");
+    }
+
+    #[test]
+    fn keyring_maps_debian_and_ubuntu_to_official_packages() {
+        assert_eq!(
+            keyring_for("debian"),
+            Some(("debian-archive-keyring", "/usr/share/keyrings/debian-archive-keyring.gpg"))
+        );
+        assert_eq!(
+            keyring_for("Ubuntu"),
+            Some(("ubuntu-keyring", "/usr/share/keyrings/ubuntu-archive-keyring.gpg"))
+        );
+        assert_eq!(keyring_for("fedora"), None);
     }
 
     #[test]
     fn default_suite_per_distro() {
         let s = stratum("ubuntu", "ubuntu");
-        let cmd = bootstrap_cmd(&s, Backend::Debootstrap, "/r");
+        let (_, uk) = keyring_for("ubuntu").unwrap();
+        let cmd = bootstrap_cmd(&s, Backend::Debootstrap, "/r", uk);
         assert!(cmd.contains("'noble'"), "{cmd}"); // ubuntu default
         let d = stratum("debian", "debian");
-        let cmd = bootstrap_cmd(&d, Backend::Debootstrap, "/r");
+        let (_, dk) = keyring_for("debian").unwrap();
+        let cmd = bootstrap_cmd(&d, Backend::Debootstrap, "/r", dk);
         assert!(cmd.contains("'stable'"), "{cmd}"); // debian default
     }
 
