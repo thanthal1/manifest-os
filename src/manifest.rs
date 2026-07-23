@@ -403,8 +403,8 @@ pub enum Wallpaper {
 #[derive(Debug, Deserialize)]
 pub struct Theme {
     /// KDE Plasma **global theme** (look-and-feel) — one bundle that sets the
-    /// Plasma style, colours, icons, cursor and more at once, e.g. `"McSur-dark"`
-    /// or `"org.kde.breezedark.desktop"`. Applied with `plasma-apply-lookandfeel`
+    /// Plasma style, colours, icons, cursor and more at once, e.g.
+    /// `"org.kde.breezedark.desktop"`. Applied with `plasma-apply-lookandfeel`
     /// *before* the individual fields below (so those still override pieces). The
     /// theme's package must be installed (declare it in `packages`). Plasma only;
     /// ignored on other desktops.

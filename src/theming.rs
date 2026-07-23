@@ -555,35 +555,35 @@ mod tests {
 
     #[test]
     fn lnf_defaults_become_kwriteconfig_incl_window_deco() {
-        // A trimmed WhiteSur-dark `defaults` file.
+        // A look-and-feel `defaults` file, in the format they all use.
         let defaults = "\
 [kcminputrc][Mouse]
-cursorTheme=WhiteSur-cursors
+cursorTheme=Example-cursors
 
 [kdeglobals][General]
-ColorScheme=WhiteSurDark
+ColorScheme=ExampleDark
 
 [kdeglobals][KDE]
 widgetStyle=kvantum-dark
 
 [kwinrc][org.kde.kdecoration2]
 library=org.kde.kwin.aurorae
-theme=__aurorae__svg__WhiteSur-dark
+theme=__aurorae__svg__Example-dark
 
 [plasmarc][Theme]
-name=WhiteSur-dark
+name=Example-dark
 ";
-        let cmds = kwrite_cmds_from_defaults(defaults, "com.github.vinceliuice.WhiteSur-dark");
+        let cmds = kwrite_cmds_from_defaults(defaults, "com.example.Example-dark");
         // Records the theme as the KDE default.
-        assert!(cmds.contains("--file 'kdeglobals' --group 'KDE' --key 'LookAndFeelPackage' 'com.github.vinceliuice.WhiteSur-dark'"), "{cmds}");
+        assert!(cmds.contains("--file 'kdeglobals' --group 'KDE' --key 'LookAndFeelPackage' 'com.example.Example-dark'"), "{cmds}");
         // The window-decoration bits (the piece that needed the manual click).
         assert!(cmds.contains("--file 'kwinrc' --group 'org.kde.kdecoration2' --key 'library' 'org.kde.kwin.aurorae'"), "{cmds}");
-        assert!(cmds.contains("--file 'kwinrc' --group 'org.kde.kdecoration2' --key 'theme' '__aurorae__svg__WhiteSur-dark'"), "{cmds}");
+        assert!(cmds.contains("--file 'kwinrc' --group 'org.kde.kdecoration2' --key 'theme' '__aurorae__svg__Example-dark'"), "{cmds}");
         // Colours, widget style, cursor, plasma theme.
-        assert!(cmds.contains("--file 'kdeglobals' --group 'General' --key 'ColorScheme' 'WhiteSurDark'"), "{cmds}");
+        assert!(cmds.contains("--file 'kdeglobals' --group 'General' --key 'ColorScheme' 'ExampleDark'"), "{cmds}");
         assert!(cmds.contains("--file 'kdeglobals' --group 'KDE' --key 'widgetStyle' 'kvantum-dark'"), "{cmds}");
-        assert!(cmds.contains("--file 'kcminputrc' --group 'Mouse' --key 'cursorTheme' 'WhiteSur-cursors'"), "{cmds}");
-        assert!(cmds.contains("--file 'plasmarc' --group 'Theme' --key 'name' 'WhiteSur-dark'"), "{cmds}");
+        assert!(cmds.contains("--file 'kcminputrc' --group 'Mouse' --key 'cursorTheme' 'Example-cursors'"), "{cmds}");
+        assert!(cmds.contains("--file 'plasmarc' --group 'Theme' --key 'name' 'Example-dark'"), "{cmds}");
     }
 
     #[test]
