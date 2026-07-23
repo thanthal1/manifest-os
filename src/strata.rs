@@ -215,7 +215,9 @@ fn ensure_host_tools(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
         pkgs.push("debootstrap");
     }
     if backends.contains(&Backend::Dnf) {
-        pkgs.push("dnf");
+        // dnf5 is Arch's current dnf (the older `dnf` package is dnf4 and
+        // *conflicts* with dnf5); distribution-gpg-keys carries the Fedora keys.
+        pkgs.push("dnf5");
         pkgs.push("distribution-gpg-keys");
     }
     println!("  · ensuring strata host tools: {}", pkgs.join(", "));
@@ -489,11 +491,13 @@ fn fedora_repo_file(mirror: Option<&str>) -> String {
     )
 }
 
-/// The `dnf --installroot` bootstrap command. Runs from the Arch host, which has
+/// The `dnf5 --installroot` bootstrap command. Runs from the Arch host, which has
 /// no Fedora repos, so it writes a temp `.repo` (see [`fedora_repo_file`]) and
-/// points dnf at it via `reposdir`. `--releasever` is required (dnf can't detect
-/// it off an Arch host); `install_weak_deps=False` keeps the tree minimal. The
-/// temp repo dir is cleaned up via a trap regardless of outcome.
+/// points dnf at it via `reposdir`. Uses **`dnf5`** — Arch's current dnf; the
+/// legacy `dnf` command (dnf4) isn't installed and its package conflicts with
+/// dnf5. `--releasever` is required (dnf can't detect it off an Arch host);
+/// `install_weak_deps=False` keeps the tree minimal. The temp repo dir is cleaned
+/// via a trap regardless of outcome.
 fn dnf_bootstrap_cmd(s: &Stratum, root: &str) -> String {
     let rel = s.suite.clone().unwrap_or_else(|| FEDORA_DEFAULT_RELEASE.to_string());
     let repo = fedora_repo_file(s.mirror.as_deref());
@@ -501,7 +505,7 @@ fn dnf_bootstrap_cmd(s: &Stratum, root: &str) -> String {
         "d=\"$(mktemp -d)\" && trap 'rm -rf \"$d\"' EXIT && \
          cat > \"$d/manifest-fedora.repo\" <<'REPO'\n\
          {repo}REPO\n\
-         dnf -y --installroot={root_q} --releasever={rel_q} \
+         dnf5 -y --installroot={root_q} --releasever={rel_q} \
          --setopt=install_weak_deps=False --setopt=reposdir=\"$d\" \
          install fedora-release dnf coreutils bash",
         repo = repo,
@@ -732,6 +736,7 @@ mod tests {
         // Default release when suite is unset.
         let s = stratum("fedora", "fedora");
         let cmd = dnf_bootstrap_cmd(&s, "/bedrock/strata/fedora");
+        assert!(cmd.contains("dnf5 -y"), "must use dnf5 (dnf4 conflicts): {cmd}");
         assert!(cmd.contains(&format!("--releasever='{FEDORA_DEFAULT_RELEASE}'")), "{cmd}");
         assert!(cmd.contains("--installroot='/bedrock/strata/fedora'"), "{cmd}");
         assert!(cmd.contains("--setopt=install_weak_deps=False"), "{cmd}");
