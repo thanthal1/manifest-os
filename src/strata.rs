@@ -464,51 +464,50 @@ fn fedora_key_path(releasever: &str) -> String {
     format!("/usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-{releasever}-primary")
 }
 
-/// The (repo-id, baseurl) pairs a Fedora bootstrap installs from: the release
-/// tree plus updates. `mirror` overrides the base path (default: the redirector).
-fn fedora_repos(releasever: &str, mirror: Option<&str>) -> Vec<(String, String)> {
-    let base = mirror.unwrap_or("https://download.fedoraproject.org/pub/fedora/linux");
-    vec![
-        ("fedora".to_string(), format!("{base}/releases/{releasever}/Everything/x86_64/os/")),
-        ("updates".to_string(), format!("{base}/updates/{releasever}/Everything/x86_64/")),
-    ]
+/// A throwaway dnf `.repo` file for bootstrapping Fedora `$releasever` off a
+/// non-Fedora host. Defaults to the **metalink** (the full mirror list, so dnf
+/// fails over when a mirror is down — a single baseurl does not, and one dead
+/// mirror killed the whole bootstrap in testing). A custom `mirror` switches to a
+/// `baseurl` (one host, the user's choice). `$releasever`/`$basearch` are dnf
+/// variables it expands itself; `gpgcheck=1` + the distribution-gpg-keys key
+/// enforce verification.
+fn fedora_repo_file(mirror: Option<&str>) -> String {
+    let key = "file:///usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-$releasever-primary";
+    let (fedora_src, updates_src) = match mirror {
+        Some(m) => (
+            format!("baseurl={m}/releases/$releasever/Everything/$basearch/os/"),
+            format!("baseurl={m}/updates/$releasever/Everything/$basearch/"),
+        ),
+        None => (
+            "metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever&arch=$basearch".to_string(),
+            "metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f$releasever&arch=$basearch".to_string(),
+        ),
+    };
+    format!(
+        "[fedora]\nname=Fedora $releasever\n{fedora_src}\nenabled=1\ngpgcheck=1\ngpgkey={key}\n\
+         [updates]\nname=Fedora $releasever updates\n{updates_src}\nenabled=1\ngpgcheck=1\ngpgkey={key}\n"
+    )
 }
 
-/// The `dnf --installroot` bootstrap command line. Runs from the Arch host with
-/// no Fedora repos configured, so both repos are supplied via `--repofrompath`
-/// and each is pinned to its `distribution-gpg-keys` signing key with
-/// `gpgcheck=1` — verification is enforced, never `--nogpgcheck`. `--releasever`
-/// is required (dnf can't detect it off an Arch host); `install_weak_deps=False`
-/// and `reposdir=/dev/null` keep the tree minimal and ignore the host's (empty)
-/// repo config.
+/// The `dnf --installroot` bootstrap command. Runs from the Arch host, which has
+/// no Fedora repos, so it writes a temp `.repo` (see [`fedora_repo_file`]) and
+/// points dnf at it via `reposdir`. `--releasever` is required (dnf can't detect
+/// it off an Arch host); `install_weak_deps=False` keeps the tree minimal. The
+/// temp repo dir is cleaned up via a trap regardless of outcome.
 fn dnf_bootstrap_cmd(s: &Stratum, root: &str) -> String {
     let rel = s.suite.clone().unwrap_or_else(|| FEDORA_DEFAULT_RELEASE.to_string());
-    let key = fedora_key_path(&rel);
-    let repos = fedora_repos(&rel, s.mirror.as_deref());
-
-    let mut t: Vec<String> = vec!["dnf".into(), "-y".into()];
-    t.push(shell_quote(&format!("--installroot={root}")));
-    t.push(shell_quote(&format!("--releasever={rel}")));
-    t.push(shell_quote("--setopt=install_weak_deps=False"));
-    t.push(shell_quote("--setopt=reposdir=/dev/null"));
-
-    let mut ids = Vec::new();
-    for (id, url) in &repos {
-        t.push(shell_quote(&format!("--repofrompath={id},{url}")));
-        t.push(shell_quote(&format!("--setopt={id}.gpgkey=file://{key}")));
-        t.push(shell_quote(&format!("--setopt={id}.gpgcheck=1")));
-        ids.push(id.clone());
-    }
-    t.push(shell_quote("--disablerepo=*"));
-    t.push(shell_quote(&format!("--enablerepo={}", ids.join(","))));
-
-    t.push("install".into());
-    // Minimal but functional: enough to run the stratum's own dnf for later
-    // in-stratum installs.
-    for p in ["fedora-release", "dnf", "coreutils", "bash"] {
-        t.push(shell_quote(p));
-    }
-    t.join(" ")
+    let repo = fedora_repo_file(s.mirror.as_deref());
+    format!(
+        "d=\"$(mktemp -d)\" && trap 'rm -rf \"$d\"' EXIT && \
+         cat > \"$d/manifest-fedora.repo\" <<'REPO'\n\
+         {repo}REPO\n\
+         dnf -y --installroot={root_q} --releasever={rel_q} \
+         --setopt=install_weak_deps=False --setopt=reposdir=\"$d\" \
+         install fedora-release dnf coreutils bash",
+        repo = repo,
+        root_q = shell_quote(root),
+        rel_q = shell_quote(&rel),
+    )
 }
 
 /// The command run *inside* the stratum to install its `packages`.
@@ -733,33 +732,31 @@ mod tests {
         // Default release when suite is unset.
         let s = stratum("fedora", "fedora");
         let cmd = dnf_bootstrap_cmd(&s, "/bedrock/strata/fedora");
-        assert!(cmd.starts_with("dnf -y"), "{cmd}");
-        assert!(cmd.contains(&format!("'--releasever={FEDORA_DEFAULT_RELEASE}'")), "{cmd}");
-        assert!(cmd.contains("'--installroot=/bedrock/strata/fedora'"), "{cmd}");
-        assert!(cmd.contains("'--setopt=install_weak_deps=False'"), "{cmd}");
-        // Both repos are supplied and enabled, wildcard disable is quoted.
-        assert!(cmd.contains("'--repofrompath=fedora,"), "{cmd}");
-        assert!(cmd.contains("'--repofrompath=updates,"), "{cmd}");
-        assert!(cmd.contains("'--disablerepo=*'"), "no unquoted glob: {cmd}");
-        assert!(cmd.contains("'--enablerepo=fedora,updates'"), "{cmd}");
-        // Verification enforced: gpgcheck on + the distribution-gpg-keys file, never off.
-        assert!(cmd.contains("'--setopt=fedora.gpgcheck=1'"), "{cmd}");
-        assert!(cmd.contains(&format!(
-            "'--setopt=fedora.gpgkey=file://{}'",
-            fedora_key_path(FEDORA_DEFAULT_RELEASE)
-        )), "{cmd}");
+        assert!(cmd.contains(&format!("--releasever='{FEDORA_DEFAULT_RELEASE}'")), "{cmd}");
+        assert!(cmd.contains("--installroot='/bedrock/strata/fedora'"), "{cmd}");
+        assert!(cmd.contains("--setopt=install_weak_deps=False"), "{cmd}");
+        assert!(cmd.contains("--setopt=reposdir="), "{cmd}");
+        // Default source is the metalink (mirror failover), for both repos.
+        assert!(cmd.contains("metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever"), "{cmd}");
+        assert!(cmd.contains("repo=updates-released-f$releasever"), "{cmd}");
+        // Verification enforced: gpgcheck on + the distribution-gpg-keys key, never off.
+        assert!(cmd.contains("gpgcheck=1"), "{cmd}");
+        assert!(cmd.contains("gpgkey=file:///usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-$releasever-primary"), "{cmd}");
         assert!(!cmd.contains("nogpgcheck") && !cmd.contains("gpgcheck=0"), "{cmd}");
+        // Temp repo dir is cleaned up.
+        assert!(cmd.contains("trap 'rm -rf \"$d\"' EXIT"), "{cmd}");
     }
 
     #[test]
-    fn dnf_bootstrap_honors_pinned_release_and_mirror() {
+    fn dnf_bootstrap_custom_mirror_uses_baseurl() {
         let mut s = stratum("fedora", "fedora");
         s.suite = Some("41".into());
         s.mirror = Some("https://my.mirror/fedora".into());
         let cmd = dnf_bootstrap_cmd(&s, "/r");
-        assert!(cmd.contains("'--releasever=41'"), "{cmd}");
-        assert!(cmd.contains("'--repofrompath=fedora,https://my.mirror/fedora/releases/41/Everything/x86_64/os/'"), "{cmd}");
-        assert!(cmd.contains(&fedora_key_path("41")), "{cmd}");
+        assert!(cmd.contains("--releasever='41'"), "{cmd}");
+        // A custom mirror switches metalink → baseurl (their single host).
+        assert!(cmd.contains("baseurl=https://my.mirror/fedora/releases/$releasever/Everything/$basearch/os/"), "{cmd}");
+        assert!(!cmd.contains("metalink="), "custom mirror must not also use metalink: {cmd}");
     }
 
     #[test]
