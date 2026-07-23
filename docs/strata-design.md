@@ -391,10 +391,15 @@ binary access even worth it here?* before any GPL/FUSE spend.
 - VM-tested: full bootstrap→install→run, idempotent re-run, rollback leaves no
   mounts.
 
-**Phase 2 — ergonomics + a second glibc distro.**
-Ubuntu stratum (proves the debootstrap backend generalizes), GUI foreign app via
-shared Wayland/X socket (proves `share`), `diff`/`reconfigure` support, `export`
-captures existing strata, System Snapshots UI awareness.
+**Phase 2 — ergonomics + a second glibc distro.** *(largely done)*
+Ubuntu stratum ✅ (backend generalizes), snapshot-pinned reproducibility ✅,
+in-stratum `apt install` ✅, verified bootstrap + shim-collision handling ✅,
+`diff`/`reconfigure` support ✅ (`strata_sig` forces a full sync on any stratum
+change), `export` captures existing strata ✅ (`export::capture_strata` — name/
+distro/suite/mirror/expose recovered from the rootfs + shims; in-stratum
+`packages` and `snapshot` pins are *not* recovered). Still open: GUI foreign app
+via shared Wayland/X socket (proves `share` end-to-end), System Snapshots UI
+awareness.
 
 **Phase 3 — Fedora (dnf backend) + Alpine (musl, self-contained).**
 Second bootstrap backend; musl stratum used only through its own shims (no

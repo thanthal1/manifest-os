@@ -162,7 +162,117 @@ fn capture() -> Value {
         m.insert("users".into(), json!(users));
     }
 
+    // foreign-distro strata (Bedrock-style) under /bedrock/strata.
+    let strata = capture_strata();
+    if !strata.is_empty() {
+        m.insert("strata".into(), json!(strata));
+    }
+
     Value::Object(m)
+}
+
+// ---------------------------------------------------------------------------
+// strata readers  (see src/strata.rs)
+// ---------------------------------------------------------------------------
+
+/// Reconstruct the `strata` block from what's installed under `/bedrock`. Each
+/// rootfs yields name (dir), distro + suite (its os-release) and mirror (its
+/// sources.list); the exposed-binary list comes back from the generated shims.
+///
+/// Not captured: in-stratum `packages` (which of a rootfs's packages were
+/// manifest-declared vs. pulled as base isn't cleanly recoverable) and any
+/// `snapshot` pin unless the mirror URL still encodes it. A re-apply rebuilds the
+/// rootfs from the same distro/suite/mirror; declared packages would need
+/// re-listing.
+fn capture_strata() -> Vec<Value> {
+    const ROOT: &str = "/bedrock/strata";
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(ROOT) else {
+        return out;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().join("etc/os-release").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+
+    for name in names {
+        let base = format!("{ROOT}/{name}");
+        let os_release = std::fs::read_to_string(format!("{base}/etc/os-release")).unwrap_or_default();
+        let mut s = Map::new();
+        s.insert("name".into(), json!(name));
+        if let Some(distro) = parse_os_release_id(&os_release) {
+            s.insert("distro".into(), json!(distro));
+        }
+        if let Some(suite) = parse_kv(&os_release, "VERSION_CODENAME") {
+            s.insert("suite".into(), json!(suite));
+        }
+        let sources = std::fs::read_to_string(format!("{base}/etc/apt/sources.list")).unwrap_or_default();
+        if let Some(mirror) = parse_first_deb_mirror(&sources) {
+            s.insert("mirror".into(), json!(mirror));
+        }
+        let expose = exposed_binaries(&name);
+        if !expose.is_empty() {
+            s.insert("expose".into(), json!(expose));
+        }
+        out.push(Value::Object(s));
+    }
+    out
+}
+
+/// The distro id from an os-release (`ID=debian` → `debian`).
+fn parse_os_release_id(content: &str) -> Option<String> {
+    parse_kv(content, "ID")
+}
+
+/// The first real package mirror in a Debian/Ubuntu `sources.list`
+/// (`deb https://deb.debian.org/debian bookworm main` → the URL). Skips
+/// comments and one-line `deb-src`.
+fn parse_first_deb_mirror(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.starts_with("deb ") {
+            continue;
+        }
+        if let Some(url) = line.split_whitespace().find(|w| w.contains("://")) {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
+/// The binaries a stratum exposes, recovered from its generated shims: every
+/// `/bedrock/bin/*` shim that hands off to this stratum's enter-helper, mapped
+/// back to the bare binary name it runs. Deduplicated (a bare shim and its
+/// `<stratum>-<bin>` alias both point here).
+fn exposed_binaries(stratum: &str) -> Vec<String> {
+    const BIN: &str = "/bedrock/bin";
+    let Ok(entries) = std::fs::read_dir(BIN) else {
+        return Vec::new();
+    };
+    let mut bins: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        let content = std::fs::read_to_string(e.path()).unwrap_or_default();
+        if let Some(bin) = parse_shim_binary(&content, stratum) {
+            if !bins.contains(&bin) {
+                bins.push(bin);
+            }
+        }
+    }
+    bins.sort();
+    bins
+}
+
+/// Extract the bare binary name a shim runs *for a given stratum*, from the shim
+/// body `exec sudo /bedrock/libexec/enter-<stratum> '<bin>' "$@"`. Returns None
+/// if the shim targets a different stratum.
+fn parse_shim_binary(content: &str, stratum: &str) -> Option<String> {
+    let needle = format!("enter-{stratum} ");
+    let after = content.split_once(&needle)?.1;
+    let quoted = after.split_once('\'')?.1;
+    let bin = quoted.split_once('\'')?.0;
+    (!bin.is_empty()).then(|| bin.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -436,5 +546,27 @@ mod tests {
         for p in ["base", "base-devel", "sudo", "git", "paru", "linux-firmware"] {
             assert!(base.iter().any(|b| b == p), "missing {p}");
         }
+    }
+
+    #[test]
+    fn strata_os_release_and_mirror_parse() {
+        let os = "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_CODENAME=bookworm\n";
+        assert_eq!(parse_os_release_id(os).as_deref(), Some("debian"));
+        assert_eq!(parse_kv(os, "VERSION_CODENAME").as_deref(), Some("bookworm"));
+
+        let sources = "# comment\ndeb-src https://x/y bookworm main\ndeb https://deb.debian.org/debian bookworm main\n";
+        assert_eq!(
+            parse_first_deb_mirror(sources).as_deref(),
+            Some("https://deb.debian.org/debian")
+        );
+        assert_eq!(parse_first_deb_mirror("# only comments\n"), None);
+    }
+
+    #[test]
+    fn strata_shim_binary_parse_is_stratum_scoped() {
+        let shim = "#!/bin/sh\n# generated\nexec sudo /bedrock/libexec/enter-debian 'apt' \"$@\"\n";
+        assert_eq!(parse_shim_binary(shim, "debian").as_deref(), Some("apt"));
+        // A shim for a different stratum must not match.
+        assert_eq!(parse_shim_binary(shim, "ubuntu"), None);
     }
 }
