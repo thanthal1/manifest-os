@@ -114,6 +114,14 @@ pub struct Manifest {
     /// Flatpak remotes and apps to install system-wide.
     pub flatpak: Option<Flatpak>,
 
+    /// Foreign-distro **strata** — full rootfs installs of another distro under
+    /// the Arch host (`/bedrock/strata/<name>`), whose package managers and
+    /// binaries are exposed on the host PATH via generated shims. Binary access,
+    /// not a merged OS: never booted, PID 1 stays Arch's systemd. glibc distros
+    /// (Debian/Ubuntu) are supported first; see `docs/strata-design.md`.
+    #[serde(default)]
+    pub strata: Vec<Stratum>,
+
     /// Default applications and MIME associations for the primary user.
     pub defaults: Option<Defaults>,
 
@@ -354,6 +362,67 @@ impl Flatpak {
 pub struct FlatpakRemote {
     pub name: String,
     pub url: String,
+}
+
+/// A foreign-distro stratum: a rootfs bootstrapped with that distro's own tool,
+/// entered (never booted) via a private-mount-namespace chroot, and exposed on
+/// the host PATH one binary at a time. See [`crate::strata`] and
+/// `docs/strata-design.md`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Stratum {
+    /// Stratum id → directory name (`/bedrock/strata/<name>`) and shim namespace.
+    /// Keep it a bare word (`debian`, `ubuntu-noble`); it names files.
+    pub name: String,
+
+    /// Which distro this is → selects the bootstrap backend. Phase 1 supports
+    /// `debian`/`ubuntu` (debootstrap, glibc). `fedora`/`alpine` parse but are
+    /// not yet implemented and error at apply time with a clear message.
+    pub distro: String,
+
+    /// Release/suite to bootstrap (`bookworm`, `noble`, …). Backend-specific;
+    /// defaults per distro when omitted.
+    #[serde(default)]
+    pub suite: Option<String>,
+
+    /// Package mirror. Defaults to the distro's canonical mirror. When
+    /// [`snapshot`](Self::snapshot) is set this is overridden by the snapshot
+    /// archive URL for reproducibility.
+    #[serde(default)]
+    pub mirror: Option<String>,
+
+    /// Reproducibility pin — a snapshot timestamp (e.g. `"20260701T000000Z"`)
+    /// routing the bootstrap through the distro's time-stamped archive so the
+    /// rootfs is reproducible. Omit and the stratum is "latest at install time"
+    /// (a loud warning is printed). See `docs/strata-design.md` §6.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+
+    /// Packages installed **inside** the stratum with **its own** package
+    /// manager, right after bootstrap.
+    #[serde(default)]
+    pub packages: Vec<String>,
+
+    /// Binaries to shim onto the host PATH (an explicit allowlist — never a
+    /// blanket union). Bare names, resolved against the stratum's own PATH at
+    /// run time (so `/usr/bin` vs `/bin` needn't be guessed).
+    #[serde(default)]
+    pub expose: Vec<String>,
+
+    /// Which host↔stratum bind-shares to set up: any of `home`, `resolv`,
+    /// `tmp`, `x11`, `wayland`. Empty ⇒ the sensible default set
+    /// ([`crate::strata::DEFAULT_SHARES`]). `proc`/`sys`/`dev`/`run` are always
+    /// shared and not listed here.
+    #[serde(default)]
+    pub share: Vec<String>,
+}
+
+impl Stratum {
+    /// A stratum is "empty" (skippable) only if it has no name — every other
+    /// field has a useful default. In practice the install gate is
+    /// `!manifest.strata.is_empty()`, so this is mostly for symmetry.
+    pub fn is_empty(&self) -> bool {
+        self.name.trim().is_empty()
+    }
 }
 
 /// User-level default app choices. `browser` expands to the standard browser

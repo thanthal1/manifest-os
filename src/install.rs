@@ -25,6 +25,7 @@ use crate::manifest::Manifest;
 use crate::pacman;
 use crate::scaling;
 use crate::snippets;
+use crate::strata;
 use crate::system;
 use crate::theming;
 use crate::users;
@@ -137,6 +138,15 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         if let Some(fp) = &manifest.flatpak {
             step("Installing Flatpak apps");
             flatpak::apply(fp, ctx)?;
+        }
+
+        // Foreign-distro strata: bootstrap each rootfs, install its own packages,
+        // and shim the exposed binaries onto the host PATH. After packages (its
+        // host tools are ordinary packages) and before post_install (a hook can
+        // then lean on a shimmed binary). See docs/strata-design.md.
+        if !manifest.strata.is_empty() {
+            step("Setting up strata");
+            strata::apply(&manifest.strata, ctx)?;
         }
     }
 
