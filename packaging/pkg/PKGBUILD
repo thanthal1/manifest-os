@@ -14,7 +14,7 @@
 pkgbase=manifest-os
 pkgname=(manifest-os manifest-os-gui manifest-os-plugins manifest-os-examples)
 pkgver="${MANIFEST_PKGVER:-0.1.0}"
-pkgrel=6
+pkgrel=7
 pkgdesc="Declare a complete Arch system in one manifest.json and reproduce it anywhere"
 arch=('x86_64')
 url="https://github.com/thanthal1/manifest-os"

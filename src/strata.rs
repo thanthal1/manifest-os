@@ -506,16 +506,19 @@ fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str, keyring: Option<&str
 }
 
 /// The `debootstrap` command line. `--variant=minbase` keeps the rootfs small.
-/// `--keyring=<path>` is passed explicitly so signatures are actually verified:
-/// debootstrap does NOT fail on a missing keyring, it warns and bootstraps
-/// unverified, so [`ensure_keyring`] installs the keyring and we point at it here
-/// (never `--no-check-gpg` — a manifest disabling verification is a marketplace
-/// finding, see docs §9).
+/// `--arch=amd64` is passed explicitly: without `dpkg` on the host, debootstrap's
+/// arch auto-detect falls back to `uname -m` → `x86_64`, which Debian doesn't
+/// recognize (`Unknown architecture: x86_64`) — it wants `amd64`. Our ISO is
+/// x86_64-only, so amd64 is correct for both Debian and Ubuntu. `--keyring=<path>`
+/// is passed so signatures are actually verified: debootstrap does NOT fail on a
+/// missing keyring, it warns and bootstraps unverified, so [`ensure_keyring`]
+/// installs the keyring and we point at it here (never `--no-check-gpg` — a
+/// manifest disabling verification is a marketplace finding, see docs §9).
 fn debootstrap_cmd(s: &Stratum, root: &str, keyring: &str) -> String {
     let suite = s.suite.clone().unwrap_or_else(|| default_suite(&s.distro).to_string());
     let mirror = resolve_mirror(s, Backend::Debootstrap);
     format!(
-        "debootstrap --variant=minbase --keyring={} {} {} {}",
+        "debootstrap --variant=minbase --arch=amd64 --keyring={} {} {} {}",
         shell_quote(keyring),
         shell_quote(&suite),
         shell_quote(root),
@@ -813,6 +816,8 @@ mod tests {
         let (_, keyring) = keyring_for("debian").unwrap();
         let cmd = debootstrap_cmd(&s, "/strata/debian", keyring);
         assert!(cmd.contains("debootstrap --variant=minbase"), "{cmd}");
+        // Explicit arch: without dpkg, debootstrap can't map x86_64 → amd64 itself.
+        assert!(cmd.contains("--arch=amd64"), "{cmd}");
         assert!(cmd.contains("'bookworm'"), "{cmd}");
         assert!(cmd.contains("'/strata/debian'"), "{cmd}");
         assert!(cmd.contains("'https://deb.debian.org/debian'"), "{cmd}");
