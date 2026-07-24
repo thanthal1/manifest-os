@@ -115,7 +115,7 @@ pub struct Manifest {
     pub flatpak: Option<Flatpak>,
 
     /// Foreign-distro **strata** — full rootfs installs of another distro under
-    /// the Arch host (`/bedrock/strata/<name>`), whose package managers and
+    /// the Arch host (`/strata/<name>`), whose package managers and
     /// binaries are exposed on the host PATH via generated shims. Binary access,
     /// not a merged OS: never booted, PID 1 stays Arch's systemd. glibc distros
     /// (Debian/Ubuntu) are supported first; see `docs/strata-design.md`.
@@ -370,7 +370,7 @@ pub struct FlatpakRemote {
 /// `docs/strata-design.md`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Stratum {
-    /// Stratum id → directory name (`/bedrock/strata/<name>`) and shim namespace.
+    /// Stratum id → directory name (`/strata/<name>`) and shim namespace.
     /// Keep it a bare word (`debian`, `ubuntu-noble`); it names files.
     pub name: String,
 

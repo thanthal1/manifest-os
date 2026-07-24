@@ -211,7 +211,7 @@ fn capture() -> Value {
         m.insert("users".into(), json!(users));
     }
 
-    // foreign-distro strata (Bedrock-style) under /bedrock/strata.
+    // foreign-distro strata (Bedrock-style) under /strata.
     let strata = capture_strata();
     if !strata.is_empty() {
         m.insert("strata".into(), json!(strata));
@@ -234,7 +234,7 @@ fn capture() -> Value {
 /// rootfs from the same distro/suite/mirror; declared packages would need
 /// re-listing.
 fn capture_strata() -> Vec<Value> {
-    const ROOT: &str = "/bedrock/strata";
+    const ROOT: &str = "/strata";
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(ROOT) else {
         return out;
@@ -292,11 +292,11 @@ fn parse_first_deb_mirror(content: &str) -> Option<String> {
 }
 
 /// The binaries a stratum exposes, recovered from its generated shims: every
-/// `/bedrock/bin/*` shim that hands off to this stratum's enter-helper, mapped
+/// `/strata/.bin/*` shim that hands off to this stratum's enter-helper, mapped
 /// back to the bare binary name it runs. Deduplicated (a bare shim and its
 /// `<stratum>-<bin>` alias both point here).
 fn exposed_binaries(stratum: &str) -> Vec<String> {
-    const BIN: &str = "/bedrock/bin";
+    const BIN: &str = "/strata/.bin";
     let Ok(entries) = std::fs::read_dir(BIN) else {
         return Vec::new();
     };
@@ -314,7 +314,7 @@ fn exposed_binaries(stratum: &str) -> Vec<String> {
 }
 
 /// Extract the bare binary name a shim runs *for a given stratum*, from the shim
-/// body `exec sudo /bedrock/libexec/enter-<stratum> '<bin>' "$@"`. Returns None
+/// body `exec sudo /strata/.libexec/enter-<stratum> '<bin>' "$@"`. Returns None
 /// if the shim targets a different stratum.
 fn parse_shim_binary(content: &str, stratum: &str) -> Option<String> {
     let needle = format!("enter-{stratum} ");
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn strata_shim_binary_parse_is_stratum_scoped() {
-        let shim = "#!/bin/sh\n# generated\nexec sudo /bedrock/libexec/enter-debian 'apt' \"$@\"\n";
+        let shim = "#!/bin/sh\n# generated\nexec sudo /strata/.libexec/enter-debian 'apt' \"$@\"\n";
         assert_eq!(parse_shim_binary(shim, "debian").as_deref(), Some("apt"));
         // A shim for a different stratum must not match.
         assert_eq!(parse_shim_binary(shim, "ubuntu"), None);

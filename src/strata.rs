@@ -1,6 +1,6 @@
 //! Foreign-distro **strata** — Bedrock-style multi-distro binary access.
 //!
-//! A stratum is a full foreign-distro rootfs living under `/bedrock/strata/<name>`.
+//! A stratum is a full foreign-distro rootfs living under `/strata/<name>`.
 //! It is **never booted**: Arch's systemd stays PID 1, and we `chroot` into a
 //! stratum only to install and run its packages. Each exposed binary gets a
 //! generated **shim** on the host PATH that enters the stratum (in a private
@@ -22,13 +22,15 @@ use crate::exec::Ctx;
 use crate::manifest::Stratum;
 use anyhow::{bail, Result};
 
-/// Where strata rootfs trees live. Borrowed from Bedrock's layout convention;
-/// we are *not* Bedrock-compatible beyond this path.
-const STRATA_ROOT: &str = "/bedrock/strata";
-/// Generated per-stratum "enter" helpers.
-const LIBEXEC_DIR: &str = "/bedrock/libexec";
-/// Generated shims, added to PATH via a profile.d drop-in.
-const BIN_DIR: &str = "/bedrock/bin";
+/// Where strata rootfs trees live — one per stratum, `/strata/<name>`. (The
+/// concept and this layout are inspired by Bedrock Linux, but there's no Bedrock
+/// code here; the path is our own, not `/bedrock`.)
+const STRATA_ROOT: &str = "/strata";
+/// Generated per-stratum "enter" helpers. A dot-dir so it isn't mistaken for a
+/// stratum (and export's os-release scan skips it).
+const LIBEXEC_DIR: &str = "/strata/.libexec";
+/// Generated shims, added to PATH. A dot-dir for the same reason as libexec.
+const BIN_DIR: &str = "/strata/.bin";
 /// profile.d drop-in that puts [`BIN_DIR`] on every login shell's PATH.
 const PROFILE_D: &str = "/etc/profile.d/00-manifest-strata.sh";
 
@@ -105,7 +107,7 @@ pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
     ensure_host_tools(strata, ctx)?;
 
     // Resolve bare-name shim ownership once, across all strata: two strata that
-    // expose the same binary name would otherwise collide at /bedrock/bin/<name>
+    // expose the same binary name would otherwise collide at /strata/.bin/<name>
     // (last applied silently wins). First in manifest order gets the bare name;
     // every exposed binary also gets an unambiguous <stratum>-<bin> alias.
     let bare_winners: std::collections::HashSet<(String, String)> =
@@ -630,7 +632,7 @@ fn shim_script(stratum: &str, bin: &str) -> String {
 
 /// The strata shell-integration text, sourced by *interactive* bash and zsh
 /// (profile.d is not enough — zsh never reads it, and it only covers login
-/// shells). It puts the exposed-binary dir (`/bedrock/bin`) on PATH so shimmed
+/// shells). It puts the exposed-binary dir (`/strata/.bin`) on PATH so shimmed
 /// foreign binaries are findable in a normal terminal, and installs a
 /// command-not-found handler that maps an uninstalled package manager to its
 /// distro, offers to add a stratum, then makes the new shim usable in the
@@ -641,8 +643,8 @@ fn cnf_handler_script() -> &'static str {
     "# ManifestOS strata — shell integration (PATH + command-not-found).\n\
      # Generated; edits are overwritten. Sourced by interactive bash/zsh.\n\
      case \":$PATH:\" in\n  \
-       *:/bedrock/bin:*) ;;\n  \
-       *) PATH=\"/bedrock/bin:$PATH\"; export PATH ;;\n\
+       *:/strata/.bin:*) ;;\n  \
+       *) PATH=\"/strata/.bin:$PATH\"; export PATH ;;\n\
      esac\n\
      __manifest_cnf() {\n  \
        cmd=$1\n  \
@@ -658,7 +660,7 @@ fn cnf_handler_script() -> &'static str {
          case $__r in\n      \
            [yY]|[yY][eE][sS])\n        \
              sudo manifest strata add \"$distro\" --expose \"$cmd\" || return $?\n        \
-             case \":$PATH:\" in *:/bedrock/bin:*) ;; *) PATH=\"/bedrock/bin:$PATH\"; export PATH ;; esac\n        \
+             case \":$PATH:\" in *:/strata/.bin:*) ;; *) PATH=\"/strata/.bin:$PATH\"; export PATH ;; esac\n        \
              hash -r 2>/dev/null\n        \
              \"$@\"\n        \
              return $?\n        \
@@ -778,10 +780,10 @@ mod tests {
         let mut s = stratum("debian", "debian");
         s.suite = Some("bookworm".into());
         let (_, keyring) = keyring_for("debian").unwrap();
-        let cmd = debootstrap_cmd(&s, "/bedrock/strata/debian", keyring);
+        let cmd = debootstrap_cmd(&s, "/strata/debian", keyring);
         assert!(cmd.contains("debootstrap --variant=minbase"), "{cmd}");
         assert!(cmd.contains("'bookworm'"), "{cmd}");
-        assert!(cmd.contains("'/bedrock/strata/debian'"), "{cmd}");
+        assert!(cmd.contains("'/strata/debian'"), "{cmd}");
         assert!(cmd.contains("'https://deb.debian.org/debian'"), "{cmd}");
         // Signature verification must be enforced: an explicit --keyring, never
         // --no-check-gpg (debootstrap silently skips verification without one).
@@ -829,10 +831,10 @@ mod tests {
     fn dnf_bootstrap_verifies_and_pins_releasever() {
         // Default release when suite is unset.
         let s = stratum("fedora", "fedora");
-        let cmd = dnf_bootstrap_cmd(&s, "/bedrock/strata/fedora");
+        let cmd = dnf_bootstrap_cmd(&s, "/strata/fedora");
         assert!(cmd.contains("dnf5 -y"), "must use dnf5 (dnf4 conflicts): {cmd}");
         assert!(cmd.contains(&format!("--releasever='{FEDORA_DEFAULT_RELEASE}'")), "{cmd}");
-        assert!(cmd.contains("--installroot='/bedrock/strata/fedora'"), "{cmd}");
+        assert!(cmd.contains("--installroot='/strata/fedora'"), "{cmd}");
         assert!(cmd.contains("--setopt=install_weak_deps=False"), "{cmd}");
         assert!(cmd.contains("--setopt=reposdir="), "{cmd}");
         // Default source is the metalink (mirror failover), for both repos.
@@ -923,14 +925,14 @@ mod tests {
     fn shim_hands_off_to_the_enter_helper() {
         let shim = shim_script("debian", "apt");
         assert!(shim.starts_with("#!/bin/sh"), "{shim}");
-        assert!(shim.contains("exec sudo /bedrock/libexec/enter-debian 'apt' \"$@\""), "{shim}");
+        assert!(shim.contains("exec sudo /strata/.libexec/enter-debian 'apt' \"$@\""), "{shim}");
     }
 
     #[test]
     fn cnf_handler_maps_pkg_managers_and_defines_both_hooks() {
         let s = cnf_handler_script();
         // Puts the shim dir on PATH (the whole point — profile.d doesn't reach zsh).
-        assert!(s.contains("PATH=\"/bedrock/bin:$PATH\""), "{s}");
+        assert!(s.contains("PATH=\"/strata/.bin:$PATH\""), "{s}");
         assert!(s.contains("apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian"), "{s}");
         assert!(s.contains("dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora"), "{s}");
         // Only bootstrappable distros are offered (no alpine → no dead-end offer).
@@ -944,7 +946,7 @@ mod tests {
     #[test]
     fn profile_d_prepends_bin_dir_idempotently() {
         let p = profile_d_script();
-        assert!(p.contains("/bedrock/bin"), "{p}");
+        assert!(p.contains("/strata/.bin"), "{p}");
         assert!(p.contains("case \":$PATH:\""), "{p}"); // guarded against double-add
     }
 

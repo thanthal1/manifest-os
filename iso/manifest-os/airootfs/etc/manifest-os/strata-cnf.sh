@@ -5,11 +5,11 @@
 # install; this baked copy is what makes the *live* ISO session behave the same.
 #
 # Sourced by interactive bash/zsh. Does two things: puts exposed foreign-distro
-# binaries (/bedrock/bin) on PATH, and offers to add a stratum when an
+# binaries (/strata/.bin) on PATH, and offers to add a stratum when an
 # uninstalled package manager is typed.
 case ":$PATH:" in
-  *:/bedrock/bin:*) ;;
-  *) PATH="/bedrock/bin:$PATH"; export PATH ;;
+  *:/strata/.bin:*) ;;
+  *) PATH="/strata/.bin:$PATH"; export PATH ;;
 esac
 __manifest_cnf() {
   cmd=$1
@@ -25,7 +25,7 @@ __manifest_cnf() {
     case $__r in
       [yY]|[yY][eE][sS])
         sudo manifest strata add "$distro" --expose "$cmd" || return $?
-        case ":$PATH:" in *:/bedrock/bin:*) ;; *) PATH="/bedrock/bin:$PATH"; export PATH ;; esac
+        case ":$PATH:" in *:/strata/.bin:*) ;; *) PATH="/strata/.bin:$PATH"; export PATH ;; esac
         hash -r 2>/dev/null
         "$@"
         return $?

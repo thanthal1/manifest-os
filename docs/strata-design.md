@@ -31,13 +31,13 @@ entered with our **existing** standard tool (`arch-chroot`, already used in
 No bespoke daemon, no FUSE, no PID-1 takeover in v1.
 
 ```
-/bedrock/strata/arch      ← the host itself (the implicit "init" stratum)
-/bedrock/strata/debian    ← debootstrap'd Debian rootfs      (glibc)
-/bedrock/strata/alpine    ← Alpine rootfs   (musl — Phase 3, hardest)
+/strata/arch      ← the host itself (the implicit "init" stratum)
+/strata/debian    ← debootstrap'd Debian rootfs      (glibc)
+/strata/alpine    ← Alpine rootfs   (musl — Phase 3, hardest)
 
-/bedrock/bin/apt   ─┐
-/bedrock/bin/dpkg   ├─ generated exec-shims, on the host PATH, each chroots
-/bedrock/bin/gcc   ─┘   into its stratum and execs the real binary
+/strata/.bin/apt   ─┐
+/strata/.bin/dpkg   ├─ generated exec-shims, on the host PATH, each chroots
+/strata/.bin/gcc   ─┘   into its stratum and execs the real binary
 ```
 
 ---
@@ -158,7 +158,7 @@ reason it isn't a quick add: a chroot-exec systemd unit —
 ```ini
 # host unit that would "proxy" a foreign daemon
 [Service]
-ExecStart=/usr/bin/arch-chroot /bedrock/strata/debian /usr/bin/foo --foreground
+ExecStart=/usr/bin/arch-chroot /strata/debian /usr/bin/foo --foreground
 ```
 
 — only works for a *simple, foregroundable* daemon. Anything using `Type=notify`
@@ -210,7 +210,7 @@ declarative block the engine orchestrates. Proposed shape:
 
 | Field | Meaning |
 |---|---|
-| `name` | stratum id → dir name (`/bedrock/strata/<name>`) and shim namespace |
+| `name` | stratum id → dir name (`/strata/<name>`) and shim namespace |
 | `distro` | selects the bootstrap backend (`debian`/`ubuntu` → debootstrap; `fedora` → dnf; `alpine` → apk static). The **only** place distro branching lives. |
 | `suite` | release (`bookworm`, `noble`, `40`, `edge`) |
 | `mirror` | package mirror; defaults per-distro |
@@ -310,7 +310,7 @@ anything that might want a foreign binary on PATH. Concretely:
   [`gestures.rs`](../src/gestures.rs)).
 - **Before `post_install`** so an author's hook can lean on a shim.
 - Each sub-step **idempotent** (the `pacman.rs`/`flatpak.rs` house rule): skip
-  bootstrap if `/bedrock/strata/<name>/etc/os-release` exists; `--needed`-style
+  bootstrap if `/strata/<name>/etc/os-release` exists; `--needed`-style
   skip for in-stratum installs; regenerate shims wholesale (cheap, declarative).
 
 ### 7.1 Persistence of bind mounts
@@ -453,7 +453,7 @@ into `src/`. Reassess whether shims already covered the real use cases.
 ## 12. What this is *not*
 
 - Not a fork of Bedrock and not Bedrock-compatible (no `brl`, no `/bedrock/cross`,
-  no PID-1 takeover). We borrow the *strata* idea and the `/bedrock/strata` layout
+  no PID-1 takeover). We borrow the *strata* idea and the `/strata` layout
   convention, nothing more.
 - Not a way to *boot* another distro — strata are never init targets.
 - Not a general containerization story — no isolation is the *point*; foreign
