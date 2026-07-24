@@ -1,20 +1,19 @@
 # Strata — multi-distro package access (design)
 
-> Status: **Phases 1–3 built + real-hardware-validated; shipped as `manifest-os`
-> 0.1.0-9** (2026-07-24). Debian, Ubuntu, and Fedora strata bootstrap verified
-> (incl. the CachyOS/hwcaps arch fix — install `dpkg` so debootstrap gets a clean
-> host arch). CLI + **TUI** (htop/ncdu, host terminfo bound) + **GUI** foreign
-> apps run from one PATH alongside `pacman`; `apt install X` auto-exposes `X`.
-> Paths are **`/strata/<name>`** (renamed off `/bedrock`). Shell integration
-> (PATH + command-not-found offer) loads in interactive zsh/bash. GUI/user
-> binaries run as the invoking user with terminfo + Wayland/X display env
-> forwarded (setpriv drop); package managers stay root. Mounts auto-clean.
-> **Remaining before Phase 5:** (a) GUI *launch ergonomics* — passwordless
-> enter-helper + `.desktop` menu entries so GUI apps launch from the app menu, not
-> just a terminal (today they need a sudo prompt); (b) Alpine (musl) backend — the
-> only unimplemented distro; (c) System Snapshots UI awareness (Phase 2); (d)
-> crossfs polish (Phase 4 — only if demand; GUI works without it). Draft 1.
-> Owner: (you).
+> Status: **Phases 1–3 complete + real-hardware-validated; shipped as `manifest-os`
+> 0.1.0-12** (2026-07-24). **All four distros — Debian, Ubuntu, Fedora, Alpine —**
+> bootstrap verified (incl. the CachyOS/hwcaps arch fix — install `dpkg` for a
+> clean host arch; Alpine downloads apk.static + keys from the CDN, verified).
+> CLI + **TUI** (host terminfo bound) + **GUI** foreign apps run from one PATH
+> alongside `pacman`; `apt`/`dnf`/`apk` install auto-exposes the binaries and
+> mirrors their `.desktop` into the app menu; GUI apps **launch from the menu, one
+> click, no password** (passwordless enter-helper guarded by `$SUDO_UID` so a
+> caller can only run as themselves). GUI/user binaries run as the invoking user
+> with host **fonts + icons** bound in (a minimal rootfs ships none) and the
+> Wayland/X display env forwarded; package managers stay root. Command-not-found
+> offers the right distro for `apt`/`dnf`/`apk`. Paths are **`/strata/<name>`**.
+> **Remaining before Phase 5:** System Snapshots UI awareness (Phase 2, low), and
+> crossfs (Phase 4 — only if demand; shims cover the cases). Draft 1. Owner: (you).
 > Cross-refs: [`src/flatpak.rs`](../src/flatpak.rs) (the module this copies its
 > shape from), [`src/install.rs`](../src/install.rs) (`apply()` step order),
 > [`src/exec.rs`](../src/exec.rs) (`Ctx`), [`src/plugins.rs`](../src/plugins.rs)
