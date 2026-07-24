@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
-use manifest::{desktop, diff, export, history, install, installer, kernel, pkglock, survey, tui};
+use manifest::{desktop, diff, export, history, install, installer, kernel, pkglock, strata, survey, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -58,6 +58,12 @@ enum Command {
         /// (/etc/manifest-os/system.json) after every package change.
         #[arg(long)]
         install_hook: bool,
+    },
+    /// Manage foreign-distro strata (Debian/Ubuntu/Fedora binaries on the host
+    /// PATH). See `docs/strata-design.md`.
+    Strata {
+        #[command(subcommand)]
+        action: StrataAction,
     },
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
@@ -260,6 +266,26 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum StrataAction {
+    /// Bootstrap a stratum for <distro> and expose its binaries on the host PATH,
+    /// then record the updated system manifest. This is what the command-not-found
+    /// helper runs when you accept its offer to add e.g. Debian for `apt`.
+    Add {
+        /// debian | ubuntu | fedora  (alpine isn't supported yet).
+        distro: String,
+        /// A binary to put on the host PATH, repeatable (e.g. --expose apt).
+        #[arg(long)]
+        expose: Vec<String>,
+        /// Release/suite to bootstrap (bookworm, noble, 42). Defaults per distro.
+        #[arg(long)]
+        suite: Option<String>,
+        /// Stratum name — its dir + shim namespace. Defaults to <distro>.
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("\nerror: {e:#}");
@@ -280,6 +306,7 @@ fn run() -> Result<()> {
             history::record(&json, &manifest.meta.name, &ctx);
             Ok(())
         }
+        Command::Strata { action } => strata_add(action),
         Command::Sync {
             file,
             dry_run,
@@ -589,6 +616,52 @@ fn run() -> Result<()> {
 /// answers, and fold in any conditional packages. Returns the parsed manifest
 /// plus the final substituted JSON (recorded into the rollback history so a
 /// re-apply reproduces exactly this state). Shared by `install` and `sync`.
+/// `manifest strata add <distro>` — add a stratum to this system and apply it.
+/// Bases off the current system captured as a manifest (so existing strata are
+/// preserved), upserts the new stratum, applies just the strata step (bootstrap
+/// + shims), and records the updated manifest to the rollback history.
+fn strata_add(action: StrataAction) -> Result<()> {
+    let StrataAction::Add {
+        distro,
+        expose,
+        suite,
+        name,
+    } = action;
+    let ctx = Ctx::new(false);
+    let name = name.unwrap_or_else(|| distro.clone());
+
+    let mut root = export::capture_value();
+    export::add_stratum(&mut root, &name, &distro, suite.as_deref(), &expose);
+
+    // Apply only the strata (bootstrap the new rootfs + regenerate shims) — not
+    // the whole install pipeline.
+    let strata_val = root.get("strata").cloned().unwrap_or_else(|| serde_json::json!([]));
+    let strata: Vec<manifest::manifest::Stratum> = serde_json::from_value(strata_val)
+        .context("re-reading the strata list after adding one")?;
+    strata::apply(&strata, &ctx)?;
+    // Refresh the shell integration (PATH + command-not-found) so re-running
+    // `strata add` on an older system also updates it.
+    strata::write_cnf_handler(&ctx)?;
+
+    // Record the updated system manifest so rollback/diff see the new stratum.
+    let json = serde_json::to_string_pretty(&root)? + "\n";
+    let mname = root
+        .get("meta")
+        .and_then(|m| m.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("system")
+        .to_string();
+    history::record(&json, &mname, &ctx);
+    println!("\n✓ stratum '{name}' ({distro}) added.");
+    let exposed = if expose.is_empty() { String::new() } else { format!(" ({})", expose.join(", ")) };
+    println!(
+        "  · exposed binaries{exposed} are on PATH in new shells. To use them now:\n\
+         \x20     exec $SHELL   # or open a new terminal\n\
+         \x20   Run them WITHOUT sudo — the shim elevates itself."
+    );
+    Ok(())
+}
+
 fn load_manifest(
     file: &std::path::Path,
     answers: Option<&std::path::Path>,

@@ -1,0 +1,5 @@
+# ManifestOS live session — zsh local rc (sourced by grml-zsh-config's
+# /etc/zsh/zshrc, which owns the main file). Loads the strata command-not-found
+# handler so typing an uninstalled `apt`/`dnf` in the live environment offers to
+# add that distro. zsh never sources /etc/profile.d, so it must be wired here.
+[ -r /etc/manifest-os/strata-cnf.sh ] && . /etc/manifest-os/strata-cnf.sh  # manifest-os-strata-cnf

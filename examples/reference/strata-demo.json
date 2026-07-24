@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Strata demo (Arch + Debian)",
+    "author": "you",
+    "description": "Multi-distro binary access: an Arch host with a Debian stratum whose apt/dpkg/gcc are exposed on the host PATH. Phase 1 (glibc, debootstrap). See docs/strata-design.md.",
+    "tags": ["strata", "multi-distro", "reference"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "packages": [
+    "git",
+    "neovim"
+  ],
+  "strata": [
+    {
+      "name": "debian",
+      "distro": "debian",
+      "suite": "bookworm",
+      "snapshot": "20260701T000000Z",
+      "packages": ["build-essential", "apt-file"],
+      "expose": ["apt", "dpkg", "gcc", "make"],
+      "share": ["home", "resolv", "tmp", "x11", "wayland"]
+    }
+  ]
+}

@@ -401,8 +401,8 @@ CORE_KEYS = {
     "schema_version", "meta", "system", "repos", "packages", "services",
     "dotfiles", "desktop", "display_manager", "boot", "variables", "survey",
     "settings", "conditional_packages", "conditional", "detect", "users",
-    "files", "snippets", "flatpak", "defaults", "wallpaper", "keybindings",
-    "theme", "display", "pre_install", "post_install", "plugins",
+    "files", "snippets", "flatpak", "strata", "defaults", "wallpaper", "keybindings",
+    "gestures", "theme", "display", "login", "pre_install", "post_install", "plugins",
 }
 
 
@@ -455,6 +455,78 @@ def scan_plugins(m, rep):
                 m.setdefault("repos", {}).update(b["repos"])
 
 
+# Canonical mirror/snapshot hosts per distro. A stratum pulling packages from
+# anywhere else is an untrusted foreign package source (supply-chain risk), the
+# same way a custom pacman repo is.
+STRATA_TRUSTED_HOSTS = {
+    "debian": ("deb.debian.org", "snapshot.debian.org", "ftp.debian.org",
+               "security.debian.org"),
+    "ubuntu": ("archive.ubuntu.com", "ports.ubuntu.com", "security.ubuntu.com",
+               "snapshot.ubuntu.com"),
+    "fedora": ("dl.fedoraproject.org", "download.fedoraproject.org",
+               "mirrors.fedoraproject.org"),
+    "alpine": ("dl-cdn.alpinelinux.org",),
+}
+# Exposing one of these from a foreign stratum onto the host PATH puts a
+# privilege/identity path in front of the host's own tooling — worth a flag.
+STRATA_RISKY_EXPOSE = {"sudo", "su", "doas", "passwd", "sh", "bash", "dash",
+                       "zsh", "env", "chroot", "mount", "pkexec"}
+
+
+def scan_strata(m, rep):
+    strata = m.get("strata") or []
+    if not strata:
+        return
+    for i, s in enumerate(strata):
+        if not isinstance(s, dict):
+            rep.add("HIGH", "strata", f"strata[{i}] is not an object",
+                    "Each stratum must be a JSON object.", "strata")
+            continue
+        name = s.get("name", f"#{i}")
+        distro = str(s.get("distro", "")).strip().lower()
+        where = f"strata[{i}] ({name})"
+
+        # A foreign rootfs runs its own package manager as root at install time —
+        # inherently a broad new trust surface, always worth surfacing.
+        rep.add("MEDIUM", "strata", f"bootstraps a `{distro or '?'}` stratum",
+                "Installs a full foreign-distro rootfs and runs its package "
+                "manager as root — a new, non-Arch trust surface. Confirm the "
+                "distro and mirror are intended.", where)
+
+        # Mirror / snapshot host trust: anything off the canonical hosts is an
+        # untrusted package source.
+        trusted = STRATA_TRUSTED_HOSTS.get(distro, ())
+        for field in ("mirror", "snapshot"):
+            val = s.get(field)
+            # snapshot is usually a bare timestamp (fine); only URL-shaped values
+            # carry a host to check.
+            if isinstance(val, str) and "://" in val:
+                host = re.sub(r"^\w+://([^/]+).*", r"\1", val).lower()
+                if trusted and not any(host == t or host.endswith("." + t) for t in trusted):
+                    rep.add("HIGH", "strata", f"untrusted {field} host `{host}`",
+                            f"Stratum `{name}` pulls packages from a host that "
+                            f"isn't a canonical {distro} mirror — an untrusted "
+                            "package source.", f"{where}.{field}")
+            if isinstance(val, str) and val.startswith("http://"):
+                rep.add("MEDIUM", "insecure URL", f"plain-HTTP {field} for stratum `{name}`",
+                        "Foreign packages fetched over unencrypted HTTP.", f"{where}.{field}")
+
+        # Never let a manifest disable the bootstrap's signature verification.
+        blob = json.dumps(s)
+        if "no-check-gpg" in blob or "--no-check-gpg" in blob or s.get("check_gpg") is False:
+            rep.add("CRITICAL", "strata", f"stratum `{name}` disables GPG verification",
+                    "Bootstrapping without signature checks accepts tampered "
+                    "packages — a supply-chain hole.", where)
+
+        # Risky exposed binaries.
+        for b in s.get("expose", []) or []:
+            if str(b).lower() in STRATA_RISKY_EXPOSE:
+                rep.add("HIGH", "strata", f"exposes `{b}` from stratum `{name}` onto the host PATH",
+                        "A shell/privilege/identity binary from a foreign stratum "
+                        "shadows or fronts the host's own — a privilege path the "
+                        "host tooling doesn't audit.", f"{where}.expose")
+
+
 def scan(manifest, check_packages=False):
     rep = Report()
     if not isinstance(manifest, dict):
@@ -467,6 +539,7 @@ def scan(manifest, check_packages=False):
     scan_users(manifest, rep)
     scan_sources(manifest, rep)
     scan_repos_boot(manifest, rep)
+    scan_strata(manifest, rep)
     scan_packages(manifest, rep, check=check_packages)
     return rep
 

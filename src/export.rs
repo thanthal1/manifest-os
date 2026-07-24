@@ -73,6 +73,55 @@ pub fn capture_manifest() -> crate::manifest::Manifest {
         .expect("captured manifest is always schema-valid")
 }
 
+/// The current system captured as a mutable manifest [`Value`], the base for
+/// `manifest strata add` (which adds a stratum and re-records the result).
+pub fn capture_value() -> Value {
+    capture()
+}
+
+/// Insert or update a stratum in a manifest [`Value`]. If one with `name` already
+/// exists, merge in the `expose` binaries (deduped) and leave the rest; otherwise
+/// append a new stratum. Ensures `root["strata"]` is an array. Pure — unit-tested.
+pub fn add_stratum(root: &mut Value, name: &str, distro: &str, suite: Option<&str>, expose: &[String]) {
+    let arr = root
+        .as_object_mut()
+        .expect("manifest root is a JSON object")
+        .entry("strata")
+        .or_insert_with(|| Value::Array(vec![]))
+        .as_array_mut()
+        .expect("strata is a JSON array");
+
+    if let Some(existing) = arr
+        .iter_mut()
+        .find(|s| s.get("name").and_then(Value::as_str) == Some(name))
+    {
+        let list = existing
+            .as_object_mut()
+            .expect("stratum is an object")
+            .entry("expose")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("expose is an array");
+        for b in expose {
+            if !list.iter().any(|v| v.as_str() == Some(b.as_str())) {
+                list.push(json!(b));
+            }
+        }
+        return;
+    }
+
+    let mut s = Map::new();
+    s.insert("name".into(), json!(name));
+    s.insert("distro".into(), json!(distro));
+    if let Some(su) = suite {
+        s.insert("suite".into(), json!(su));
+    }
+    if !expose.is_empty() {
+        s.insert("expose".into(), json!(expose));
+    }
+    arr.push(Value::Object(s));
+}
+
 /// Build the manifest describing the current system.
 fn capture() -> Value {
     let mut m = Map::new();
@@ -162,7 +211,117 @@ fn capture() -> Value {
         m.insert("users".into(), json!(users));
     }
 
+    // foreign-distro strata (Bedrock-style) under /strata.
+    let strata = capture_strata();
+    if !strata.is_empty() {
+        m.insert("strata".into(), json!(strata));
+    }
+
     Value::Object(m)
+}
+
+// ---------------------------------------------------------------------------
+// strata readers  (see src/strata.rs)
+// ---------------------------------------------------------------------------
+
+/// Reconstruct the `strata` block from what's installed under `/strata`. Each
+/// rootfs yields name (dir), distro + suite (its os-release) and mirror (its
+/// sources.list); the exposed-binary list comes back from the generated shims.
+///
+/// Not captured: in-stratum `packages` (which of a rootfs's packages were
+/// manifest-declared vs. pulled as base isn't cleanly recoverable) and any
+/// `snapshot` pin unless the mirror URL still encodes it. A re-apply rebuilds the
+/// rootfs from the same distro/suite/mirror; declared packages would need
+/// re-listing.
+fn capture_strata() -> Vec<Value> {
+    const ROOT: &str = "/strata";
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(ROOT) else {
+        return out;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().join("etc/os-release").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+
+    for name in names {
+        let base = format!("{ROOT}/{name}");
+        let os_release = std::fs::read_to_string(format!("{base}/etc/os-release")).unwrap_or_default();
+        let mut s = Map::new();
+        s.insert("name".into(), json!(name));
+        if let Some(distro) = parse_os_release_id(&os_release) {
+            s.insert("distro".into(), json!(distro));
+        }
+        if let Some(suite) = parse_kv(&os_release, "VERSION_CODENAME") {
+            s.insert("suite".into(), json!(suite));
+        }
+        let sources = std::fs::read_to_string(format!("{base}/etc/apt/sources.list")).unwrap_or_default();
+        if let Some(mirror) = parse_first_deb_mirror(&sources) {
+            s.insert("mirror".into(), json!(mirror));
+        }
+        let expose = exposed_binaries(&name);
+        if !expose.is_empty() {
+            s.insert("expose".into(), json!(expose));
+        }
+        out.push(Value::Object(s));
+    }
+    out
+}
+
+/// The distro id from an os-release (`ID=debian` → `debian`).
+fn parse_os_release_id(content: &str) -> Option<String> {
+    parse_kv(content, "ID")
+}
+
+/// The first real package mirror in a Debian/Ubuntu `sources.list`
+/// (`deb https://deb.debian.org/debian bookworm main` → the URL). Skips
+/// comments and one-line `deb-src`.
+fn parse_first_deb_mirror(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.starts_with("deb ") {
+            continue;
+        }
+        if let Some(url) = line.split_whitespace().find(|w| w.contains("://")) {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
+/// The binaries a stratum exposes, recovered from its generated shims: every
+/// `/strata/.bin/*` shim that hands off to this stratum's enter-helper, mapped
+/// back to the bare binary name it runs. Deduplicated (a bare shim and its
+/// `<stratum>-<bin>` alias both point here).
+fn exposed_binaries(stratum: &str) -> Vec<String> {
+    const BIN: &str = "/strata/.bin";
+    let Ok(entries) = std::fs::read_dir(BIN) else {
+        return Vec::new();
+    };
+    let mut bins: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        let content = std::fs::read_to_string(e.path()).unwrap_or_default();
+        if let Some(bin) = parse_shim_binary(&content, stratum) {
+            if !bins.contains(&bin) {
+                bins.push(bin);
+            }
+        }
+    }
+    bins.sort();
+    bins
+}
+
+/// Extract the bare binary name a shim runs *for a given stratum*, from the shim
+/// body `exec sudo /strata/.libexec/enter-<stratum> '<bin>' "$@"`. Returns None
+/// if the shim targets a different stratum.
+fn parse_shim_binary(content: &str, stratum: &str) -> Option<String> {
+    let needle = format!("enter-{stratum} ");
+    let after = content.split_once(&needle)?.1;
+    let quoted = after.split_once('\'')?.1;
+    let bin = quoted.split_once('\'')?.0;
+    (!bin.is_empty()).then(|| bin.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -436,5 +595,48 @@ mod tests {
         for p in ["base", "base-devel", "sudo", "git", "paru", "linux-firmware"] {
             assert!(base.iter().any(|b| b == p), "missing {p}");
         }
+    }
+
+    #[test]
+    fn strata_os_release_and_mirror_parse() {
+        let os = "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_CODENAME=bookworm\n";
+        assert_eq!(parse_os_release_id(os).as_deref(), Some("debian"));
+        assert_eq!(parse_kv(os, "VERSION_CODENAME").as_deref(), Some("bookworm"));
+
+        let sources = "# comment\ndeb-src https://x/y bookworm main\ndeb https://deb.debian.org/debian bookworm main\n";
+        assert_eq!(
+            parse_first_deb_mirror(sources).as_deref(),
+            Some("https://deb.debian.org/debian")
+        );
+        assert_eq!(parse_first_deb_mirror("# only comments\n"), None);
+    }
+
+    #[test]
+    fn add_stratum_appends_then_merges_expose() {
+        let mut root = json!({ "schema_version": "1.0.0", "meta": { "name": "t" } });
+        add_stratum(&mut root, "debian", "debian", Some("bookworm"), &["apt".into()]);
+        let arr = root["strata"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["distro"], "debian");
+        assert_eq!(arr[0]["suite"], "bookworm");
+        assert_eq!(arr[0]["expose"], json!(["apt"]));
+
+        // Same name → merge expose, dedup apt, keep one entry.
+        add_stratum(&mut root, "debian", "debian", None, &["apt".into(), "dpkg".into()]);
+        let arr = root["strata"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["expose"], json!(["apt", "dpkg"]));
+
+        // Different name → new entry.
+        add_stratum(&mut root, "fedora", "fedora", None, &["dnf".into()]);
+        assert_eq!(root["strata"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn strata_shim_binary_parse_is_stratum_scoped() {
+        let shim = "#!/bin/sh\n# generated\nexec sudo /strata/.libexec/enter-debian 'apt' \"$@\"\n";
+        assert_eq!(parse_shim_binary(shim, "debian").as_deref(), Some("apt"));
+        // A shim for a different stratum must not match.
+        assert_eq!(parse_shim_binary(shim, "ubuntu"), None);
     }
 }

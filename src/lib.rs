@@ -27,6 +27,7 @@ pub mod probe;
 pub mod scaling;
 pub mod segment;
 pub mod snippets;
+pub mod strata;
 pub mod survey;
 pub mod system;
 pub mod theming;
