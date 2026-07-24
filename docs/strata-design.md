@@ -1,14 +1,20 @@
 # Strata — multi-distro package access (design)
 
-> Status: **Phases 1–3 built + VM-validated; shipped as `manifest-os` 0.1.0-6**
-> (2026-07-23). Debian, Ubuntu, and Fedora strata bootstrap verified; CLI foreign
-> binaries run from one PATH alongside `pacman`. Paths are **`/strata/<name>`**
-> (renamed off `/bedrock` — inspired by Bedrock, no Bedrock code). Shell
-> integration (PATH + command-not-found offer) loads in interactive zsh/bash.
-> **GUI/user binaries run as the invoking user with the display env forwarded**
-> (setpriv drop + Wayland/X socket share); package managers stay root. Mounts
-> auto-clean. Remaining: passwordless/menu launch of GUI apps, Alpine (musl),
-> crossfs polish. Draft 1. Owner: (you).
+> Status: **Phases 1–3 built + real-hardware-validated; shipped as `manifest-os`
+> 0.1.0-9** (2026-07-24). Debian, Ubuntu, and Fedora strata bootstrap verified
+> (incl. the CachyOS/hwcaps arch fix — install `dpkg` so debootstrap gets a clean
+> host arch). CLI + **TUI** (htop/ncdu, host terminfo bound) + **GUI** foreign
+> apps run from one PATH alongside `pacman`; `apt install X` auto-exposes `X`.
+> Paths are **`/strata/<name>`** (renamed off `/bedrock`). Shell integration
+> (PATH + command-not-found offer) loads in interactive zsh/bash. GUI/user
+> binaries run as the invoking user with terminfo + Wayland/X display env
+> forwarded (setpriv drop); package managers stay root. Mounts auto-clean.
+> **Remaining before Phase 5:** (a) GUI *launch ergonomics* — passwordless
+> enter-helper + `.desktop` menu entries so GUI apps launch from the app menu, not
+> just a terminal (today they need a sudo prompt); (b) Alpine (musl) backend — the
+> only unimplemented distro; (c) System Snapshots UI awareness (Phase 2); (d)
+> crossfs polish (Phase 4 — only if demand; GUI works without it). Draft 1.
+> Owner: (you).
 > Cross-refs: [`src/flatpak.rs`](../src/flatpak.rs) (the module this copies its
 > shape from), [`src/install.rs`](../src/install.rs) (`apply()` step order),
 > [`src/exec.rs`](../src/exec.rs) (`Ctx`), [`src/plugins.rs`](../src/plugins.rs)
@@ -398,8 +404,10 @@ in-stratum `apt install` ✅, verified bootstrap + shim-collision handling ✅,
 `diff`/`reconfigure` support ✅ (`strata_sig` forces a full sync on any stratum
 change), `export` captures existing strata ✅ (`export::capture_strata` — name/
 distro/suite/mirror/expose recovered from the rootfs + shims; in-stratum
-`packages` and `snapshot` pins are *not* recovered). Still open: GUI foreign app
-via shared Wayland/X socket (proves `share` end-to-end), System Snapshots UI
+`packages` and `snapshot` pins are *not* recovered). GUI foreign app via shared
+Wayland/X socket ✅ (proven on real hardware — runs as the invoking user, display
+env forwarded). Still open: *launch ergonomics* (passwordless + `.desktop` menu
+entries — today GUI apps need a terminal + sudo prompt), System Snapshots UI
 awareness.
 
 **Ergonomics — command-not-found → add a stratum.** Strata are *never* installed
