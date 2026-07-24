@@ -625,6 +625,7 @@ fn enter_helper_script(s: &Stratum) -> String {
          for m in {binds}; do\n    \
          {{ [ -d \"/$m\" ] && [ -d \"$root/$m\" ]; }} && mount --rbind \"/$m\" \"$root/$m\"\n  \
          done\n  \
+         {{ [ -d /usr/share/terminfo ] && [ -d \"$root/usr/share/terminfo\" ]; }} && mount --bind /usr/share/terminfo \"$root/usr/share/terminfo\" 2>/dev/null || true\n  \
          {copy_resolv}export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n  \
          if [ \"$mode\" = user ]; then\n    \
          uid=$1; gid=$2; groups=$3; home=$4; disp=$5; wl=$6; xrd=$7; xauth=$8; shift 8\n    \
@@ -641,17 +642,38 @@ fn enter_helper_script(s: &Stratum) -> String {
 }
 
 /// A single exposed-binary shim handing off to the stratum's enter helper (via
-/// sudo — the mount/chroot setup needs root). Package managers run as root;
-/// everything else runs as the invoking user with their display env forwarded
-/// (`id`/`$HOME`/`$WAYLAND_DISPLAY`/… captured here, before sudo strips them).
+/// sudo — the mount/chroot setup needs root). Two shapes:
+///
+/// **Package managers** (`runs_as_root`) run as root and then **auto-expose**:
+/// they diff the stratum's bin dirs around the run and, for each newly-installed
+/// binary the host doesn't already have (so host tools are never shadowed), call
+/// `manifest strata add --expose` to shim it. So `apt install htop` makes `htop`
+/// usable with no separate expose step.
+///
+/// **Everything else** runs as the invoking user with their display env forwarded
+/// (`id`/`$HOME`/`$WAYLAND_DISPLAY`/… captured here, before sudo strips them) so
+/// GUI/TUI apps reach the shared Wayland/X socket.
 fn shim_script(stratum: &str, bin: &str) -> String {
     let helper = enter_helper_path(stratum);
     let bin_q = shell_quote(bin);
     if runs_as_root(bin) {
+        let root_q = shell_quote(&stratum_root(stratum));
+        let stratum_q = shell_quote(stratum);
         format!(
             "#!/bin/sh\n\
-             # ManifestOS strata shim → {stratum}:{bin} (root; generated, do not edit)\n\
-             exec sudo {helper} root {bin_q} \"$@\"\n",
+             # ManifestOS strata shim → {stratum}:{bin} (root + auto-expose; generated, do not edit)\n\
+             __root={root_q}\n\
+             __b=$(mktemp 2>/dev/null || echo \"/tmp/.mos-shim-$$\")\n\
+             ls \"$__root/usr/bin\" \"$__root/bin\" \"$__root/usr/local/bin\" 2>/dev/null | sort -u > \"$__b\"\n\
+             sudo {helper} root {bin_q} \"$@\"\n\
+             __rc=$?\n\
+             __add=\n\
+             for __x in $(ls \"$__root/usr/bin\" \"$__root/bin\" \"$__root/usr/local/bin\" 2>/dev/null | sort -u | grep -Fxvf \"$__b\"); do\n  \
+             command -v \"$__x\" >/dev/null 2>&1 || __add=\"$__add $__x\"\n\
+             done\n\
+             rm -f \"$__b\"\n\
+             [ -n \"$__add\" ] && sudo manifest strata add {stratum_q} --expose $__add >/dev/null 2>&1\n\
+             exit $__rc\n",
         )
     } else {
         format!(
@@ -968,10 +990,15 @@ mod tests {
     }
 
     #[test]
-    fn shim_root_for_package_managers() {
+    fn shim_root_for_package_managers_auto_exposes() {
         let shim = shim_script("debian", "apt");
         assert!(shim.starts_with("#!/bin/sh"), "{shim}");
-        assert!(shim.contains("exec sudo /strata/.libexec/enter-debian root 'apt' \"$@\""), "{shim}");
+        assert!(shim.contains("sudo /strata/.libexec/enter-debian root 'apt' \"$@\""), "{shim}");
+        // Diffs the stratum's bins and exposes new ones the host lacks.
+        assert!(shim.contains("__root='/strata/debian'"), "{shim}");
+        assert!(shim.contains("grep -Fxvf"), "diff before/after: {shim}");
+        assert!(shim.contains("command -v \"$__x\" >/dev/null 2>&1 || __add"), "skip host tools: {shim}");
+        assert!(shim.contains("sudo manifest strata add 'debian' --expose $__add"), "{shim}");
     }
 
     #[test]
