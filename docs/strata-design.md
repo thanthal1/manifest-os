@@ -427,10 +427,15 @@ rootfs (gpgcheck + `distribution-gpg-keys`), in-stratum `dnf install` and
 VM findings fixed — single-baseurl gave no mirror failover (now a metalink
 `.repo`); Arch's `dnf` pkg is dnf4 and conflicts with dnf5 (use `dnf5`);
 arch-chroot skips a resolv.conf when the target's is a dangling symlink, which
-Fedora ships (plant one first). **Still open: Alpine** — needs `apk-tools-static`
-+ `alpine-keys` (neither in Arch's official repos, unlike dnf/keys for Fedora),
-and the musl stratum is used only through its own shims (no cross-musl-to-glibc
-promise).
+Fedora ships (plant one first). **Alpine ✅** (musl) — since `apk-tools-static` +
+`alpine-keys` aren't in Arch's repos, the bootstrap downloads `apk.static` + the
+keys over HTTPS from the official CDN (versions resolved from the branch APKINDEX)
+and runs `apk.static --keys-dir …` so packages are **signature-verified** (never
+`--allow-untrusted`). Gotcha fixed: `.apk`/`APKINDEX.tar.gz` are multi-stream
+(sig+ctl+data), so `tar` needs `-i`. musl binaries run only through their own
+shims (which chroot in, resolving Alpine's `ld-musl`). VM-validated: verified
+bootstrap, in-stratum `apk add`, musl `tree` runs via the shim. **All four named
+distros now implemented.**
 
 **Phase 4 — crossfs (only if Phases 1–2 proved demand).**
 Transparent `/usr/lib`/`/etc`/`/usr/share` + per-file resolution for GUI polish.
