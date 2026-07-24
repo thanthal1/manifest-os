@@ -134,12 +134,6 @@ pub fn apply(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
 
 fn apply_one(s: &Stratum, bare_winners: &std::collections::HashSet<(String, String)>, ctx: &Ctx) -> Result<()> {
     let backend = match backend_for(&s.distro) {
-        Some(Backend::Apk) => bail!(
-            "stratum '{}': alpine (musl) is recognized but not implemented yet — the \
-             debootstrap (debian/ubuntu) and dnf (fedora) backends are (see \
-             docs/strata-design.md §10)",
-            s.name
-        ),
         Some(b) => b,
         None => bail!(
             "stratum '{}': unknown distro '{}' (expected debian/ubuntu/fedora/alpine)",
@@ -175,7 +169,12 @@ fn apply_one(s: &Stratum, bare_winners: &std::collections::HashSet<(String, Stri
             }
             None
         }
-        Backend::Apk => unreachable!("apk bails above"),
+        Backend::Apk => {
+            // Alpine's signing keys aren't packaged on Arch; the bootstrap
+            // downloads them (+ `apk.static`) over HTTPS from the official CDN and
+            // verifies against them (never `--allow-untrusted`). See apk_bootstrap_cmd.
+            None
+        }
     };
 
     bootstrap(s, backend, &root, keyring.as_deref(), ctx)?;
@@ -234,6 +233,10 @@ fn ensure_host_tools(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
         // *conflicts* with dnf5); distribution-gpg-keys carries the Fedora keys.
         pkgs.push("dnf5");
         pkgs.push("distribution-gpg-keys");
+    }
+    if backends.contains(&Backend::Apk) {
+        // Alpine bootstrap downloads apk.static + keys itself; it just needs curl.
+        pkgs.push("curl");
     }
     println!("  · ensuring strata host tools: {}", pkgs.join(", "));
     let mut args = vec!["-S", "--needed", "--noconfirm"];
@@ -578,6 +581,7 @@ fn default_suite(distro: &str) -> &'static str {
     match distro.trim().to_ascii_lowercase().as_str() {
         "ubuntu" => "noble",
         "fedora" => FEDORA_DEFAULT_RELEASE,
+        "alpine" => "latest-stable",
         _ => "stable",
     }
 }
@@ -593,7 +597,7 @@ fn bootstrap_cmd(s: &Stratum, backend: Backend, root: &str, keyring: Option<&str
             Ok(debootstrap_cmd(s, root, keyring))
         }
         Backend::Dnf => Ok(dnf_bootstrap_cmd(s, root)),
-        Backend::Apk => bail!("internal: apk backend has no bootstrap command yet"),
+        Backend::Apk => Ok(apk_bootstrap_cmd(s, root)),
     }
 }
 
@@ -669,6 +673,38 @@ fn dnf_bootstrap_cmd(s: &Stratum, root: &str) -> String {
         repo = repo,
         root_q = shell_quote(root),
         rel_q = shell_quote(&rel),
+    )
+}
+
+/// The Alpine bootstrap command. Alpine's tooling and signing keys aren't
+/// packaged on Arch, so — the standard cross-distro path — it downloads
+/// `apk.static` and `alpine-keys` over HTTPS from the official CDN, then runs
+/// `apk.static --keys-dir …` so the index/packages are **signature-verified**
+/// (never `--allow-untrusted`). Versions are resolved from the branch's APKINDEX
+/// (they change). The rootfs's `/etc/apk/repositories` is written so a later
+/// in-stratum `apk add` works; `alpine-base` pulls `alpine-keys` into the rootfs,
+/// so that stays verified too. musl throughout — Alpine binaries run only through
+/// their own shims (which chroot into this rootfs, resolving Alpine's `ld-musl`).
+fn apk_bootstrap_cmd(s: &Stratum, root: &str) -> String {
+    let branch = s.suite.clone().unwrap_or_else(|| default_suite(&s.distro).to_string());
+    let mirror = s.mirror.clone().unwrap_or_else(|| default_mirror(Backend::Apk, &s.distro));
+    format!(
+        "set -e\n\
+         d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT\n\
+         M={mirror_q}; BR={branch_q}; ROOT={root_q}; A=\"$M/$BR/main/x86_64\"\n\
+         mkdir -p \"$ROOT\"\n\
+         curl -fsS \"$A/APKINDEX.tar.gz\" | tar -xziO APKINDEX > \"$d/idx\"\n\
+         av=$(awk '/^P:apk-tools-static$/{{f=1}} f&&/^V:/{{print substr($0,3); exit}}' \"$d/idx\")\n\
+         kv=$(awk '/^P:alpine-keys$/{{f=1}} f&&/^V:/{{print substr($0,3); exit}}' \"$d/idx\")\n\
+         [ -n \"$av\" ] && [ -n \"$kv\" ] || {{ echo 'strata: could not resolve apk-tools-static/alpine-keys from the Alpine APKINDEX' >&2; exit 1; }}\n\
+         curl -fsS \"$A/apk-tools-static-$av.apk\" | tar -xzi -C \"$d\" 2>/dev/null\n\
+         curl -fsS \"$A/alpine-keys-$kv.apk\" | tar -xzi -C \"$d\" 2>/dev/null\n\
+         kd=\"$d/usr/share/apk/keys/x86_64\"; [ -d \"$kd\" ] || kd=\"$d/usr/share/apk/keys\"\n\
+         \"$d/sbin/apk.static\" --keys-dir \"$kd\" --arch x86_64 -X \"$M/$BR/main\" -X \"$M/$BR/community\" --root \"$ROOT\" --initdb --no-cache add alpine-base\n\
+         mkdir -p \"$ROOT/etc/apk\"; printf '%s\\n%s\\n' \"$M/$BR/main\" \"$M/$BR/community\" > \"$ROOT/etc/apk/repositories\"",
+        mirror_q = shell_quote(&mirror),
+        branch_q = shell_quote(&branch),
+        root_q = shell_quote(root),
     )
 }
 
@@ -1009,6 +1045,23 @@ mod tests {
         // A custom mirror switches metalink → baseurl (their single host).
         assert!(cmd.contains("baseurl=https://my.mirror/fedora/releases/$releasever/Everything/$basearch/os/"), "{cmd}");
         assert!(!cmd.contains("metalink="), "custom mirror must not also use metalink: {cmd}");
+    }
+
+    #[test]
+    fn apk_bootstrap_verifies_and_resolves_versions() {
+        let s = stratum("alpine", "alpine"); // default branch latest-stable
+        let cmd = apk_bootstrap_cmd(&s, "/strata/alpine");
+        assert!(cmd.contains("BR='latest-stable'"), "default branch: {cmd}");
+        assert!(cmd.contains("'https://dl-cdn.alpinelinux.org/alpine'"), "{cmd}");
+        // Resolves versions from the APKINDEX, downloads apk.static + keys.
+        assert!(cmd.contains("apk-tools-static-$av.apk"), "{cmd}");
+        assert!(cmd.contains("alpine-keys-$kv.apk"), "{cmd}");
+        // Verification enforced: --keys-dir, never --allow-untrusted.
+        assert!(cmd.contains("--keys-dir"), "{cmd}");
+        assert!(!cmd.contains("--allow-untrusted"), "must verify: {cmd}");
+        assert!(cmd.contains("add alpine-base"), "{cmd}");
+        // Rootfs repos written so in-stratum `apk add` works.
+        assert!(cmd.contains("/etc/apk/repositories"), "{cmd}");
     }
 
     #[test]
