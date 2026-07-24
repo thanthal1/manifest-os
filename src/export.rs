@@ -224,7 +224,7 @@ fn capture() -> Value {
 // strata readers  (see src/strata.rs)
 // ---------------------------------------------------------------------------
 
-/// Reconstruct the `strata` block from what's installed under `/bedrock`. Each
+/// Reconstruct the `strata` block from what's installed under `/strata`. Each
 /// rootfs yields name (dir), distro + suite (its os-release) and mirror (its
 /// sources.list); the exposed-binary list comes back from the generated shims.
 ///
