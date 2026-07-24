@@ -1,9 +1,16 @@
-# ManifestOS strata — offer to add a foreign-distro stratum when an
-# uninstalled package manager is invoked.
+# ManifestOS strata — shell integration (PATH + command-not-found).
 #
 # NOTE: keep this in sync with `strata::cnf_handler_script` in src/strata.rs —
 # the engine writes the same content to /etc/manifest-os/strata-cnf.sh on every
 # install; this baked copy is what makes the *live* ISO session behave the same.
+#
+# Sourced by interactive bash/zsh. Does two things: puts exposed foreign-distro
+# binaries (/bedrock/bin) on PATH, and offers to add a stratum when an
+# uninstalled package manager is typed.
+case ":$PATH:" in
+  *:/bedrock/bin:*) ;;
+  *) PATH="/bedrock/bin:$PATH"; export PATH ;;
+esac
 __manifest_cnf() {
   cmd=$1
   case $cmd in
@@ -16,7 +23,13 @@ __manifest_cnf() {
     printf 'Add a %s stratum and put %s on your PATH? [y/N] ' "$distro" "$cmd" >&2
     read -r __r
     case $__r in
-      [yY]|[yY][eE][sS]) sudo manifest strata add "$distro" --expose "$cmd"; return $? ;;
+      [yY]|[yY][eE][sS])
+        sudo manifest strata add "$distro" --expose "$cmd" || return $?
+        case ":$PATH:" in *:/bedrock/bin:*) ;; *) PATH="/bedrock/bin:$PATH"; export PATH ;; esac
+        hash -r 2>/dev/null
+        "$@"
+        return $?
+        ;;
     esac
   fi
   printf 'Add it with:  sudo manifest strata add %s --expose %s\n' "$distro" "$cmd" >&2

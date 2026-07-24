@@ -628,14 +628,22 @@ fn shim_script(stratum: &str, bin: &str) -> String {
     )
 }
 
-/// The command-not-found handler shell text. When an uninstalled package manager
-/// (`apt`, `dnf`, …) is run, map it to its distro and offer to add a stratum.
-/// Defines both bash (`command_not_found_handle`) and zsh
-/// (`command_not_found_handler`) hooks; only distros the engine can bootstrap are
-/// mapped, so the offer never leads to a "not implemented" error.
+/// The strata shell-integration text, sourced by *interactive* bash and zsh
+/// (profile.d is not enough — zsh never reads it, and it only covers login
+/// shells). It puts the exposed-binary dir (`/bedrock/bin`) on PATH so shimmed
+/// foreign binaries are findable in a normal terminal, and installs a
+/// command-not-found handler that maps an uninstalled package manager to its
+/// distro, offers to add a stratum, then makes the new shim usable in the
+/// *current* shell and retries the command. Only bootstrappable distros are
+/// mapped, so the offer never dead-ends; both bash (`command_not_found_handle`)
+/// and zsh (`command_not_found_handler`) hooks are defined.
 fn cnf_handler_script() -> &'static str {
-    "# ManifestOS strata — offer to add a foreign-distro stratum when an\n\
-     # uninstalled package manager is invoked. Generated; edits are overwritten.\n\
+    "# ManifestOS strata — shell integration (PATH + command-not-found).\n\
+     # Generated; edits are overwritten. Sourced by interactive bash/zsh.\n\
+     case \":$PATH:\" in\n  \
+       *:/bedrock/bin:*) ;;\n  \
+       *) PATH=\"/bedrock/bin:$PATH\"; export PATH ;;\n\
+     esac\n\
      __manifest_cnf() {\n  \
        cmd=$1\n  \
        case $cmd in\n    \
@@ -648,7 +656,13 @@ fn cnf_handler_script() -> &'static str {
          printf 'Add a %s stratum and put %s on your PATH? [y/N] ' \"$distro\" \"$cmd\" >&2\n    \
          read -r __r\n    \
          case $__r in\n      \
-           [yY]|[yY][eE][sS]) sudo manifest strata add \"$distro\" --expose \"$cmd\"; return $? ;;\n    \
+           [yY]|[yY][eE][sS])\n        \
+             sudo manifest strata add \"$distro\" --expose \"$cmd\" || return $?\n        \
+             case \":$PATH:\" in *:/bedrock/bin:*) ;; *) PATH=\"/bedrock/bin:$PATH\"; export PATH ;; esac\n        \
+             hash -r 2>/dev/null\n        \
+             \"$@\"\n        \
+             return $?\n        \
+             ;;\n    \
          esac\n  \
        fi\n  \
        printf 'Add it with:  sudo manifest strata add %s --expose %s\\n' \"$distro\" \"$cmd\" >&2\n  \
@@ -915,6 +929,8 @@ mod tests {
     #[test]
     fn cnf_handler_maps_pkg_managers_and_defines_both_hooks() {
         let s = cnf_handler_script();
+        // Puts the shim dir on PATH (the whole point — profile.d doesn't reach zsh).
+        assert!(s.contains("PATH=\"/bedrock/bin:$PATH\""), "{s}");
         assert!(s.contains("apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian"), "{s}");
         assert!(s.contains("dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora"), "{s}");
         // Only bootstrappable distros are offered (no alpine → no dead-end offer).

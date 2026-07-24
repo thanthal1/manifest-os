@@ -639,6 +639,9 @@ fn strata_add(action: StrataAction) -> Result<()> {
     let strata: Vec<manifest::manifest::Stratum> = serde_json::from_value(strata_val)
         .context("re-reading the strata list after adding one")?;
     strata::apply(&strata, &ctx)?;
+    // Refresh the shell integration (PATH + command-not-found) so re-running
+    // `strata add` on an older system also updates it.
+    strata::write_cnf_handler(&ctx)?;
 
     // Record the updated system manifest so rollback/diff see the new stratum.
     let json = serde_json::to_string_pretty(&root)? + "\n";
@@ -650,6 +653,12 @@ fn strata_add(action: StrataAction) -> Result<()> {
         .to_string();
     history::record(&json, &mname, &ctx);
     println!("\n✓ stratum '{name}' ({distro}) added.");
+    let exposed = if expose.is_empty() { String::new() } else { format!(" ({})", expose.join(", ")) };
+    println!(
+        "  · exposed binaries{exposed} are on PATH in new shells. To use them now:\n\
+         \x20     exec $SHELL   # or open a new terminal\n\
+         \x20   Run them WITHOUT sudo — the shim elevates itself."
+    );
     Ok(())
 }
 
