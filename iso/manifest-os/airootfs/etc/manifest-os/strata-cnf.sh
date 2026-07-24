@@ -16,6 +16,7 @@ __manifest_cnf() {
   case $cmd in
     apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;
     dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;
+    apk) distro=alpine ;;
     *) return 127 ;;
   esac
   printf '\n%s is not installed — it comes from %s.\n' "$cmd" "$distro" >&2

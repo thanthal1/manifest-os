@@ -836,6 +836,7 @@ fn cnf_handler_script() -> &'static str {
        case $cmd in\n    \
          apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;\n    \
          dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;\n    \
+         apk) distro=alpine ;;\n    \
          *) return 127 ;;\n  \
        esac\n  \
        printf '\\n%s is not installed — it comes from %s.\\n' \"$cmd\" \"$distro\" >&2\n  \
@@ -1193,8 +1194,8 @@ mod tests {
         assert!(s.contains("PATH=\"/strata/.bin:$PATH\""), "{s}");
         assert!(s.contains("apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian"), "{s}");
         assert!(s.contains("dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora"), "{s}");
-        // Only bootstrappable distros are offered (no alpine → no dead-end offer).
-        assert!(!s.contains("alpine"), "{s}");
+        assert!(s.contains("apk) distro=alpine"), "{s}");
+        // All four backends are bootstrappable now, so all are offered.
         // Both shells' hooks + the actionable command.
         assert!(s.contains("command_not_found_handle()"), "bash hook: {s}");
         assert!(s.contains("command_not_found_handler()"), "zsh hook: {s}");
