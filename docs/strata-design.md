@@ -429,6 +429,39 @@ Transparent `/usr/lib`/`/etc`/`/usr/share` + per-file resolution for GUI polish.
 Separately-installed **GPL** component behind a hard boundary — never vendored
 into `src/`. Reassess whether shims already covered the real use cases.
 
+**Phase 5 — Windows apps (a "windows stratum": VM + seamless remoting).**
+The end-goal stretch: run Windows applications (the anchor use case is
+**SolidWorks** and other CAD) as if they were native, on the ManifestOS desktop.
+See §13 for the full design; the short version:
+
+- **Same mental model, different backend.** A `windows` stratum is declared and
+  its apps are exposed onto the menu/PATH exactly like a Linux stratum — but you
+  can't `chroot` an NT kernel, so the backend is **a Windows VM (libvirt/QEMU-KVM)
+  + FreeRDP RemoteApp**: each exposed app opens as a borderless Linux window, no
+  desktop-in-a-box. The engine wakes the VM on first launch, like the enter-helper
+  wakes a stratum. Prior art: **WinApps** (study/reuse, MIT-compatible? verify).
+- **Tiered, mirroring the debootstrap/dnf/apk split.** (1) Wine/CrossOver for apps
+  that support it (cheap, no VM — *not* SolidWorks, which is Wine-hostile); (2)
+  Windows VM + RDP RemoteApp for the general case; (3) VM + GPU passthrough +
+  Looking Glass for GPU-heavy CAD.
+- **GPU passthrough is the real work, and the actual novel feature.** VFIO
+  passthrough is legendarily painful to set up by hand — precisely the fiddly,
+  hardware-specific ritual ManifestOS exists to make declarative. The engine
+  detects GPU topology + IOMMU groups and auto-generates the whole stack.
+- **VM source: managed image (default) or attach the dual-boot partition
+  (advanced).** ManifestOS already detects Windows at install (the dual-boot
+  carve), so booting the *existing* install in KVM is a natural — if fragile —
+  option; a dedicated managed VM is the robust default.
+
+Deliverable ladder: 5a — managed VM + FreeRDP RemoteApp, one app end-to-end;
+5b — manifest `windows` block + auto-expose + `.desktop` menu entries; 5c —
+GPU passthrough (5c-desktop: iGPU+dGPU; 5c-laptop: muxless + Looking Glass); 5d
+(stretch) — attach the physical dual-boot Windows partition.
+
+**Honest gate:** this is a far heavier subsystem than the Linux strata (which is
+just chroot). Its usefulness for CAD is **hardware-gated** on IOMMU + a spare
+GPU. It stays design-only until the seam (5a) is proven.
+
 ---
 
 ## 11. Open questions (decide before Phase 1 code)
@@ -461,3 +494,135 @@ into `src/`. Reassess whether shims already covered the real use cases.
   binaries share the host's namespaces and `$HOME`. If you want isolation, that's
   `systemd-nspawn`/Docker/Distrobox, not this.
 - Not (in v1) a foreign-*service* manager — see §3.
+
+---
+
+## 13. Windows apps — the "windows stratum" (Phase 5, design-only)
+
+> Status: **idea / design.** The Linux strata (Phases 1–3) are the foundation
+> this reuses conceptually. This section is a plan, not a commitment; nothing here
+> is built. Anchor use case: **SolidWorks** (and CAD generally) running as a
+> native-feeling window on the ManifestOS desktop.
+
+### 13.1 Why it fits the strata model (and where it diverges)
+
+A stratum is *"foreign software, declared in the manifest, exposed onto your
+PATH/menu, launched through a generated shim."* Windows fits that shape exactly —
+you declare a `windows` stratum, list the apps to expose, and get menu launchers.
+What changes is the **backend**: an NT kernel can't be `chroot`ed, so instead of
+`debootstrap` + `chroot` the engine runs **a Windows guest under libvirt/QEMU-KVM
+and paints individual app windows onto the Linux desktop via FreeRDP RemoteApp**
+(RDP's "seamless" mode — one app, no visible Windows desktop). The per-app "shim"
+becomes a launcher that runs `xfreerdp /app:"<app>" …` against the running guest,
+starting/waking the VM on first launch the way the enter-helper wakes a stratum.
+
+Prior art is **[WinApps]** (VM + FreeRDP RemoteApp + `.desktop` generation). We
+should study it and reuse where the license permits (**verify its license against
+our MIT tree before vendoring** — same rule as crossfs §1.3).
+
+Divergences from a Linux stratum, all consequences of "it's a VM, not a chroot":
+no shared `$HOME`/namespace (files cross via an RDP drive redirect or a 9p/virtiofs
+share); no glibc story (it's a whole OS); heavyweight (GBs of RAM, a booting
+guest) vs. a chroot's near-zero cost; and a hard hardware dependency for GPU apps.
+
+### 13.2 Tiered backends (mirrors debootstrap / dnf / apk)
+
+| Tier | Mechanism | Good for | Not for |
+|---|---|---|---|
+| **wine** | Wine/CrossOver, no VM | small, well-supported Windows tools | SolidWorks (Wine-hostile) |
+| **vm-rdp** | Windows VM + FreeRDP RemoteApp, virtio GPU | most apps; office/eng tools | GPU-heavy 3D |
+| **vm-vfio** | VM + **GPU passthrough** + Looking Glass | SolidWorks, CAD, GPU compute | machines without IOMMU + a spare GPU |
+
+The engine picks (or the manifest pins) a tier. `wine` is the cheap default where
+it works; `vm-vfio` is the CAD path.
+
+### 13.3 GPU passthrough — the hard part, and the actual novel feature
+
+CAD needs real 3D acceleration → **VFIO passthrough**: hand a physical GPU to the
+guest. This is legendarily fiddly to set up by hand, which is exactly why
+automating it is worth doing — it's the fiddly, hardware-specific Arch ritual
+ManifestOS exists to make declarative.
+
+**Topology matters — "2 GPUs" is a fork, not one case:**
+
+- **Desktop, CPU iGPU + discrete GPU** — the clean case. Linux stays on the iGPU,
+  the dGPU is dedicated to the guest. Passthrough is well-behaved here. *Ideal
+  target.*
+- **Single discrete GPU (no iGPU)** — single-GPU passthrough, which yanks the host
+  display while the guest runs. Advanced/ugly; support later or not at all.
+- **Laptop, muxless hybrid** — the *other* common "2 GPU" machine, and the hardest:
+  the dGPU has **no display output of its own** (it renders and copies to the
+  iGPU), so passthrough *requires* **Looking Glass** to shovel guest frames back to
+  the host, and laptop dGPUs carry quirks (NVIDIA "Error 43", ACPI power-off). Doable
+  but not free.
+
+**Bind modes** (the "give Windows the dGPU when necessary" ask):
+
+- *Static* — dGPU claimed by `vfio-pci` at boot; Linux never uses it. Simplest,
+  always VM-ready; Linux forfeits the dGPU.
+- *Dynamic* — Linux uses the dGPU normally; on VM launch, unbind from the Linux
+  driver → bind `vfio-pci` → start guest → rebind on shutdown. Flexible, but
+  nothing on Linux may be holding the dGPU at handover.
+
+**What the engine automates (the whole chain, from detected hardware):**
+
+1. Enumerate GPUs and **IOMMU groups**; classify the topology (desktop / single /
+   muxless). The passed GPU must be cleanly isolated in its own group — many
+   consumer boards are, some need the **ACS-override patch** (which has real
+   security caveats and must be a loud, explicit opt-in, never silent).
+2. Generate the kernel cmdline (`intel_iommu=on` / `amd_iommu=on iommu=pt`),
+   `vfio-pci` binding by PCI vendor:device ID, initramfs modules, and (muxless)
+   the Looking Glass host/client + shared-memory device.
+3. Wire dynamic bind/unbind hooks around VM start/stop.
+4. **Fail gracefully** — if IOMMU is off, groups are unisolated, or there's no
+   spare GPU, refuse with a clear explanation rather than producing a broken boot.
+   Never leave the machine unbootable in pursuit of passthrough.
+
+### 13.4 VM source: managed image vs. attach the dual-boot partition
+
+- **Managed image (default, robust).** ManifestOS provisions a dedicated Windows
+  VM (its own qcow2, its own license/activation, virtio drivers pre-injected).
+  Clean, reproducible, no interference with a native Windows.
+- **Attach the existing dual-boot install (advanced, fragile).** ManifestOS
+  already detects Windows at install (`detect_windows`, the dual-boot carve), so
+  handing KVM the physical Windows partition/disk (raw passthrough) to boot the
+  user's *real*, licensed apps is a natural extension. Caveats to spell out and
+  guard: Windows sees new hardware → **reactivation** nags; Win11 needs **vTPM +
+  OVMF** for Secure Boot/TPM 2.0; **VirtIO drivers** must be present in the
+  existing install; and it **cannot run in the VM while also booted natively** —
+  the engine must enforce that mutual exclusion.
+
+### 13.5 Manifest shape (sketch)
+
+```json
+"windows": {
+  "source": { "type": "managed", "iso": "…", "disk_gib": 120 },
+  "gpu_passthrough": { "mode": "auto", "bind": "dynamic" },
+  "apps": [
+    { "name": "SolidWorks", "expose": "solidworks",
+      "path": "C:\\Program Files\\SOLIDWORKS\\sldworks.exe" }
+  ]
+}
+```
+
+`source.type`: `managed` | `attach-partition`. `gpu_passthrough.mode`: `auto`
+(detect topology) | `off` | explicit PCI id; `bind`: `static` | `dynamic`. Each
+`apps[]` entry yields a FreeRDP RemoteApp launcher on `/strata/.bin` (or a
+Windows-specific dir) and a `.desktop` menu entry — the same "expose" ergonomics
+as a Linux stratum. `manifest windows add <app>` would mirror `strata add`.
+
+### 13.6 Open questions (before any Phase 5 code)
+
+1. Base FreeRDP RemoteApp integration on **WinApps** (license-permitting) or build
+   the launcher/`.desktop` generation fresh?
+2. File sharing: RDP drive redirect vs. virtiofs/9p — latency vs. simplicity for
+   CAD's large files.
+3. Managed-image acquisition: user-supplied ISO only (licensing), or a guided
+   fetch? (Windows licensing constrains what we can automate.)
+4. Marketplace/security: a `windows` block spins up a VM with disk/GPU access — a
+   large new attack surface for `scan.py` to reason about (untrusted ISO, raw
+   partition access, passthrough).
+5. How much of §13.3's auto-detection is safe to run unattended vs. requires an
+   explicit "yes, reconfigure my bootloader for passthrough" confirmation.
+
+[WinApps]: https://github.com/winapps-org/winapps
