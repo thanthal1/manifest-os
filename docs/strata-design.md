@@ -1,9 +1,13 @@
 # Strata — multi-distro package access (design)
 
 > Status: **Phases 1–3 complete + real-hardware-validated; shipped as `manifest-os`
-> 0.1.0-12** (2026-07-24). **All four distros — Debian, Ubuntu, Fedora, Alpine —**
+> 0.1.0-13** (2026-07-24). **All four distros — Debian, Ubuntu, Fedora, Alpine —**
 > bootstrap verified (incl. the CachyOS/hwcaps arch fix — install `dpkg` for a
 > clean host arch; Alpine downloads apk.static + keys from the CDN, verified).
+> Privilege-drop for GUI/user apps uses the host's GNU `chroot --userspec`
+> (does chroot + drop in one step, needs no tool inside the stratum) — fixes
+> Alpine, whose BusyBox `setpriv` lacks `--reuid`. GUI verified headless on both
+> Fedora and Alpine: drop lands at the caller's uid and xterm loads fully.
 > CLI + **TUI** (host terminfo bound) + **GUI** foreign apps run from one PATH
 > alongside `pacman`; `apt`/`dnf`/`apk` install auto-exposes the binaries and
 > mirrors their `.desktop` into the app menu; GUI apps **launch from the menu, one
