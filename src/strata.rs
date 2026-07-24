@@ -760,7 +760,7 @@ fn enter_helper_script(s: &Stratum) -> String {
          uid=$1; gid=$2; groups=$3; home=$4; disp=$5; wl=$6; xrd=$7; xauth=$8; shift 8\n    \
          [ \"${{SUDO_UID:-$uid}}\" = \"$uid\" ] || {{ echo \"strata: refusing to run as uid $uid (caller is $SUDO_UID)\" >&2; exit 1; }}\n    \
          export HOME=\"$home\" DISPLAY=\"$disp\" WAYLAND_DISPLAY=\"$wl\" XDG_RUNTIME_DIR=\"$xrd\" XAUTHORITY=\"$xauth\"\n    \
-         exec chroot \"$root\" setpriv --reuid \"$uid\" --regid \"$gid\" --groups \"$groups\" /usr/bin/env \"$@\"\n  \
+         exec chroot --userspec=\"$uid:$gid\" --groups=\"$groups\" \"$root\" /usr/bin/env \"$@\"\n  \
          fi\n  \
          exec chroot \"$root\" /usr/bin/env \"$@\"\n\
          ' sh \"$root\" \"$@\"\n",
@@ -1169,7 +1169,9 @@ mod tests {
         let s = stratum("debian", "debian");
         let script = enter_helper_script(&s);
         assert!(script.contains("if [ \"$mode\" = user ]; then"), "{script}");
-        assert!(script.contains("setpriv --reuid \"$uid\" --regid \"$gid\" --groups \"$groups\""), "{script}");
+        // Drop via GNU chroot's own --userspec/--groups (host coreutils) — not the
+        // stratum's setpriv, which on Alpine is BusyBox's and lacks --reuid.
+        assert!(script.contains("chroot --userspec=\"$uid:$gid\" --groups=\"$groups\" \"$root\""), "{script}");
         assert!(script.contains("export HOME=\"$home\" DISPLAY=\"$disp\" WAYLAND_DISPLAY=\"$wl\""), "{script}");
         // Passwordless safety: a caller can only run as themselves ($SUDO_UID),
         // never as an arbitrary uid — otherwise the sudoers rule would be root.
