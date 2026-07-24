@@ -215,6 +215,11 @@ fn ensure_host_tools(strata: &[Stratum], ctx: &Ctx) -> Result<()> {
     let mut pkgs = vec!["arch-install-scripts"];
     if backends.contains(&Backend::Debootstrap) {
         pkgs.push("debootstrap");
+        // dpkg gives debootstrap a reliable host arch: `dpkg --print-architecture`
+        // → `amd64`. Without it, debootstrap falls back to `pacman-conf
+        // Architecture`, which on CachyOS/hwcaps installs is multi-line
+        // (x86_64 x86_64_v2 x86_64_v3) and dies with "Unknown architecture".
+        pkgs.push("dpkg");
     }
     if backends.contains(&Backend::Dnf) {
         // dnf5 is Arch's current dnf (the older `dnf` package is dnf4 and
