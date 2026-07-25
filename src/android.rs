@@ -431,16 +431,44 @@ fn write_launcher(ctx: &Ctx) -> Result<()> {
 /// `waydroid-launch <pkg>` — the Exec every Android app launcher points at.
 /// Brings Android up on demand, launches, and stamps activity. Pure — tested.
 pub fn launcher_script() -> String {
+    // Launched from a menu (fuzzel/rofi) there is NO terminal, so nothing here may
+    // block on a sudo password prompt — that's why menu launches failed while the
+    // same command worked from a shell. Every privileged call uses `sudo -n`
+    // (non-interactive, fails instead of prompting), readiness is probed with
+    // unprivileged commands, and problems are surfaced via notify-send.
     format!(
         "#!/bin/sh\n\
          # ManifestOS — lazy-launch a Waydroid app (generated; do not edit).\n\
-         set -e\n\
          [ $# -ge 1 ] || {{ echo 'usage: waydroid-launch <package>' >&2; exit 2; }}\n\
-         {ensure}\
-         waydroid app launch \"$1\"\n\
-         {stamp}",
-        ensure = ensure_up(),
-        stamp = stamp_activity(),
+         pkg=$1\n\
+         say() {{ echo \"waydroid-launch: $1\" >&2; command -v notify-send >/dev/null 2>&1 && notify-send -a Android 'Android' \"$1\"; }}\n\
+         # 1. Container up (passwordless rule; never prompt from a menu launch).\n\
+         if ! systemctl is-active --quiet waydroid-container.service 2>/dev/null; then\n  \
+           if ! sudo -n systemctl start waydroid-container.service 2>/dev/null; then\n    \
+             say 'cannot start Android (no passwordless rule). Run: sudo systemctl start waydroid-container.service'\n    \
+             exit 1\n  \
+           fi\n\
+         fi\n\
+         # 2. Session up (runs as the user — no sudo needed).\n\
+         if ! waydroid status 2>/dev/null | grep -qi 'session.*running'; then\n  \
+           waydroid session start >/dev/null 2>&1 &\n  \
+           i=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do\n    \
+             i=$((i+1)); [ \"$i\" -gt 60 ] && break; sleep 1\n  \
+           done\n\
+         fi\n\
+         # 3. Launch, retrying while Android's framework finishes registering.\n\
+         # (Probing readiness needs root, so instead just retry the launch itself —\n\
+         # it fails harmlessly until the package service is up.)\n\
+         n=0\n\
+         while [ $n -lt 45 ]; do\n  \
+           if waydroid app launch \"$pkg\" >/dev/null 2>&1; then\n    \
+             {stamp_indented}    exit 0\n  \
+           fi\n  \
+           n=$((n+1)); sleep 2\n\
+         done\n\
+         say \"could not launch $pkg (Android may still be starting - try again in a moment)\"\n\
+         exit 1\n",
+        stamp_indented = stamp_activity(),
     )
 }
 
@@ -483,7 +511,7 @@ fn idle_script(minutes: u32) -> String {
          [ \"$last\" -eq 0 ] && {{ mkdir -p \"$(dirname \"$ACT\")\"; : > \"$ACT\"; exit 0; }}\n\
          if [ $((now - last)) -ge \"$IDLE\" ]; then\n  \
            waydroid session stop >/dev/null 2>&1 || true\n  \
-           sudo systemctl stop waydroid-container.service >/dev/null 2>&1 || true\n\
+           sudo -n systemctl stop waydroid-container.service >/dev/null 2>&1 || true\n\
          fi\n"
     )
 }
@@ -550,7 +578,7 @@ fn firstrun_script(a: &Android) -> String {
          systemctl --user enable --now waydroid-idle.timer >/dev/null 2>&1 || true\n\
          # Return to the lazy state — don't leave Android running after setup.\n\
          waydroid session stop >/dev/null 2>&1 || true\n\
-         sudo systemctl stop waydroid-container.service >/dev/null 2>&1 || true\n\
+         sudo -n systemctl stop waydroid-container.service >/dev/null 2>&1 || true\n\
          mkdir -p \"$(dirname \"$MARK\")\"; : > \"$MARK\"\n",
         ensure = ensure_up(),
         relazy = relaunch_rewrite(),
@@ -599,10 +627,29 @@ mod tests {
     #[test]
     fn launcher_is_lazy_and_stamps() {
         let s = launcher_script();
-        assert!(s.contains("sudo systemctl start waydroid-container"), "lazy start: {s}");
+        assert!(s.contains("sudo -n systemctl start waydroid-container.service"), "lazy start: {s}");
         assert!(s.contains("waydroid session start"), "{s}");
-        assert!(s.contains("waydroid app launch \"$1\""), "{s}");
+        assert!(s.contains("waydroid app launch \"$pkg\""), "{s}");
         assert!(s.contains("waydroid-activity"), "activity stamp: {s}");
+    }
+
+    #[test]
+    fn launcher_never_blocks_on_a_password_from_a_menu() {
+        let s = launcher_script();
+        // Menu launches have no TTY: every privileged *call* must be `sudo -n`
+        // (fails instead of prompting). Skip the advice string we print to tell
+        // the user what to run themselves — that's text, not an invocation.
+        for line in s
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| l.contains("sudo "))
+            .filter(|l| !l.starts_with('#') && !l.starts_with("say "))
+        {
+            assert!(line.contains("sudo -n "), "interactive sudo in launcher: {line}");
+        }
+        // Readiness is probed by retrying the launch, not by a root-only command.
+        assert!(!s.contains("sudo -n waydroid shell"), "no root shell probe: {s}");
+        assert!(s.contains("notify-send"), "surfaces failures to the desktop: {s}");
     }
 
     #[test]
@@ -651,7 +698,7 @@ mod tests {
         assert!(s.contains("IDLE=2700"), "45 min = 2700s: {s}");
         assert!(s.contains("hyprctl clients") && s.contains("swaymsg") && s.contains("niri msg windows"), "per-compositor window check: {s}");
         assert!(s.contains("waydroid session stop"), "{s}");
-        assert!(s.contains("sudo systemctl stop waydroid-container"), "{s}");
+        assert!(s.contains("sudo -n systemctl stop waydroid-container.service"), "{s}");
     }
 
     #[test]
@@ -671,7 +718,7 @@ mod tests {
         assert!(s.contains("systemctl --user enable --now waydroid-idle.timer"), "idle timer on: {s}");
         // Returns to lazy state after setup.
         assert!(s.contains("waydroid session stop"), "stop after setup: {s}");
-        assert!(s.contains("sudo systemctl stop waydroid-container"), "{s}");
+        assert!(s.contains("sudo -n systemctl stop waydroid-container.service"), "{s}");
     }
 
     #[test]
