@@ -62,6 +62,7 @@ fn build_ui(app: &adw::Application) {
         .set_icon_name(Some("document-open-recent-symbolic"));
     build_apply(&window, &stack, &toasts);
     build_updates(&window, &stack, &toasts);
+    build_strata(&stack);
     settings::build(&window, &stack, &toasts);
     designer::build(&window, &stack, &toasts);
 
@@ -105,6 +106,12 @@ fn build_home(
         .unwrap_or_else(|| "System default".into());
     group.add(&info_row("Theme", &theme));
     group.add(&info_row("Installed apps", &format!("{}", now.packages.len())));
+    // Strata awareness: if foreign-distro app sources are set up, name them here
+    // so the "current setup" reflects them (details live on the Other apps tab).
+    if !now.strata.is_empty() {
+        let families: Vec<String> = now.strata.iter().map(|s| pretty(&s.distro)).collect();
+        group.add(&info_row("Other app sources", &families.join(", ")));
+    }
     page.add(&group);
 
     // The one big action.
@@ -419,6 +426,62 @@ fn confirm_restore_versions(
         );
     });
     dialog.present();
+}
+
+// ---------------------------------------------------------------------------
+// Other apps — awareness of foreign-distro strata
+// ---------------------------------------------------------------------------
+
+/// A read-only page that shows which foreign-distro app sources ("strata" — the
+/// jargon stays out of the UI) are set up and which of their apps are on the
+/// menu. Purely informational: it captures the current system and lists what it
+/// finds, so the Snapshots app is aware of strata the same way it is of desktop,
+/// theme and apps. Needs no privileges (read-only).
+fn build_strata(stack: &std::rc::Rc<adw::ViewStack>) {
+    let page = adw::PreferencesPage::new();
+    let now = export::capture_manifest();
+
+    let group = adw::PreferencesGroup::builder()
+        .title("Apps from other systems")
+        .description("Software brought in from other Linux families — Debian, Ubuntu, Fedora or Alpine — runs right alongside your normal apps. It's saved in your snapshots too, so restoring brings it back.")
+        .build();
+
+    if now.strata.is_empty() {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("None set up yet")
+                .subtitle("Type a foreign package manager (like apt or dnf) in a terminal and you'll be offered to add its system; anything you install then shows up here.")
+                .build(),
+        );
+    } else {
+        for s in &now.strata {
+            let subtitle = if s.expose.is_empty() {
+                "Set up, but no apps on your menu yet".to_string()
+            } else if s.expose.len() == 1 {
+                format!("On your menu: {}", s.expose[0])
+            } else {
+                format!("{} apps on your menu: {}", s.expose.len(), s.expose.join(", "))
+            };
+            let row = adw::ActionRow::builder()
+                .title(&pretty(&s.name))
+                .subtitle(&subtitle)
+                .build();
+            // A small family badge when the stratum's name differs from its
+            // distro (e.g. name "ubuntu-noble", distro "ubuntu").
+            if !s.name.eq_ignore_ascii_case(&s.distro) {
+                let badge = gtk::Label::new(Some(&pretty(&s.distro)));
+                badge.add_css_class("dim-label");
+                badge.set_valign(gtk::Align::Center);
+                row.add_suffix(&badge);
+            }
+            group.add(&row);
+        }
+    }
+    page.add(&group);
+
+    stack
+        .add_titled(&page, Some("strata"), "Other apps")
+        .set_icon_name(Some("system-software-install-symbolic"));
 }
 
 // ---------------------------------------------------------------------------
