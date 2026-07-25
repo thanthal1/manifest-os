@@ -28,6 +28,9 @@ const AUTOSTART: &str = "/etc/xdg/autostart/manifest-waydroid-firstrun.desktop";
 const SUDOERS: &str = "/etc/sudoers.d/manifest-waydroid";
 const IDLE_SERVICE: &str = "/etc/systemd/user/waydroid-idle.service";
 const IDLE_TIMER: &str = "/etc/systemd/user/waydroid-idle.timer";
+const APPLICATIONS_DIR: &str = "/usr/share/applications";
+const MIME_XML: &str = "/usr/share/mime/packages/manifest-android-bundles.xml";
+const MIME_HANDLER: &str = "/usr/share/applications/manifest-apkm-install.desktop";
 /// Default auto-stop timeout when `idle_minutes` is unset.
 const DEFAULT_IDLE_MIN: u32 = 45;
 
@@ -43,6 +46,7 @@ pub fn apply(a: &Android, ctx: &Ctx) -> Result<()> {
     )?;
     write_sudoers(ctx)?;
     write_installer(ctx)?;
+    write_mime(ctx)?;
     write_launcher(ctx)?;
     write_idle(a, ctx)?;
     write_firstrun(a, ctx)?;
@@ -158,37 +162,116 @@ fn write_installer(ctx: &Ctx) -> Result<()> {
     ctx.sudo("chmod", &["0755", INSTALLER])
 }
 
-/// `android-install <apk-path | fdroid-id> …` — brings Android up if needed,
-/// installs (APK directly; a bare id is resolved via F-Droid's API and fetched),
-/// then relazies the fresh launchers. The cmd installer on the Android side.
+/// `android-install <file | fdroid-id> …` — brings Android up if needed and
+/// installs. Handles a plain **`.apk`**, a **split bundle** (`.apkm`/`.apks`/
+/// `.xapk` — a ZIP of base + split APKs, e.g. from APKMirror), or a bare
+/// **F-Droid id** (resolved via F-Droid's API). Bundles are unpacked, the right
+/// splits selected (base + best ABI + best density + all languages + feature
+/// modules), and installed as one split-install session via `pm` in the
+/// container; on failure it falls back to installing the base APK alone. The
+/// cmd installer on the Android side. Pure — structure unit-tested.
 fn installer_script() -> String {
-    format!(
-        "#!/bin/sh\n\
-         # ManifestOS — install an Android app into Waydroid (generated; do not edit).\n\
-         # Usage: android-install <file.apk | fdroid.package.id> [more…]\n\
-         set -e\n\
-         [ $# -ge 1 ] || {{ echo 'usage: android-install <file.apk | fdroid.package.id> …' >&2; exit 2; }}\n\
-         command -v waydroid >/dev/null || {{ echo 'android-install: waydroid is not installed' >&2; exit 1; }}\n\
-         {ensure}\
-         for app in \"$@\"; do\n  \
-           case \"$app\" in\n    \
-             *.apk)\n      \
-               waydroid app install \"$app\" ;;\n    \
-             *)\n      \
-               vc=$(curl -fsSL \"https://f-droid.org/api/v1/packages/$app\" | \
-                    sed -n 's/.*\"suggestedVersionCode\"[: ]*\\([0-9]*\\).*/\\1/p' | head -n1)\n      \
-               [ -n \"$vc\" ] || {{ echo \"android-install: '$app' not found on F-Droid\" >&2; exit 1; }}\n      \
-               tmp=$(mktemp --suffix=.apk)\n      \
-               curl -fsSL -o \"$tmp\" \"https://f-droid.org/repo/${{app}}_${{vc}}.apk\"\n      \
-               waydroid app install \"$tmp\"; rm -f \"$tmp\" ;;\n  \
-           esac\n\
-         done\n\
-         {relazy}\
-         {stamp}",
-        ensure = ensure_up(),
-        relazy = relaunch_rewrite(),
-        stamp = stamp_activity(),
+    let body = r####"#!/bin/sh
+# ManifestOS — install an Android app/bundle into Waydroid (generated; do not edit).
+# Usage: android-install <file.apk | file.apkm | file.apks | file.xapk | fdroid.package.id> …
+set -e
+[ $# -ge 1 ] || { echo 'usage: android-install <file.apk|.apkm|.apks|.xapk | fdroid.package.id> …' >&2; exit 2; }
+command -v waydroid >/dev/null || { echo 'android-install: waydroid is not installed' >&2; exit 1; }
+@ENSURE@
+install_fdroid() {
+  app="$1"
+  vc=$(curl -fsSL "https://f-droid.org/api/v1/packages/$app" | sed -n 's/.*"suggestedVersionCode"[: ]*\([0-9]*\).*/\1/p' | head -n1)
+  [ -n "$vc" ] || { echo "android-install: '$app' not found on F-Droid" >&2; return 1; }
+  tmp=$(mktemp --suffix=.apk)
+  curl -fsSL -o "$tmp" "https://f-droid.org/repo/${app}_${vc}.apk"
+  waydroid app install "$tmp"; rm -f "$tmp"
+}
+# Install a split bundle (.apkm/.apks/.xapk = ZIP of base + split APKs).
+install_bundle() {
+  bundle="$1"; dir=$(mktemp -d)
+  bsdtar -xf "$bundle" -C "$dir" 2>/dev/null || unzip -qo "$bundle" -d "$dir" 2>/dev/null || {
+    echo "android-install: cannot read $bundle" >&2; rm -rf "$dir"; return 1; }
+  apks=$(find "$dir" -name '*.apk')
+  [ -n "$apks" ] || { echo "android-install: no APKs in $bundle" >&2; rm -rf "$dir"; return 1; }
+  base=$(printf '%s\n' $apks | grep -iE '(^|/)base\.apk$' | head -n1)
+  [ -n "$base" ] || base=$(printf '%s\n' $apks | grep -v 'split_' | head -n1)
+  abi=
+  for a in x86_64 x86 arm64_v8a arm64 armeabi_v7a armeabi; do
+    m=$(printf '%s\n' $apks | grep -i "split_config\.$a\.apk" | head -n1)
+    [ -n "$m" ] && { abi="$m"; break; }
+  done
+  dpi=
+  for d in xxxhdpi xxhdpi xhdpi hdpi tvdpi mdpi nodpi; do
+    m=$(printf '%s\n' $apks | grep -i "split_config\.$d\.apk" | head -n1)
+    [ -n "$m" ] && { dpi="$m"; break; }
+  done
+  langs=$(printf '%s\n' $apks | grep -iE 'split_config\.[a-z][a-z]\.apk')
+  feats=$(printf '%s\n' $apks | grep -i 'split_' | grep -iv 'split_config\.')
+  sel=
+  for f in "$base" "$abi" "$dpi" $langs $feats; do [ -n "$f" ] && sel="$sel $f"; done
+  total=0; for f in $sel; do total=$((total + $(stat -c%s "$f"))); done
+  sid=$(sudo waydroid shell -- pm install-create -S "$total" 2>/dev/null | sed -n 's/.*\[\([0-9]*\)\].*/\1/p' | head -n1)
+  if [ -n "$sid" ]; then
+    ok=1
+    for f in $sel; do
+      sudo waydroid shell -- pm install-write -S "$(stat -c%s "$f")" "$sid" "$(basename "$f" .apk)" - < "$f" >/dev/null 2>&1 || ok=0
+    done
+    if [ "$ok" = 1 ] && sudo waydroid shell -- pm install-commit "$sid" >/dev/null 2>&1; then
+      echo "android-install: installed $(basename "$bundle")"; rm -rf "$dir"; return 0
+    fi
+    sudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1 || true
+  fi
+  echo "android-install: split install failed — installing base apk only" >&2
+  waydroid app install "$base"; rm -rf "$dir"
+}
+for app in "$@"; do
+  case "$app" in
+    *.apk)                 waydroid app install "$app" ;;
+    *.apkm|*.apks|*.xapk)  install_bundle "$app" ;;
+    *)                     install_fdroid "$app" ;;
+  esac
+done
+@RELAZY@
+@STAMP@
+"####;
+    body.replace("@ENSURE@\n", ensure_up())
+        .replace("@RELAZY@\n", relaunch_rewrite())
+        .replace("@STAMP@\n", stamp_activity())
+}
+
+/// Register `.apkm`/`.apks`/`.xapk` as file types + a handler so opening one in a
+/// file manager (or `xdg-open`) installs it into Waydroid via `android-install`.
+fn write_mime(ctx: &Ctx) -> Result<()> {
+    println!("  · registering .apkm/.apks/.xapk → open with Waydroid");
+    ctx.write_root(MIME_XML, mime_xml())?;
+    ctx.shell("update-mime-database /usr/share/mime 2>/dev/null || true", true)?;
+    ctx.write_root(MIME_HANDLER, mime_handler_desktop())?;
+    ctx.shell(
+        &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),
+        true,
     )
+}
+
+fn mime_xml() -> &'static str {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+     <mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n  \
+       <mime-type type=\"application/vnd.apkm\"><comment>Android APKM bundle</comment><glob pattern=\"*.apkm\"/></mime-type>\n  \
+       <mime-type type=\"application/vnd.apks\"><comment>Android split APKs</comment><glob pattern=\"*.apks\"/></mime-type>\n  \
+       <mime-type type=\"application/x-xapk\"><comment>Android XAPK bundle</comment><glob pattern=\"*.xapk\"/></mime-type>\n\
+     </mime-info>\n"
+}
+
+fn mime_handler_desktop() -> &'static str {
+    "[Desktop Entry]\n\
+     Type=Application\n\
+     Name=Install to Android (Waydroid)\n\
+     Comment=Install an APK / APKM / APKS / XAPK into Waydroid\n\
+     Exec=android-install %f\n\
+     Icon=waydroid\n\
+     Terminal=true\n\
+     Categories=System;\n\
+     MimeType=application/vnd.apkm;application/vnd.apks;application/x-xapk;application/vnd.android.package-archive;\n\
+     NoDisplay=false\n"
 }
 
 fn write_launcher(ctx: &Ctx) -> Result<()> {
@@ -375,12 +458,30 @@ mod tests {
     }
 
     #[test]
-    fn installer_handles_apk_and_fdroid_and_relazies() {
+    fn installer_handles_apk_fdroid_and_split_bundles() {
         let s = installer_script();
         assert!(s.starts_with("#!/bin/sh"), "{s}");
-        assert!(s.contains("*.apk)"), "{s}");
-        assert!(s.contains("f-droid.org/api/v1/packages/"), "{s}");
+        assert!(s.contains("*.apk)"), "plain apk: {s}");
+        assert!(s.contains("*.apkm|*.apks|*.xapk)"), "bundle dispatch: {s}");
+        assert!(s.contains("f-droid.org/api/v1/packages/"), "fdroid id: {s}");
+        // Split-bundle handling: unpack, ABI/density/language selection, pm session.
+        assert!(s.contains("install_bundle"), "{s}");
+        assert!(s.contains("split_config") && s.contains("x86_64"), "abi selection: {s}");
+        assert!(s.contains("pm install-create") && s.contains("pm install-commit"), "split session: {s}");
+        assert!(s.contains("waydroid app install \"$base\""), "base-only fallback: {s}");
+        // Placeholders got substituted (no @…@ left) and relazy/stamp are present.
+        assert!(!s.contains("@ENSURE@") && !s.contains("@RELAZY@") && !s.contains("@STAMP@"), "placeholders unsubstituted: {s}");
         assert!(s.contains("/usr/local/bin/waydroid-launch"), "relazy rewrite: {s}");
+        assert!(s.contains("waydroid-activity"), "activity stamp: {s}");
+    }
+
+    #[test]
+    fn mime_registers_bundle_types_and_handler() {
+        let xml = mime_xml();
+        assert!(xml.contains("*.apkm") && xml.contains("*.apks") && xml.contains("*.xapk"), "globs: {xml}");
+        let d = mime_handler_desktop();
+        assert!(d.contains("Exec=android-install %f"), "{d}");
+        assert!(d.contains("application/vnd.apkm"), "mimetype assoc: {d}");
     }
 
     #[test]

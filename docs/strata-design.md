@@ -555,8 +555,11 @@ GPU. It stays design-only until the seam (6a) is proven.
 > `waydroid`/`android-install` (→ `sudo manifest android`), all mirroring the
 > strata/paru shape. `apply()` installs Waydroid (AUR/paru), best-effort ensures
 > `binderfs`, `waydroid init -s <SYSTEM>`, enables the container service, drops
-> the **`android-install`** command (APK path *or* F-Droid id, version resolved
-> via F-Droid's API), and installs a **first-login hook** (`/etc/xdg/autostart` →
+> the **`android-install`** command (a plain **`.apk`**; a **split bundle**
+> `.apkm`/`.apks`/`.xapk` — unpacked, splits selected base+ABI+density+langs and
+> installed as one `pm` split-session, base-only fallback; *or* an **F-Droid id**,
+> version resolved via F-Droid's API), registers `.apkm`/`.apks`/`.xapk` as file
+> types so opening one installs it, and installs a **first-login hook** (`/etc/xdg/autostart` →
 > `waydroid-firstrun`, guarded once-per-user) that — since Waydroid app
 > management needs the user's live Wayland session, absent at root install time —
 > starts the session, sets multi-window mode, installs an in-Android **F-Droid**
