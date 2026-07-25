@@ -258,8 +258,23 @@ install_fdroid() {
 install_bundle() {
   bundle="$1"; dir=$(mktemp -d)
   echo "android-install: unpacking $(basename "$bundle")"
-  bsdtar -xf "$bundle" -C "$dir" 2>/dev/null || unzip -qo "$bundle" -d "$dir" || {
-    echo "  ! cannot read $bundle" >&2; rm -rf "$dir"; return 1; }
+  # Bundles are ZIPs. Try each available extractor and only complain if they all
+  # fail — showing the real errors (they used to be hidden by 2>/dev/null).
+  extracted=0
+  if command -v bsdtar >/dev/null 2>&1; then
+    if bsdtar -xf "$bundle" -C "$dir"; then extracted=1; else echo "  · bsdtar could not read it, trying another extractor" >&2; fi
+  fi
+  if [ "$extracted" = 0 ] && command -v unzip >/dev/null 2>&1; then
+    unzip -qo "$bundle" -d "$dir" && extracted=1
+  fi
+  if [ "$extracted" = 0 ] && command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$bundle" "$dir" && extracted=1
+  fi
+  if [ "$extracted" = 0 ]; then
+    echo "  · installing unzip and retrying" >&2
+    sudo pacman -S --needed --noconfirm unzip >/dev/null 2>&1 && unzip -qo "$bundle" -d "$dir" && extracted=1
+  fi
+  [ "$extracted" = 1 ] || { echo "  ! cannot read $bundle (no working extractor)" >&2; rm -rf "$dir"; return 1; }
   # mktemp -d is 0700; make it traversable/readable so the base-APK fallback's
   # `waydroid app install <path>` can read the file.
   chmod 755 "$dir" 2>/dev/null; find "$dir" -name '*.apk' -exec chmod 644 {} + 2>/dev/null
