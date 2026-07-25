@@ -11,7 +11,9 @@ use clap::{Parser, Subcommand};
 use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
-use manifest::{desktop, diff, export, history, install, installer, kernel, pkglock, strata, survey, tui};
+use manifest::{
+    desktop, diff, export, history, install, installer, kernel, pacman, pkglock, strata, survey, tui,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -65,6 +67,10 @@ enum Command {
         #[command(subcommand)]
         action: StrataAction,
     },
+    /// Install the `paru` AUR helper if it isn't already present (a cached
+    /// prebuilt if one exists, else a source build). What the command-not-found
+    /// handler runs when you type `paru` without it installed.
+    Paru,
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
     /// default desktop if `desktop` changed. Idempotent; safe to re-run.
@@ -309,6 +315,10 @@ fn run() -> Result<()> {
             Ok(())
         }
         Command::Strata { action } => strata_add(action),
+        Command::Paru => {
+            let ctx = Ctx::new(false);
+            pacman::bootstrap_paru(&ctx)
+        }
         Command::Sync {
             file,
             dry_run,

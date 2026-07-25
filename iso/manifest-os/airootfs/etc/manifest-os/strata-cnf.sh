@@ -13,6 +13,23 @@ case ":$PATH:" in
 esac
 __manifest_cnf() {
   cmd=$1
+  if [ "$cmd" = paru ]; then
+    printf '\n%s is not installed — it is the AUR helper.\n' "$cmd" >&2
+    if [ -t 0 ] && [ -t 2 ]; then
+      printf 'Install paru now? (uses a cached build if present, else ~20-30 min source build) [y/N] ' >&2
+      read -r __r
+      case $__r in
+        [yY]|[yY][eE][sS])
+          sudo manifest paru || return $?
+          hash -r 2>/dev/null
+          "$@"
+          return $?
+          ;;
+      esac
+    fi
+    printf 'Install it with:  sudo manifest paru\n' >&2
+    return 127
+  fi
   case $cmd in
     apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;
     dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;

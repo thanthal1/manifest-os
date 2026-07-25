@@ -854,39 +854,59 @@ fn shim_script(stratum: &str, bin: &str) -> String {
 /// mapped, so the offer never dead-ends; both bash (`command_not_found_handle`)
 /// and zsh (`command_not_found_handler`) hooks are defined.
 fn cnf_handler_script() -> &'static str {
-    "# ManifestOS strata — shell integration (PATH + command-not-found).\n\
-     # Generated; edits are overwritten. Sourced by interactive bash/zsh.\n\
-     case \":$PATH:\" in\n  \
-       *:/strata/.bin:*) ;;\n  \
-       *) PATH=\"/strata/.bin:$PATH\"; export PATH ;;\n\
-     esac\n\
-     __manifest_cnf() {\n  \
-       cmd=$1\n  \
-       case $cmd in\n    \
-         apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;\n    \
-         dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;\n    \
-         apk) distro=alpine ;;\n    \
-         *) return 127 ;;\n  \
-       esac\n  \
-       printf '\\n%s is not installed — it comes from %s.\\n' \"$cmd\" \"$distro\" >&2\n  \
-       if [ -t 0 ] && [ -t 2 ]; then\n    \
-         printf 'Add a %s stratum and put %s on your PATH? [y/N] ' \"$distro\" \"$cmd\" >&2\n    \
-         read -r __r\n    \
-         case $__r in\n      \
-           [yY]|[yY][eE][sS])\n        \
-             sudo manifest strata add \"$distro\" --expose \"$cmd\" || return $?\n        \
-             case \":$PATH:\" in *:/strata/.bin:*) ;; *) PATH=\"/strata/.bin:$PATH\"; export PATH ;; esac\n        \
-             hash -r 2>/dev/null\n        \
-             \"$@\"\n        \
-             return $?\n        \
-             ;;\n    \
-         esac\n  \
-       fi\n  \
-       printf 'Add it with:  sudo manifest strata add %s --expose %s\\n' \"$distro\" \"$cmd\" >&2\n  \
-       return 127\n\
-     }\n\
-     command_not_found_handle() { __manifest_cnf \"$@\"; }\n\
-     command_not_found_handler() { __manifest_cnf \"$@\"; }\n"
+    // Kept in sync with iso/manifest-os/airootfs/etc/manifest-os/strata-cnf.sh
+    // (the baked copy for the live ISO). Raw string so the shell is readable.
+    r#"# ManifestOS strata — shell integration (PATH + command-not-found).
+# Generated; edits are overwritten. Sourced by interactive bash/zsh.
+case ":$PATH:" in
+  *:/strata/.bin:*) ;;
+  *) PATH="/strata/.bin:$PATH"; export PATH ;;
+esac
+__manifest_cnf() {
+  cmd=$1
+  if [ "$cmd" = paru ]; then
+    printf '\n%s is not installed — it is the AUR helper.\n' "$cmd" >&2
+    if [ -t 0 ] && [ -t 2 ]; then
+      printf 'Install paru now? (uses a cached build if present, else ~20-30 min source build) [y/N] ' >&2
+      read -r __r
+      case $__r in
+        [yY]|[yY][eE][sS])
+          sudo manifest paru || return $?
+          hash -r 2>/dev/null
+          "$@"
+          return $?
+          ;;
+      esac
+    fi
+    printf 'Install it with:  sudo manifest paru\n' >&2
+    return 127
+  fi
+  case $cmd in
+    apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;
+    dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;
+    apk) distro=alpine ;;
+    *) return 127 ;;
+  esac
+  printf '\n%s is not installed — it comes from %s.\n' "$cmd" "$distro" >&2
+  if [ -t 0 ] && [ -t 2 ]; then
+    printf 'Add a %s stratum and put %s on your PATH? [y/N] ' "$distro" "$cmd" >&2
+    read -r __r
+    case $__r in
+      [yY]|[yY][eE][sS])
+        sudo manifest strata add "$distro" --expose "$cmd" || return $?
+        case ":$PATH:" in *:/strata/.bin:*) ;; *) PATH="/strata/.bin:$PATH"; export PATH ;; esac
+        hash -r 2>/dev/null
+        "$@"
+        return $?
+        ;;
+    esac
+  fi
+  printf 'Add it with:  sudo manifest strata add %s --expose %s\n' "$distro" "$cmd" >&2
+  return 127
+}
+command_not_found_handle() { __manifest_cnf "$@"; }
+command_not_found_handler() { __manifest_cnf "$@"; }
+"#
 }
 
 /// profile.d drop-in adding the shim dir to PATH for login shells.
@@ -1255,6 +1275,9 @@ mod tests {
         assert!(s.contains("command_not_found_handle()"), "bash hook: {s}");
         assert!(s.contains("command_not_found_handler()"), "zsh hook: {s}");
         assert!(s.contains("sudo manifest strata add \"$distro\" --expose \"$cmd\""), "{s}");
+        // paru (native AUR helper, not a stratum) offers to install itself.
+        assert!(s.contains("if [ \"$cmd\" = paru ]; then"), "paru branch: {s}");
+        assert!(s.contains("sudo manifest paru"), "paru install command: {s}");
     }
 
     #[test]
