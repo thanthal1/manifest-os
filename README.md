@@ -19,7 +19,12 @@ Windows, or onto encrypted/LVM/RAID layouts; and an installed system gets
 **System Snapshots** (`manifest-center`) — a friendly desktop app to save/restore
 setups and edit config visually (the node-graph "Designer"). The manifest
 lifecycle (`export` / `diff` / `sync` / `history` / `rollback`) is implemented.
-See [HANDOFF.md](HANDOFF.md) for the full map and what's verified.
+
+Beyond Arch itself, a manifest can also declare **foreign software**: a `strata`
+block runs **Debian/Ubuntu/Fedora/Alpine** apps beside `pacman`, and an `android`
+block runs **Android apps via Waydroid** — both launchable from your normal menu.
+See [Foreign software](#foreign-software-run-non-arch-apps) below and
+[HANDOFF.md](HANDOFF.md) for the full map and what's verified.
 
 The core install flow:
 
@@ -228,6 +233,56 @@ and the marketplace scanner vets what it expands into. See
 [`examples/reference/plugins-demo.json`](examples/reference/plugins-demo.json)
 for bundled + inline plugins together.
 
+## Foreign software (run non-Arch apps)
+
+Not everything ships for Arch. Two blocks let a manifest pull in software from
+elsewhere and run it beside `pacman` — launchable from your normal app menu.
+Full design: [`docs/strata-design.md`](docs/strata-design.md).
+
+**Strata** — Debian/Ubuntu/Fedora/Alpine binaries on your PATH. A stratum is a
+full foreign-distro rootfs under `/strata/<name>` that is *never booted*; the
+engine enters it via a private-namespace chroot and drops per-binary shims so an
+`apt`-installed and a `pacman`-installed binary run from one shell.
+
+```json
+"strata": [
+  { "name": "debian", "distro": "debian", "suite": "bookworm",
+    "snapshot": "20260701T000000Z",
+    "packages": ["build-essential"], "expose": ["apt", "dpkg", "gcc"] }
+]
+```
+
+Or add one on the fly: `sudo manifest strata add fedora --expose dnf`. Installing
+inside a stratum (`apt install …`) auto-exposes the new binaries and mirrors GUI
+apps' launchers to your menu (one-click, no password). Type an uninstalled
+`apt`/`dnf`/`apk` and you're offered the right stratum; double-click a `.deb`/
+`.rpm` and it installs into the matching one.
+
+**Android** — Android apps via [Waydroid](https://waydro.id) (a container on the
+host kernel, not a VM), composited into your Wayland session.
+
+```json
+"android": {
+  "system": "GAPPS", "idle_minutes": 45,
+  "apps": ["org.telegram.messenger"], "expose": ["org.telegram.messenger"]
+}
+```
+
+A **lazy lifecycle** keeps it out of your way: nothing runs at boot, Android
+starts on the first app launch and auto-stops after `idle_minutes` unused.
+`android-install <apk | .apkm/.apks/.xapk | fdroid-id>` installs single APKs,
+APKMirror split bundles, or F-Droid ids — and those file types open-to-install.
+F-Droid is set up in-container as an app store.
+
+**Update everything at once** — one command refreshes every source:
+
+```bash
+manifest update    # host (repos + AUR) + each stratum + Flatpak + Waydroid
+```
+
+> Strata are verified on real hardware; Android/Waydroid orchestration is verified
+> but its rendering needs a real GPU (design-and-ship, hardware-pending).
+
 ## System basics
 
 The `system` block sets the machine's identity and localization. All applied
@@ -329,6 +384,10 @@ manifest history                           # list applied manifests (git-backed)
 manifest rollback [<ref>]                  # revert to a previous manifest
 manifest desktops | kernels                # list supported desktops/WMs / kernels
 manifest tui | provision …                 # guided (ISO) / unattended headless installer
+manifest strata add <distro> [--expose …]  # add a Debian/Ubuntu/Fedora/Alpine stratum
+manifest paru                              # install the paru AUR helper
+manifest android                           # set up Android apps via Waydroid
+manifest update [--dry-run]                # update host + strata + Flatpak + Waydroid
 ```
 
 `--dry-run` prints every command without executing — safe to inspect on any OS.

@@ -1,7 +1,7 @@
 # Manifest OS — Handoff
 
 > *Declare it. Share it. Deploy it.*
-> Snapshot for picking this project up cold. Last updated 2026-07-10.
+> Snapshot for picking this project up cold. Last updated 2026-07-25.
 > Repo: https://github.com/thanthal1/manifest-os
 
 ## What this is
@@ -26,11 +26,18 @@ our package selection + our tools.
 
 ```
 src/                     the engine + CLI (Rust)
-  main.rs                clap CLI (install/verify/export/diff/sync/history/rollback/
-                         desktops/kernels/tui/provision) + finish_and_reboot()
+  main.rs                clap CLI (install/verify/export/diff/sync/reconfigure/history/
+                         rollback/desktops/kernels/tui/provision/strata/paru/android/
+                         update) + finish_and_reboot()
   manifest.rs            the manifest.json schema (serde) + validation
   install.rs             install pipeline orchestration (order of steps)
   pacman.rs              repos (multilib/cachyos), -Syu, source-paru bootstrap, install
+  strata.rs              foreign-distro strata: bootstrap Debian/Ubuntu/Fedora/Alpine
+                         rootfs, chroot-shim binaries onto host PATH, command-not-found +
+                         .deb/.rpm open-to-install (docs/strata-design.md)
+  android.rs             Android apps via Waydroid: container + lazy lifecycle +
+                         android-install (.apk/.apkm/.apks/.xapk) + fuzzel launchers
+  flatpak.rs update.rs   Flatpak remotes+apps  /  `manifest update` across every source
   kernel.rs / boot.rs    kernel catalog + headers  /  bootloader (systemd-boot, grub, microcode)
   desktop.rs             25 desktop/WM recipes + display managers
   system.rs users.rs files.rs   hostname/locale/tz/keymap  /  useradd+sudoers+chpasswd  /  declarative writes
@@ -69,8 +76,9 @@ Three binaries: **`manifest`** (CLI, always), **`manifest-gui`** and
 `files`, `snippets`, `flatpak`, `defaults`, `wallpaper`, `keybindings`,
 `gestures` (touchpad — native-first, else auto-installed libinput-gestures), `theme`,
 `display` (HiDPI `scale`), `login` (greeter theme — bundled SDDM theme styled by
-`accent`/`background`/…, or select another; tuigreet colours), and
-`pre_install`/`post_install` (the escape hatch —
+`accent`/`background`/…, or select another; tuigreet colours),
+`strata` (foreign-distro binary access — see below), `android` (Android apps via
+Waydroid), and `pre_install`/`post_install` (the escape hatch —
 everything else is declarative). Plus the **adaptive** layer: `variables` +
 `survey`/`settings` questions (`{{token}}` substitution), auto-detected `detect`
 facts (gpu/cpu/virt/is_vm/firmware/scale), and `when`-gated `conditional`
@@ -81,6 +89,33 @@ learns what they mean. Schema: [`src/manifest.rs`](src/manifest.rs); facts/
 conditions engine: [`src/conditions.rs`](src/conditions.rs); plugin expander:
 [`src/plugins.rs`](src/plugins.rs); complete example:
 [`examples/tokyonight-aurora.json`](examples/tokyonight-aurora.json).
+
+## Foreign software — run non-Arch apps beside pacman
+
+Full design: [`docs/strata-design.md`](docs/strata-design.md). Shipped in the
+`manifest-os` package (`pacman -Syu`).
+
+- **Strata** (`strata` block / `manifest strata add <distro>`): a full
+  **Debian/Ubuntu/Fedora/Alpine** rootfs under `/strata/<name>`, *never booted* —
+  entered via a private-mount-namespace chroot, with per-binary **shims** on the
+  host PATH so an `apt`-installed and a `pacman`-installed binary run from one
+  shell. CLI + TUI (host terminfo bound) + **GUI** foreign apps; `apt`/`dnf`/`apk`
+  install **auto-exposes** binaries + mirrors their `.desktop` to the menu; GUI
+  apps launch one-click passwordless (scoped sudoers). **Command-not-found**:
+  typing `apt`/`dnf`/`apk` (or `paru`, or `waydroid`) offers to set it up. And
+  **open-to-install**: double-click a `.deb`/`.rpm` → `strata-install` puts it in
+  the matching stratum.
+- **Android** (`android` block / `manifest android`): Android apps via **Waydroid**
+  (a container on the host kernel, not a VM). **Lazy lifecycle** — nothing runs at
+  boot; `waydroid-launch` brings it up on first app launch and a `waydroid-idle`
+  timer stops it after `idle_minutes` (default 45) unused. `android-install
+  <apk|.apkm|.apks|.xapk|fdroid-id>` installs single APKs, **split bundles**, or
+  F-Droid ids; bundles/`.apk*` also **open-to-install**. F-Droid ships in-container.
+- **`manifest update`**: one command updates the host (repos + AUR), every stratum
+  via its own package manager, Flatpak, and the Waydroid image.
+
+Engine gate: strata/Android orchestration is unit + dry-run + (strata) VM-verified;
+**Android/Waydroid rendering is real-hardware-only** (VBox GL 2.1 can't run gralloc).
 
 ## Install options (TUI + GUI + `provision`)
 
@@ -108,8 +143,14 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 | **UEFI hands-off reboot** (efibootmgr boot-order) | ✅ | VM (UEFI) |
 | dual-boot alongside Windows (shrink + reuse ESP, per-OS bootloader) | ✅ | real HW (4 concurrent installs, stable) |
 | LUKS (systemd `sd-encrypt` + BIOS/UEFI) | ✅ | VM |
-| System Snapshots app (save/restore/apply/Designer/settings) | ✅ | VM (cage software-render) |
+| System Snapshots app (save/restore/apply/Designer/settings + **strata-aware**) | ✅ | VM (cage software-render) |
 | export / diff / sync / reconfigure / history / rollback | ✅ | VM + dry-run |
+| **strata**: Debian/Ubuntu/Fedora/Alpine bootstrap + PATH shims + CLI/TUI/GUI | ✅ | real HW + VM |
+| strata GUI foreign apps (passwordless launch, .desktop menu, fonts/terminfo) | ✅ | VM (real XWayland via weston + Xvfb-auth) |
+| strata command-not-found + `.deb`/`.rpm` open-to-install | ✅ | unit + dry-run |
+| `paru` command-not-found (`manifest paru`) | ✅ | unit + dry-run |
+| **Android/Waydroid** (`android` block, lazy lifecycle, `android-install`, `.apkm`) | ⏳ orchestration ✅ | unit + dry-run; **rendering real-HW-only** |
+| `manifest update` (host + AUR + strata + Flatpak + Waydroid) | ✅ | unit + dry-run |
 | WiFi list+connect (rfkill-unblock included) | ✅ | real HW (laptop) |
 | Install-log to USB on a real-HW failure | ✅ fixed | needs a real failing USB to re-confirm |
 | marketplace boot-test **server** (`server.py`) | ⏳ WIP, unverified | see marketplace/SERVER-TODO.md |
@@ -175,9 +216,19 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
   in [`marketplace/SERVER-TODO.md`](marketplace/SERVER-TODO.md). Still to build:
   stage-2 behavioural capture (outbound conns / listeners / fs-diff), resource
   pinning + manifest signing at approval.
+- **Android/Waydroid** (`android.rs`): orchestration is done + unit/dry-run
+  verified, but **rendering is real-hardware-only** (VBox's GL 2.1 can't drive
+  gralloc). Follow-ups: image-pin reproducibility (system+vendor version),
+  `export`/`diff`/Snapshots capture of the `android` block, OBB data in `.xapk`,
+  and an APK-trust stance in `scan.py` (prefer F-Droid ids).
+- **Command-not-found delivery:** the strata/paru/waydroid CNF handler + the
+  `.deb`/`.rpm` file handlers refresh on `manifest install`/`sync`/`strata add` or
+  a fresh ISO — **not** on `pacman -Syu`. A pacman upgrade-hook to regenerate them
+  on package upgrade was designed but deferred (pre-release).
 - **Real hardware:** WiFi connect and dual-boot alongside Windows are now
   confirmed on real HW; still to re-confirm the install-log-to-USB fix on a real
-  failing USB (not testable in VBox).
+  failing USB (not testable in VBox). Boot-testing strata GUI + Android rendering
+  on real HW is the current live thread.
 - **Catalog/site + a real `manifest-os-release` package + signing key** instead
   of the executor writing branding inline.
 - **Move dev to real Arch** for native builds, real GPU, and dogfooding (no VM
