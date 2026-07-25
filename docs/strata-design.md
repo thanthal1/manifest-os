@@ -1,7 +1,7 @@
 # Strata — multi-distro package access (design)
 
 > Status: **Phases 1–3 complete + real-hardware-validated; shipped as `manifest-os`
-> 0.1.0-15** (2026-07-25). **All four distros — Debian, Ubuntu, Fedora, Alpine —**
+> 0.1.0-18** (2026-07-25). **All four distros — Debian, Ubuntu, Fedora, Alpine —**
 > bootstrap verified (incl. the CachyOS/hwcaps arch fix — install `dpkg` for a
 > clean host arch; Alpine downloads apk.static + keys from the CDN, verified).
 > Privilege-drop for GUI/user apps uses the host's GNU `chroot --userspec`
@@ -24,9 +24,13 @@
 > caller can only run as themselves). GUI/user binaries run as the invoking user
 > with host **fonts + icons** bound in (a minimal rootfs ships none) and the
 > Wayland/X display env forwarded; package managers stay root. Command-not-found
-> offers the right distro for `apt`/`dnf`/`apk`. Paths are **`/strata/<name>`**.
-> **Remaining before Phase 5:** System Snapshots UI awareness (Phase 2, low), and
-> crossfs (Phase 4 — only if demand; shims cover the cases). Draft 1. Owner: (you).
+> offers the right distro for `apt`/`dnf`/`apk`; typing `paru` offers to install
+> the AUR helper itself (`manifest paru`). Paths are **`/strata/<name>`**. The
+> **System Snapshots app is strata-aware** (an "Other apps" tab + a Home row, from
+> `export::capture_manifest().strata`) — the last Phase-2 ergonomics item, done.
+> **Remaining:** crossfs (Phase 4 — only if demand; shims cover the cases), then
+> the new Phase 5 (Android/Waydroid, §13) and Phase 6 (Windows, §14). Draft 1.
+> Owner: (you).
 > Cross-refs: [`src/flatpak.rs`](../src/flatpak.rs) (the module this copies its
 > shape from), [`src/install.rs`](../src/install.rs) (`apply()` step order),
 > [`src/exec.rs`](../src/exec.rs) (`Ctx`), [`src/plugins.rs`](../src/plugins.rs)
