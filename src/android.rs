@@ -18,7 +18,7 @@
 
 use crate::exec::Ctx;
 use crate::manifest::Android;
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 const INSTALLER: &str = "/usr/local/bin/android-install";
 const LAUNCHER: &str = "/usr/local/bin/waydroid-launch";
@@ -107,28 +107,35 @@ fn write_sudoers(ctx: &Ctx) -> Result<()> {
     ctx.write_root(&staged, sudoers_content())?;
     ctx.sudo("chmod", &["0440", &staged])?;
     if ctx.dry_run || ctx.check("visudo", &["-cf", &staged]) {
-        ctx.sudo("mv", &[&staged, SUDOERS])
+        ctx.sudo("mv", &["-f", &staged, SUDOERS])
     } else {
-        ctx.sudo("rm", &["-f", &staged])?;
-        bail!("generated waydroid sudoers failed visudo validation");
+        // Non-fatal: passwordless container start is only a convenience. If this
+        // system's `visudo` rejects the drop-in, warn and carry on — Android
+        // still works, the lazy launcher just prompts for a password the first
+        // time it brings the container up. Don't leave the bad staged file behind.
+        let _ = ctx.sudo("rm", &["-f", &staged]);
+        eprintln!(
+            "  · warning: the sudoers drop-in failed `visudo -c` — skipping it. \
+             Android still works; you'll be asked for your password when it starts \
+             the container. (Report this if it persists.)"
+        );
+        Ok(())
     }
 }
 
+/// ASCII-only, minimal (`.service` form only — the scripts call that), one Cmnd
+/// line. Kept deliberately plain so any `visudo`/locale accepts it.
 fn sudoers_content() -> &'static str {
-    "# ManifestOS Waydroid — passwordless container start/stop for the lazy\n\
-     # lifecycle (generated). Scoped to just this one service; Android app\n\
-     # management still runs unprivileged as the user.\n\
-     ALL ALL=(root) NOPASSWD: /usr/bin/systemctl start waydroid-container, \
-     /usr/bin/systemctl start waydroid-container.service, \
-     /usr/bin/systemctl stop waydroid-container, \
-     /usr/bin/systemctl stop waydroid-container.service\n"
+    "# ManifestOS Waydroid - passwordless container start/stop (generated).\n\
+     # Scoped to one service; Android app management runs unprivileged as you.\n\
+     ALL ALL=(root) NOPASSWD: /usr/bin/systemctl start waydroid-container.service, /usr/bin/systemctl stop waydroid-container.service\n"
 }
 
 /// Shell snippet that brings Android up on demand: start the container
 /// (passwordless), then the session, waiting for it to come up.
 fn ensure_up() -> &'static str {
-    "systemctl is-active --quiet waydroid-container 2>/dev/null || \
-       sudo systemctl start waydroid-container\n\
+    "systemctl is-active --quiet waydroid-container.service 2>/dev/null || \
+       sudo systemctl start waydroid-container.service\n\
      waydroid status 2>/dev/null | grep -qi 'session.*running' || {\n  \
        waydroid session start >/dev/null 2>&1 &\n  \
        i=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do\n    \
@@ -335,7 +342,7 @@ fn idle_script(minutes: u32) -> String {
          [ \"$last\" -eq 0 ] && {{ mkdir -p \"$(dirname \"$ACT\")\"; : > \"$ACT\"; exit 0; }}\n\
          if [ $((now - last)) -ge \"$IDLE\" ]; then\n  \
            waydroid session stop >/dev/null 2>&1 || true\n  \
-           sudo systemctl stop waydroid-container >/dev/null 2>&1 || true\n\
+           sudo systemctl stop waydroid-container.service >/dev/null 2>&1 || true\n\
          fi\n"
     )
 }
@@ -402,7 +409,7 @@ fn firstrun_script(a: &Android) -> String {
          systemctl --user enable --now waydroid-idle.timer >/dev/null 2>&1 || true\n\
          # Return to the lazy state — don't leave Android running after setup.\n\
          waydroid session stop >/dev/null 2>&1 || true\n\
-         sudo systemctl stop waydroid-container >/dev/null 2>&1 || true\n\
+         sudo systemctl stop waydroid-container.service >/dev/null 2>&1 || true\n\
          mkdir -p \"$(dirname \"$MARK\")\"; : > \"$MARK\"\n",
         ensure = ensure_up(),
         relazy = relaunch_rewrite(),
@@ -514,12 +521,14 @@ mod tests {
     }
 
     #[test]
-    fn sudoers_is_scoped_to_container_startstop() {
+    fn sudoers_is_scoped_ascii_and_service_form() {
         let s = sudoers_content();
-        assert!(s.contains("systemctl start waydroid-container"), "{s}");
-        assert!(s.contains("systemctl stop waydroid-container"), "{s}");
+        assert!(s.contains("systemctl start waydroid-container.service"), "{s}");
+        assert!(s.contains("systemctl stop waydroid-container.service"), "{s}");
         // Not a blanket rule.
         assert!(!s.contains("NOPASSWD: ALL"), "{s}");
+        // ASCII-only — some visudo/locale setups reject non-ASCII even in comments.
+        assert!(s.is_ascii(), "sudoers must be ASCII: {s}");
     }
 
     #[test]
