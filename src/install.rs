@@ -10,6 +10,7 @@
 //! bootstrap; 10 is the final report.) Network, disk and partitioning are NOT
 //! here — those belong to the ISO's TUI layer, never the manifest.
 
+use crate::android;
 use crate::boot;
 use crate::defaults;
 use crate::desktop;
@@ -147,6 +148,14 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         if !manifest.strata.is_empty() {
             step("Setting up strata");
             strata::apply(&manifest.strata, ctx)?;
+        }
+
+        // Android apps via Waydroid — a container, not a chroot; set up when the
+        // block is present (session-dependent steps defer to a first-login hook).
+        // After strata so both foreign-runtime steps sit together.
+        if let Some(a) = &manifest.android {
+            step("Setting up Android (Waydroid)");
+            android::apply(a, ctx)?;
         }
 
         // Ship the command-not-found helper on every system (even with no strata

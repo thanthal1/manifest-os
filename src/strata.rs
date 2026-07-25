@@ -881,6 +881,23 @@ __manifest_cnf() {
     printf 'Install it with:  sudo manifest paru\n' >&2
     return 127
   fi
+  if [ "$cmd" = waydroid ] || [ "$cmd" = android-install ]; then
+    printf '\n%s is not set up — Android apps run via Waydroid.\n' "$cmd" >&2
+    if [ -t 0 ] && [ -t 2 ]; then
+      printf 'Set up Android (Waydroid) now? [y/N] ' >&2
+      read -r __r
+      case $__r in
+        [yY]|[yY][eE][sS])
+          sudo manifest android || return $?
+          hash -r 2>/dev/null
+          "$@"
+          return $?
+          ;;
+      esac
+    fi
+    printf 'Set it up with:  sudo manifest android\n' >&2
+    return 127
+  fi
   case $cmd in
     apt|apt-get|apt-cache|dpkg|dpkg-query|add-apt-repository) distro=debian ;;
     dnf|dnf5|yum|rpm|rpm2cpio) distro=fedora ;;

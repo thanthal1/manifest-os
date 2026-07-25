@@ -3,6 +3,7 @@
 //! [`probe::InstallPlan`] and calls [`installer::execute`]; everything else here
 //! is the orchestration of standard Arch tools (pacman, paru, systemctl, …).
 
+pub mod android;
 pub mod boot;
 pub mod conditions;
 pub mod defaults;

@@ -546,12 +546,30 @@ GPU. It stays design-only until the seam (6a) is proven.
 
 ---
 
-## 13. Android apps — the "waydroid stratum" (Phase 5, design-only)
+## 13. Android apps — the "waydroid stratum" (Phase 5a implemented)
 
-> Status: **idea / design.** Reuses the strata mental model (declare → expose →
-> menu launcher) with a *container* backend. Nothing here is built. Anchor use
-> case: **mobile-only apps** — messengers, banking apps that refuse the web, and
-> Android games — running as native-feeling windows on the ManifestOS desktop.
+> Status: **Phase 5a implemented (orchestration) — rendering unverified
+> (hardware-gated).** [`src/android.rs`](../src/android.rs) sets Waydroid up as a
+> first cut: an `android` manifest block ([`Android`](../src/manifest.rs)), an
+> `android` CLI subcommand, and a command-not-found offer when you type
+> `waydroid`/`android-install` (→ `sudo manifest android`), all mirroring the
+> strata/paru shape. `apply()` installs Waydroid (AUR/paru), best-effort ensures
+> `binderfs`, `waydroid init -s <SYSTEM>`, enables the container service, drops
+> the **`android-install`** command (APK path *or* F-Droid id, version resolved
+> via F-Droid's API), and installs a **first-login hook** (`/etc/xdg/autostart` →
+> `waydroid-firstrun`, guarded once-per-user) that — since Waydroid app
+> management needs the user's live Wayland session, absent at root install time —
+> starts the session, sets multi-window mode, installs an in-Android **F-Droid**
+> store, installs the declared `apps`, and writes a **launcher per exposed app so
+> it shows in fuzzel/rofi**. Unit-tested (init cmd, installer, first-run script,
+> autostart, quoting) + dry-run-verified ordering. **Documented assumptions /
+> next:** kernel `binderfs` assumed present (warn, don't hard-fail); GPU/gralloc
+> rendering is real-hardware-only (VM GL 2.1 can't); reproducibility image-pin
+> (system+vendor version) and `export`/`diff`/Snapshots capture are follow-ups;
+> APK trust (prefer F-Droid ids) needs a scan.py stance. Example:
+> [`examples/reference/android-waydroid.json`](../examples/reference/android-waydroid.json).
+> Original design below. Anchor use case: **mobile-only apps** — messengers,
+> banking apps that refuse the web, and Android games — as native-feeling windows.
 > Lands **before** Windows (§14): lighter (no VM, no passthrough) and higher
 > everyday demand.
 

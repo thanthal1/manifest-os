@@ -12,7 +12,8 @@ use manifest::exec::Ctx;
 use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::{
-    desktop, diff, export, history, install, installer, kernel, pacman, pkglock, strata, survey, tui,
+    android, desktop, diff, export, history, install, installer, kernel, pacman, pkglock, strata,
+    survey, tui,
 };
 use std::path::PathBuf;
 
@@ -71,6 +72,12 @@ enum Command {
     /// prebuilt if one exists, else a source build). What the command-not-found
     /// handler runs when you type `paru` without it installed.
     Paru,
+    /// Set up Android-app support via Waydroid (install + init + the
+    /// `android-install` command + a first-login session hook). What the
+    /// command-not-found handler runs when you type `waydroid` without it set up.
+    /// Apps and image pins come from the manifest's `android` block; this bare
+    /// command sets up the container with Waydroid's defaults.
+    Android,
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
     /// default desktop if `desktop` changed. Idempotent; safe to re-run.
@@ -318,6 +325,10 @@ fn run() -> Result<()> {
         Command::Paru => {
             let ctx = Ctx::new(false);
             pacman::bootstrap_paru(&ctx)
+        }
+        Command::Android => {
+            let ctx = Ctx::new(false);
+            android::apply(&manifest::manifest::Android::default(), &ctx)
         }
         Command::Sync {
             file,

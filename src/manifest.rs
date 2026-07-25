@@ -114,6 +114,13 @@ pub struct Manifest {
     /// Flatpak remotes and apps to install system-wide.
     pub flatpak: Option<Flatpak>,
 
+    /// Android apps via **Waydroid** — a single Android container on the host
+    /// kernel (never booted as init), its apps composited into the Wayland
+    /// session and launchable from the menu (fuzzel/rofi). The "android stratum"
+    /// of `docs/strata-design.md` §13: declare → install → expose. See
+    /// [`crate::android`].
+    pub android: Option<Android>,
+
     /// Foreign-distro **strata** — full rootfs installs of another distro under
     /// the Arch host (`/strata/<name>`), whose package managers and
     /// binaries are exposed on the host PATH via generated shims. Binary access,
@@ -362,6 +369,50 @@ impl Flatpak {
 pub struct FlatpakRemote {
     pub name: String,
     pub url: String,
+}
+
+/// Android-app support via Waydroid. Architecturally the "android stratum"
+/// (`docs/strata-design.md` §13): a container, not a chroot or VM. The engine is
+/// a thin orchestrator of the standard `waydroid` tool — install it, init a
+/// (pinned) image, start the container, install apps, and mirror each app's
+/// launcher onto the host so it opens straight from fuzzel/rofi. See
+/// [`crate::android`].
+#[derive(Debug, Default, Deserialize)]
+pub struct Android {
+    /// Waydroid system image (`waydroid init -s`): `VANILLA` (default, no Google),
+    /// `GAPPS` (Play services — many apps need it), or `FOSS` (microG). Omit for
+    /// the Waydroid default.
+    #[serde(default)]
+    pub system: Option<String>,
+
+    /// Window mode: `multi_windows` (default — each app is its own toplevel and
+    /// feels native) or `fullscreen` (one Android desktop).
+    #[serde(default)]
+    pub mode: Option<String>,
+
+    /// Apps to install after init: F-Droid package ids (`org.telegram.messenger`)
+    /// or APK file paths (`files/foo.apk`). Installed with the `android-install`
+    /// command the engine drops on the host PATH.
+    #[serde(default)]
+    pub apps: Vec<String>,
+
+    /// Package ids to put on the host menu as launchers (fuzzel/rofi). Empty ⇒
+    /// rely on Waydroid's own per-app launchers (it writes one per installed app
+    /// into the user's applications dir, which fuzzel already reads).
+    #[serde(default)]
+    pub expose: Vec<String>,
+}
+
+impl Android {
+    /// Empty ⇒ nothing declared. Presence of the block at all still means "set up
+    /// Waydroid" (install.rs gates on `Some`), so this only reports whether there
+    /// is app/config work beyond the base container.
+    pub fn is_empty(&self) -> bool {
+        self.system.is_none()
+            && self.mode.is_none()
+            && self.apps.is_empty()
+            && self.expose.is_empty()
+    }
 }
 
 /// A foreign-distro stratum: a rootfs bootstrapped with that distro's own tool,
