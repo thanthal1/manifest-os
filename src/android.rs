@@ -163,9 +163,22 @@ fn relaunch_rewrite() -> &'static str {
      done\n"
 }
 
+/// A thin stub installed on the host that execs the *current* binary's script
+/// logic (`manifest __script <name>`), so behaviour updates with `pacman -Syu` —
+/// no need to re-run the generator. `$0` is set to `manifest` and `"$@"` is
+/// forwarded to the fetched script.
+pub fn thin_stub(name: &str) -> String {
+    format!(
+        "#!/bin/sh\n\
+         # ManifestOS thin stub — the real logic lives in the `manifest` binary and\n\
+         # updates with `pacman -Syu` (no regeneration needed). Do not edit.\n\
+         exec sh -c \"$(manifest __script {name})\" manifest \"$@\"\n"
+    )
+}
+
 fn write_installer(ctx: &Ctx) -> Result<()> {
-    println!("  · installing the `android-install` command");
-    ctx.write_root(INSTALLER, &installer_script())?;
+    println!("  · installing the `android-install` command (thin stub → binary)");
+    ctx.write_root(INSTALLER, &thin_stub("android-install"))?;
     ctx.sudo("chmod", &["0755", INSTALLER])
 }
 
@@ -177,7 +190,7 @@ fn write_installer(ctx: &Ctx) -> Result<()> {
 /// modules), and installed as one split-install session via `pm` in the
 /// container; on failure it falls back to installing the base APK alone. The
 /// cmd installer on the Android side. Pure — structure unit-tested.
-fn installer_script() -> String {
+pub fn installer_script() -> String {
     let body = r####"#!/bin/sh
 # ManifestOS — install an Android app/bundle into Waydroid (generated; do not edit).
 # Usage: android-install <file.apk | file.apkm | file.apks | file.xapk | fdroid.package.id> …
@@ -321,14 +334,14 @@ fn mime_handler_desktop() -> &'static str {
 }
 
 fn write_launcher(ctx: &Ctx) -> Result<()> {
-    println!("  · installing the `waydroid-launch` lazy launcher");
-    ctx.write_root(LAUNCHER, &launcher_script())?;
+    println!("  · installing the `waydroid-launch` lazy launcher (thin stub → binary)");
+    ctx.write_root(LAUNCHER, &thin_stub("waydroid-launch"))?;
     ctx.sudo("chmod", &["0755", LAUNCHER])
 }
 
 /// `waydroid-launch <pkg>` — the Exec every Android app launcher points at.
 /// Brings Android up on demand, launches, and stamps activity. Pure — tested.
-fn launcher_script() -> String {
+pub fn launcher_script() -> String {
     format!(
         "#!/bin/sh\n\
          # ManifestOS — lazy-launch a Waydroid app (generated; do not edit).\n\
@@ -581,6 +594,14 @@ mod tests {
         assert!(!s.contains("NOPASSWD: ALL"), "{s}");
         // ASCII-only — some visudo/locale setups reject non-ASCII even in comments.
         assert!(s.is_ascii(), "sudoers must be ASCII: {s}");
+    }
+
+    #[test]
+    fn thin_stub_execs_the_current_binary() {
+        let s = thin_stub("android-install");
+        assert!(s.starts_with("#!/bin/sh"), "{s}");
+        // Fetches the live logic from the binary and execs it with the args.
+        assert!(s.contains("exec sh -c \"$(manifest __script android-install)\" manifest \"$@\""), "{s}");
     }
 
     #[test]

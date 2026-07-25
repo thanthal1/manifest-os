@@ -86,6 +86,15 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// (internal) Print a generated helper script's body. The installed commands
+    /// (`android-install`, `waydroid-launch`, `strata-install`) are thin stubs
+    /// that `exec` this, so their behaviour tracks the installed binary and
+    /// updates with `pacman -Syu` — no regeneration needed.
+    #[command(name = "__script", hide = true)]
+    Script {
+        /// Which script: android-install | waydroid-launch | strata-install.
+        name: String,
+    },
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
     /// default desktop if `desktop` changed. Idempotent; safe to re-run.
@@ -362,6 +371,16 @@ fn run() -> Result<()> {
             }
             let ctx = Ctx::new(dry_run);
             update::run(&ctx)
+        }
+        Command::Script { name } => {
+            let body = match name.as_str() {
+                "android-install" => android::installer_script(),
+                "waydroid-launch" => android::launcher_script(),
+                "strata-install" => strata::strata_install_script().to_string(),
+                other => anyhow::bail!("unknown generated script: {other}"),
+            };
+            print!("{body}");
+            Ok(())
         }
         Command::Sync {
             file,

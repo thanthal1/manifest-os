@@ -510,7 +510,9 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
     // package file installs it into the matching stratum, offering to add one if
     // none is set up. Written on every install like the CNF handler above; mirrors
     // the Android `.apkm` handler in `crate::android`.
-    ctx.write_root(STRATA_INSTALL, strata_install_script())?;
+    // Thin stub → the current binary's `strata-install` logic, so `pacman -Syu`
+    // keeps it current with no regeneration. Same mechanism as the Android stubs.
+    ctx.write_root(STRATA_INSTALL, &crate::android::thin_stub("strata-install"))?;
     ctx.sudo("chmod", &["0755", STRATA_INSTALL])?;
     ctx.write_root(DEB_RPM_HANDLER, deb_rpm_handler_desktop())?;
     ctx.shell(
@@ -524,7 +526,7 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
 /// stratum whose distro matches (Debian/Ubuntu for `.deb`, Fedora/RHEL-family for
 /// `.rpm`), offering to bootstrap one if none exists. The file is copied into
 /// `/tmp` (bound into every stratum) so it's reachable from inside the chroot.
-fn strata_install_script() -> &'static str {
+pub fn strata_install_script() -> &'static str {
     r####"#!/bin/sh
 # ManifestOS — install a foreign package file into its stratum (generated; do not edit).
 # Usage: strata-install <file.deb | file.rpm> …
