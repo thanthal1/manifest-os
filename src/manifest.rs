@@ -401,6 +401,12 @@ pub struct Android {
     /// into the user's applications dir, which fuzzel already reads).
     #[serde(default)]
     pub expose: Vec<String>,
+
+    /// Lazy lifecycle: Android is **not** kept running in the background. It boots
+    /// on the first app launch and auto-stops after this many minutes with no app
+    /// in use. `None` ⇒ 45. `Some(0)` ⇒ never auto-stop (stay resident once up).
+    #[serde(default)]
+    pub idle_minutes: Option<u32>,
 }
 
 impl Android {
@@ -412,6 +418,7 @@ impl Android {
             && self.mode.is_none()
             && self.apps.is_empty()
             && self.expose.is_empty()
+            && self.idle_minutes.is_none()
     }
 }
 

@@ -561,12 +561,19 @@ GPU. It stays design-only until the seam (6a) is proven.
 > management needs the user's live Wayland session, absent at root install time —
 > starts the session, sets multi-window mode, installs an in-Android **F-Droid**
 > store, installs the declared `apps`, and writes a **launcher per exposed app so
-> it shows in fuzzel/rofi**. Unit-tested (init cmd, installer, first-run script,
-> autostart, quoting) + dry-run-verified ordering. **Documented assumptions /
-> next:** kernel `binderfs` assumed present (warn, don't hard-fail); GPU/gralloc
-> rendering is real-hardware-only (VM GL 2.1 can't); reproducibility image-pin
-> (system+vendor version) and `export`/`diff`/Snapshots capture are follow-ups;
-> APK trust (prefer F-Droid ids) needs a scan.py stance. Example:
+> it shows in fuzzel/rofi**. **Lazy lifecycle** (Android is *not* kept in the
+> background): the container is left **disabled** at boot; every launcher points
+> at **`waydroid-launch`**, which brings Android up on demand (container start is
+> passwordless via a scoped `sudoers` rule) and stamps an activity marker; a
+> per-user **`waydroid-idle.timer`** stops the session **and** container after
+> `idle_minutes` (default 45, `0` = stay resident) with no Waydroid window open
+> (best-effort per-compositor window check: hyprctl/swaymsg/niri). Unit-tested
+> (init, installer, launcher, idle, first-run, sudoers, quoting — 8 tests) +
+> dry-run-verified ordering. **Documented assumptions / next:** kernel `binderfs`
+> assumed present (warn, don't hard-fail); GPU/gralloc rendering is
+> real-hardware-only (VM GL 2.1 can't); reproducibility image-pin (system+vendor
+> version) and `export`/`diff`/Snapshots capture are follow-ups; APK trust (prefer
+> F-Droid ids) needs a scan.py stance. Example:
 > [`examples/reference/android-waydroid.json`](../examples/reference/android-waydroid.json).
 > Original design below. Anchor use case: **mobile-only apps** — messengers,
 > banking apps that refuse the web, and Android games — as native-feeling windows.
