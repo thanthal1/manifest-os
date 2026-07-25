@@ -236,11 +236,6 @@ install_bundle() {
   sel=
   for f in "$base" "$abi" "$dpi" $langs $feats; do [ -n "$f" ] && sel="$sel $f"; done
   echo "  selected splits:$(for f in $sel; do printf ' %s' "$(basename "$f")"; done)"
-  # Stage where the container can read them (Android /data = /var/lib/waydroid/data),
-  # so pm reads real files instead of a stdin stream that waydroid shell may not forward.
-  ctmp=/var/lib/waydroid/data/local/tmp
-  sudo mkdir -p "$ctmp" 2>/dev/null || echo "  ! could not create $ctmp (is Waydroid initialised?)" >&2
-  for f in $sel; do sudo cp "$f" "$ctmp/$(basename "$f")" 2>/dev/null && sudo chmod 644 "$ctmp/$(basename "$f")" 2>/dev/null; done
   total=0; for f in $sel; do total=$((total + $(stat -c%s "$f"))); done
   out=$(sudo waydroid shell -- pm install-create -S "$total" 2>&1)
   sid=$(printf '%s' "$out" | sed -n 's/.*\[\([0-9]*\)\].*/\1/p' | head -n1)
@@ -248,17 +243,16 @@ install_bundle() {
   [ -n "$sid" ] || { echo "  ! pm install-create failed: $out" >&2; ok=0; }
   i=0
   [ "$ok" = 1 ] && for f in $sel; do
-    i=$((i+1)); bn=$(basename "$f")
-    # The file must be visible inside the container. If not, the staging path is
-    # wrong (Android /data != /var/lib/waydroid/data) — say so and stop.
-    if ! sudo waydroid shell -- test -f "/data/local/tmp/$bn" 2>/dev/null; then
-      echo "  ! $bn not visible in the container at /data/local/tmp — staging failed" >&2
-      sudo waydroid shell -- ls /data/local/tmp 2>&1 | head -5 | sed 's/^/    /' >&2
-      ok=0; break
+    i=$((i+1)); bn=$(basename "$f"); sz=$(stat -c%s "$f")
+    # Stream the split to pm over stdin (what `adb install-multiple` does): pm
+    # writes it into its own session with the right SELinux context, so no host
+    # file in /data/local/tmp (which Android's confined installer can't open).
+    echo "  writing $bn ($sz bytes)"
+    r=$(sudo waydroid shell -- pm install-write -S "$sz" "$sid" "split$i" - < "$f" 2>&1)
+    streamed=$(printf '%s' "$r" | sed -n 's/.*streamed \([0-9][0-9]*\) bytes.*/\1/p')
+    if [ "${streamed:-0}" != "$sz" ]; then
+      echo "  ! install-write $bn: ${r:-no output} (streamed ${streamed:-0}/$sz)" >&2; ok=0
     fi
-    # Read the file by PATH (no -S — that would make pm read stdin instead).
-    r=$(sudo waydroid shell -- pm install-write "$sid" "split$i" "/data/local/tmp/$bn" 2>&1)
-    printf '%s' "$r" | grep -qi success || { echo "  ! install-write $bn: ${r:-no output}" >&2; ok=0; }
   done
   if [ "$ok" = 1 ]; then
     r=$(sudo waydroid shell -- pm install-commit "$sid" 2>&1)
