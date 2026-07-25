@@ -753,9 +753,8 @@ fn enter_helper_script(s: &Stratum) -> String {
          for m in {binds}; do\n    \
          {{ [ -d \"/$m\" ] && [ -d \"$root/$m\" ]; }} && mount --rbind \"/$m\" \"$root/$m\"\n  \
          done\n  \
-         {{ [ -d /usr/share/terminfo ] && [ -d \"$root/usr/share/terminfo\" ]; }} && mount --bind /usr/share/terminfo \"$root/usr/share/terminfo\" 2>/dev/null || true\n  \
-         for share in fonts icons; do mkdir -p \"$root/usr/share/$share\" 2>/dev/null; {{ [ -d \"/usr/share/$share\" ]; }} && mount --bind \"/usr/share/$share\" \"$root/usr/share/$share\" 2>/dev/null; done; true\n  \
-         {copy_resolv}export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n  \
+         for share in terminfo fonts icons; do mkdir -p \"$root/usr/share/$share\" 2>/dev/null; {{ [ -d \"/usr/share/$share\" ]; }} && mount --bind \"/usr/share/$share\" \"$root/usr/share/$share\" 2>/dev/null; done; true\n  \
+         {copy_resolv}export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin TERMINFO_DIRS=/usr/share/terminfo\n  \
          if [ \"$mode\" = user ]; then\n    \
          uid=$1; gid=$2; groups=$3; home=$4; disp=$5; wl=$6; xrd=$7; xauth=$8; shift 8\n    \
          [ \"${{SUDO_UID:-$uid}}\" = \"$uid\" ] || {{ echo \"strata: refusing to run as uid $uid (caller is $SUDO_UID)\" >&2; exit 1; }}\n    \
@@ -1098,10 +1097,11 @@ mod tests {
         assert!(script.contains("exec chroot \"$root\" /usr/bin/env \"$@\""), "{script}");
         // Base binds + the shared home/tmp all appear in the mount loop.
         assert!(script.contains("for m in proc sys dev run home tmp;"), "{script}");
-        // Host terminfo + fonts/icons are bound in so TUI/GUI apps work in a
-        // minimal rootfs (a fresh Alpine/Fedora rootfs ships zero fonts).
-        assert!(script.contains("mount --bind /usr/share/terminfo"), "{script}");
-        assert!(script.contains("for share in fonts icons"), "{script}");
+        // Host terminfo + fonts/icons are bound in (target mkdir'd first, so it
+        // lands on Alpine which ships no /usr/share/terminfo) and TERMINFO_DIRS
+        // pins the search path so ncurses finds them regardless of distro default.
+        assert!(script.contains("for share in terminfo fonts icons"), "{script}");
+        assert!(script.contains("TERMINFO_DIRS=/usr/share/terminfo"), "{script}");
     }
 
     #[test]
