@@ -20,14 +20,14 @@ __manifest_cnf() {
       read -r __r
       case $__r in
         [yY]|[yY][eE][sS])
-          sudo manifest paru || return $?
+          manifest paru || return $?
           hash -r 2>/dev/null
           "$@"
           return $?
           ;;
       esac
     fi
-    printf 'Install it with:  sudo manifest paru\n' >&2
+    printf 'Install it with:  manifest paru   (no sudo — it builds paru as you, escalates itself)\n' >&2
     return 127
   fi
   if [ "$cmd" = waydroid ] || [ "$cmd" = android-install ]; then
@@ -37,14 +37,14 @@ __manifest_cnf() {
       read -r __r
       case $__r in
         [yY]|[yY][eE][sS])
-          sudo manifest android || return $?
+          manifest android || return $?
           hash -r 2>/dev/null
           "$@"
           return $?
           ;;
       esac
     fi
-    printf 'Set it up with:  sudo manifest android\n' >&2
+    printf 'Set it up with:  manifest android   (no sudo — it escalates itself)\n' >&2
     return 127
   fi
   case $cmd in

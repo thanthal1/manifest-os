@@ -316,6 +316,22 @@ fn main() {
     }
 }
 
+/// Commands that build from the AUR (`paru`, `android`, `update`) must run as the
+/// normal user — `makepkg`/`paru` refuse root and the engine escalates per-step
+/// itself. If invoked via `sudo` (SUDO_USER set), bail with a clear message
+/// instead of the cryptic "makepkg as root" failure. pkexec (the GUI path) does
+/// not set SUDO_USER, so this only catches an explicit `sudo manifest …`.
+fn refuse_if_run_via_sudo(cmd: &str) -> Result<()> {
+    if std::env::var_os("SUDO_USER").is_some() {
+        anyhow::bail!(
+            "`manifest {cmd}` builds from the AUR (paru/makepkg), which can't run under sudo.\n\
+             Run it WITHOUT sudo — it prompts for your password only when it needs root:\n\
+             \n    manifest {cmd}\n"
+        );
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Install {
@@ -331,14 +347,19 @@ fn run() -> Result<()> {
         }
         Command::Strata { action } => strata_add(action),
         Command::Paru => {
+            refuse_if_run_via_sudo("paru")?;
             let ctx = Ctx::new(false);
             pacman::bootstrap_paru(&ctx)
         }
         Command::Android => {
+            refuse_if_run_via_sudo("android")?;
             let ctx = Ctx::new(false);
             android::apply(&manifest::manifest::Android::default(), &ctx)
         }
         Command::Update { dry_run } => {
+            if !dry_run {
+                refuse_if_run_via_sudo("update")?;
+            }
             let ctx = Ctx::new(dry_run);
             update::run(&ctx)
         }

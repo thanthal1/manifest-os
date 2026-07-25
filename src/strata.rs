@@ -957,14 +957,14 @@ __manifest_cnf() {
       read -r __r
       case $__r in
         [yY]|[yY][eE][sS])
-          sudo manifest paru || return $?
+          manifest paru || return $?
           hash -r 2>/dev/null
           "$@"
           return $?
           ;;
       esac
     fi
-    printf 'Install it with:  sudo manifest paru\n' >&2
+    printf 'Install it with:  manifest paru   (no sudo — it builds paru as you, escalates itself)\n' >&2
     return 127
   fi
   if [ "$cmd" = waydroid ] || [ "$cmd" = android-install ]; then
@@ -974,14 +974,14 @@ __manifest_cnf() {
       read -r __r
       case $__r in
         [yY]|[yY][eE][sS])
-          sudo manifest android || return $?
+          manifest android || return $?
           hash -r 2>/dev/null
           "$@"
           return $?
           ;;
       esac
     fi
-    printf 'Set it up with:  sudo manifest android\n' >&2
+    printf 'Set it up with:  manifest android   (no sudo — it escalates itself)\n' >&2
     return 127
   fi
   case $cmd in
@@ -1378,9 +1378,12 @@ mod tests {
         assert!(s.contains("command_not_found_handle()"), "bash hook: {s}");
         assert!(s.contains("command_not_found_handler()"), "zsh hook: {s}");
         assert!(s.contains("sudo manifest strata add \"$distro\" --expose \"$cmd\""), "{s}");
-        // paru (native AUR helper, not a stratum) offers to install itself.
+        // paru (native AUR helper, not a stratum) offers to install itself —
+        // WITHOUT sudo (makepkg refuses root; the command escalates itself).
         assert!(s.contains("if [ \"$cmd\" = paru ]; then"), "paru branch: {s}");
-        assert!(s.contains("sudo manifest paru"), "paru install command: {s}");
+        assert!(s.contains("manifest paru || return"), "paru install command: {s}");
+        assert!(!s.contains("sudo manifest paru"), "paru must NOT be offered with sudo: {s}");
+        assert!(!s.contains("sudo manifest android"), "android must NOT be offered with sudo: {s}");
     }
 
     #[test]
