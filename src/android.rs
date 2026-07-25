@@ -185,6 +185,12 @@ set -e
 [ $# -ge 1 ] || { echo 'usage: android-install <file.apk|.apkm|.apks|.xapk | fdroid.package.id> …' >&2; exit 2; }
 command -v waydroid >/dev/null || { echo 'android-install: waydroid is not installed' >&2; exit 1; }
 @ENSURE@
+if waydroid status 2>/dev/null | grep -qi 'session.*running'; then
+  echo "android-install: Waydroid session is up."
+else
+  echo "android-install: WARNING - Waydroid session is not running; the install will likely fail." >&2
+  echo "  Start it from your desktop session first:  waydroid session start" >&2
+fi
 install_fdroid() {
   app="$1"
   vc=$(curl -fsSL "https://f-droid.org/api/v1/packages/$app" | sed -n 's/.*"suggestedVersionCode"[: ]*\([0-9]*\).*/\1/p' | head -n1)
@@ -193,43 +199,60 @@ install_fdroid() {
   curl -fsSL -o "$tmp" "https://f-droid.org/repo/${app}_${vc}.apk"
   waydroid app install "$tmp"; rm -f "$tmp"
 }
-# Install a split bundle (.apkm/.apks/.xapk = ZIP of base + split APKs).
+# Install a split bundle (.apkm/.apks/.xapk = ZIP of base + split APKs). Loud on
+# purpose — every step prints, so a failure is visible, not silent.
 install_bundle() {
   bundle="$1"; dir=$(mktemp -d)
-  bsdtar -xf "$bundle" -C "$dir" 2>/dev/null || unzip -qo "$bundle" -d "$dir" 2>/dev/null || {
-    echo "android-install: cannot read $bundle" >&2; rm -rf "$dir"; return 1; }
+  echo "android-install: unpacking $(basename "$bundle")"
+  bsdtar -xf "$bundle" -C "$dir" 2>/dev/null || unzip -qo "$bundle" -d "$dir" || {
+    echo "  ! cannot read $bundle" >&2; rm -rf "$dir"; return 1; }
   apks=$(find "$dir" -name '*.apk')
-  [ -n "$apks" ] || { echo "android-install: no APKs in $bundle" >&2; rm -rf "$dir"; return 1; }
+  [ -n "$apks" ] || { echo "  ! no APKs inside $bundle" >&2; rm -rf "$dir"; return 1; }
   base=$(printf '%s\n' $apks | grep -iE '(^|/)base\.apk$' | head -n1)
   [ -n "$base" ] || base=$(printf '%s\n' $apks | grep -v 'split_' | head -n1)
   abi=
   for a in x86_64 x86 arm64_v8a arm64 armeabi_v7a armeabi; do
-    m=$(printf '%s\n' $apks | grep -i "split_config\.$a\.apk" | head -n1)
-    [ -n "$m" ] && { abi="$m"; break; }
+    m=$(printf '%s\n' $apks | grep -i "split_config\.$a\.apk" | head -n1); [ -n "$m" ] && { abi="$m"; break; }
   done
   dpi=
   for d in xxxhdpi xxhdpi xhdpi hdpi tvdpi mdpi nodpi; do
-    m=$(printf '%s\n' $apks | grep -i "split_config\.$d\.apk" | head -n1)
-    [ -n "$m" ] && { dpi="$m"; break; }
+    m=$(printf '%s\n' $apks | grep -i "split_config\.$d\.apk" | head -n1); [ -n "$m" ] && { dpi="$m"; break; }
   done
   langs=$(printf '%s\n' $apks | grep -iE 'split_config\.[a-z][a-z]\.apk')
   feats=$(printf '%s\n' $apks | grep -i 'split_' | grep -iv 'split_config\.')
   sel=
   for f in "$base" "$abi" "$dpi" $langs $feats; do [ -n "$f" ] && sel="$sel $f"; done
+  echo "  selected splits:$(for f in $sel; do printf ' %s' "$(basename "$f")"; done)"
+  # Stage where the container can read them (Android /data = /var/lib/waydroid/data),
+  # so pm reads real files instead of a stdin stream that waydroid shell may not forward.
+  ctmp=/var/lib/waydroid/data/local/tmp
+  sudo mkdir -p "$ctmp" 2>/dev/null || echo "  ! could not create $ctmp (is Waydroid initialised?)" >&2
+  for f in $sel; do sudo cp "$f" "$ctmp/$(basename "$f")" 2>/dev/null && sudo chmod 644 "$ctmp/$(basename "$f")" 2>/dev/null; done
   total=0; for f in $sel; do total=$((total + $(stat -c%s "$f"))); done
-  sid=$(sudo waydroid shell -- pm install-create -S "$total" 2>/dev/null | sed -n 's/.*\[\([0-9]*\)\].*/\1/p' | head -n1)
-  if [ -n "$sid" ]; then
-    ok=1
-    for f in $sel; do
-      sudo waydroid shell -- pm install-write -S "$(stat -c%s "$f")" "$sid" "$(basename "$f" .apk)" - < "$f" >/dev/null 2>&1 || ok=0
-    done
-    if [ "$ok" = 1 ] && sudo waydroid shell -- pm install-commit "$sid" >/dev/null 2>&1; then
-      echo "android-install: installed $(basename "$bundle")"; rm -rf "$dir"; return 0
-    fi
-    sudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1 || true
+  out=$(sudo waydroid shell -- pm install-create -S "$total" 2>&1)
+  sid=$(printf '%s' "$out" | sed -n 's/.*\[\([0-9]*\)\].*/\1/p' | head -n1)
+  ok=1
+  [ -n "$sid" ] || { echo "  ! pm install-create failed: $out" >&2; ok=0; }
+  i=0
+  [ "$ok" = 1 ] && for f in $sel; do
+    i=$((i+1)); bn=$(basename "$f")
+    if ! r=$(sudo waydroid shell -- pm install-write -S "$(stat -c%s "$f")" "$sid" "split$i" "/data/local/tmp/$bn" 2>&1); then
+      echo "  ! install-write $bn: $r" >&2; ok=0; fi
+  done
+  if [ "$ok" = 1 ]; then
+    r=$(sudo waydroid shell -- pm install-commit "$sid" 2>&1)
+    if printf '%s' "$r" | grep -qi success; then
+      echo "  installed $(basename "$bundle") - it can take a few seconds to appear in the launcher"
+    else echo "  ! install-commit: $r" >&2; ok=0; fi
   fi
-  echo "android-install: split install failed — installing base apk only" >&2
-  waydroid app install "$base"; rm -rf "$dir"
+  [ -n "$sid" ] && [ "$ok" != 1 ] && sudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1
+  for f in $sel; do sudo rm -f "$ctmp/$(basename "$f")" 2>/dev/null; done
+  if [ "$ok" != 1 ]; then
+    echo "  split install failed; trying the base APK alone via waydroid..." >&2
+    if waydroid app install "$base"; then echo "  installed base APK only (some resources may be missing)"
+    else echo "  ! base install also failed - check that the session is up: waydroid status" >&2; fi
+  fi
+  rm -rf "$dir"
 }
 for app in "$@"; do
   case "$app" in
