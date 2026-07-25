@@ -143,7 +143,21 @@ fn ensure_up() -> &'static str {
        i=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do\n    \
          i=$((i+1)); [ \"$i\" -gt 60 ] && break; sleep 1\n  \
        done\n\
-     }\n"
+     }\n\
+     # `session running` only means the container is up — Android's framework\n\
+     # services (package manager) register later, and `pm` fails with\n\
+     # \"Can't find service\" until then. Wait for the boot to actually complete.\n\
+     wait_android_ready() {\n  \
+       k=0\n  \
+       while [ $k -lt 120 ]; do\n    \
+         bc=$(sudo waydroid shell -- getprop sys.boot_completed 2>/dev/null | tr -d '\\r\\n')\n    \
+         if [ \"$bc\" = 1 ] && sudo waydroid shell -- cmd package list packages >/dev/null 2>&1; then return 0; fi\n    \
+         [ $k = 0 ] && echo \"  waiting for Android to finish booting...\"\n    \
+         k=$((k+1)); sleep 2\n  \
+       done\n  \
+       echo \"  ! Android did not finish booting in time (pm may fail)\" >&2; return 1\n\
+     }\n\
+     wait_android_ready || true\n"
 }
 
 /// Snippet that stamps the activity marker (touched on launch + by the watchdog
@@ -206,7 +220,7 @@ pub fn arm_setup_script() -> &'static str {
      sudo pacman -S --needed --noconfirm git python lzip >/dev/null 2>&1 || true\n\
      d=$(mktemp -d)\n\
      if ! git clone --depth 1 https://github.com/casualsnek/waydroid_script \"$d/ws\" >/dev/null 2>&1; then\n  \
-       echo '  ! could not clone waydroid_script' >&2; rm -rf \"$d\"; exit 1\n\
+       echo '  ! could not clone waydroid_script' >&2; sudo rm -rf \"$d\"; exit 1\n\
      fi\n\
      echo '  · setting up its Python deps in a venv'\n\
      python -m venv \"$d/venv\" >/dev/null 2>&1\n\
@@ -215,11 +229,11 @@ pub fn arm_setup_script() -> &'static str {
      waydroid session stop >/dev/null 2>&1 || true\n\
      PY=\"$d/venv/bin/python\"\n\
      if sudo \"$PY\" \"$d/ws/main.py\" install libndk; then\n  \
-       echo 'waydroid-arm-setup: done (libndk) — ARM apps run after the session restarts'; rm -rf \"$d\"; exit 0\n\
+       echo 'waydroid-arm-setup: done (libndk) — ARM apps run after the session restarts'; sudo rm -rf \"$d\"; exit 0\n\
      elif sudo \"$PY\" \"$d/ws/main.py\" install libhoudini; then\n  \
-       echo 'waydroid-arm-setup: done (libhoudini) — ARM apps run after the session restarts'; rm -rf \"$d\"; exit 0\n\
+       echo 'waydroid-arm-setup: done (libhoudini) — ARM apps run after the session restarts'; sudo rm -rf \"$d\"; exit 0\n\
      else\n  \
-       echo '  ! ARM translation install failed (tried libndk and libhoudini)' >&2; rm -rf \"$d\"; exit 1\n\
+       echo '  ! ARM translation install failed (tried libndk and libhoudini)' >&2; sudo rm -rf \"$d\"; exit 1\n\
      fi\n"
 }
 
@@ -309,9 +323,12 @@ install_bundle() {
           else armrun() { sh -c "$(manifest __script waydroid-arm-setup)" manifest; }; fi
           armrun; arm_rc=$?
           # arm-setup stops the session to patch the image — bring it back either way
-          # so the install (or the base-APK fallback) can proceed.
+          # so the install (or the base-APK fallback) can proceed. After an image
+          # patch Android cold-boots, so wait for the framework, not just the
+          # container (otherwise pm fails with "Can't find service").
           waydroid session start >/dev/null 2>&1 &
           j=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do j=$((j+1)); [ "$j" -gt 60 ] && break; sleep 1; done
+          wait_android_ready || true
           [ "$arm_rc" = 0 ] || echo "  ! ARM translation setup failed — the app may not run" >&2 ;;
       esac ;;
   esac
