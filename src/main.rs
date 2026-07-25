@@ -274,8 +274,10 @@ enum StrataAction {
     Add {
         /// debian | ubuntu | fedora  (alpine isn't supported yet).
         distro: String,
-        /// A binary to put on the host PATH, repeatable (e.g. --expose apt).
-        #[arg(long)]
+        /// A binary to put on the host PATH. Accepts several after one flag
+        /// (`--expose htop tree`) and is also repeatable — the auto-expose shim
+        /// passes every newly-installed binary in one `--expose a b c`.
+        #[arg(long, num_args = 1..)]
         expose: Vec<String>,
         /// Release/suite to bootstrap (bookworm, noble, 42). Defaults per distro.
         #[arg(long)]
