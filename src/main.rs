@@ -13,7 +13,7 @@ use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::{
     android, desktop, diff, export, history, install, installer, kernel, pacman, pkglock, strata,
-    survey, tui,
+    survey, tui, update,
 };
 use std::path::PathBuf;
 
@@ -78,6 +78,14 @@ enum Command {
     /// Apps and image pins come from the manifest's `android` block; this bare
     /// command sets up the container with Waydroid's defaults.
     Android,
+    /// Update everything, everywhere: the Arch host (repos + AUR), every foreign
+    /// stratum via its own package manager (apt/dnf/apk), Flatpak apps, and the
+    /// Waydroid Android image — one command across all package sources.
+    Update {
+        /// Print every step without executing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
     /// default desktop if `desktop` changed. Idempotent; safe to re-run.
@@ -329,6 +337,10 @@ fn run() -> Result<()> {
         Command::Android => {
             let ctx = Ctx::new(false);
             android::apply(&manifest::manifest::Android::default(), &ctx)
+        }
+        Command::Update { dry_run } => {
+            let ctx = Ctx::new(dry_run);
+            update::run(&ctx)
         }
         Command::Sync {
             file,

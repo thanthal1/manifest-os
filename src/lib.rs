@@ -33,5 +33,6 @@ pub mod survey;
 pub mod system;
 pub mod theming;
 pub mod tui;
+pub mod update;
 pub mod users;
 pub mod wallpaper;
