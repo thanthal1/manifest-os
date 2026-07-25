@@ -22,6 +22,7 @@ use anyhow::Result;
 
 const INSTALLER: &str = "/usr/local/bin/android-install";
 const LAUNCHER: &str = "/usr/local/bin/waydroid-launch";
+const ARM_SETUP: &str = "/usr/local/bin/waydroid-arm-setup";
 const IDLE: &str = "/usr/local/bin/waydroid-idle";
 const FIRSTRUN: &str = "/usr/local/bin/waydroid-firstrun";
 const AUTOSTART: &str = "/etc/xdg/autostart/manifest-waydroid-firstrun.desktop";
@@ -46,6 +47,7 @@ pub fn apply(a: &Android, ctx: &Ctx) -> Result<()> {
     )?;
     write_sudoers(ctx)?;
     write_installer(ctx)?;
+    write_arm_setup(ctx)?;
     write_mime(ctx)?;
     write_launcher(ctx)?;
     write_idle(a, ctx)?;
@@ -182,6 +184,39 @@ fn write_installer(ctx: &Ctx) -> Result<()> {
     ctx.sudo("chmod", &["0755", INSTALLER])
 }
 
+fn write_arm_setup(ctx: &Ctx) -> Result<()> {
+    println!("  · installing the `waydroid-arm-setup` command (thin stub → binary)");
+    ctx.write_root(ARM_SETUP, &thin_stub("waydroid-arm-setup"))?;
+    ctx.sudo("chmod", &["0755", ARM_SETUP])
+}
+
+/// Install **libndk** ARM→x86 translation into Waydroid, so ARM-only apps run on
+/// an x86 host (idempotent). Uses the standard `waydroid_script` tool. Called
+/// automatically by `android-install` when it detects an ARM-only app on x86.
+/// Pure — structure unit-tested.
+pub fn arm_setup_script() -> &'static str {
+    "#!/bin/sh\n\
+     # ManifestOS — install libndk ARM translation into Waydroid (generated logic).\n\
+     command -v waydroid >/dev/null || { echo 'waydroid-arm-setup: waydroid not installed' >&2; exit 1; }\n\
+     if sudo waydroid shell getprop ro.dalvik.vm.native.bridge 2>/dev/null | grep -qiE 'libndk|libhoudini'; then\n  \
+       echo 'waydroid-arm-setup: ARM translation already installed'; exit 0\n\
+     fi\n\
+     echo 'waydroid-arm-setup: installing libndk ARM translation (one-time; downloads Google translation blobs)'\n\
+     sudo pacman -S --needed --noconfirm git python python-requests lzip >/dev/null 2>&1 || true\n\
+     d=$(mktemp -d)\n\
+     if ! git clone --depth 1 https://github.com/casualsnek/waydroid_script \"$d/ws\" >/dev/null 2>&1; then\n  \
+       echo '  ! could not clone waydroid_script' >&2; rm -rf \"$d\"; exit 1\n\
+     fi\n\
+     waydroid session stop >/dev/null 2>&1 || true\n\
+     if sudo python3 \"$d/ws/main.py\" install libndk; then\n  \
+       echo 'waydroid-arm-setup: done — ARM apps run after the session restarts'; rm -rf \"$d\"; exit 0\n\
+     else\n  \
+       echo '  ! libndk install failed. You can try libhoudini (Intel):' >&2\n  \
+       echo '      sudo python3 waydroid_script/main.py install libhoudini' >&2\n  \
+       rm -rf \"$d\"; exit 1\n\
+     fi\n"
+}
+
 /// `android-install <file | fdroid-id> …` — brings Android up if needed and
 /// installs. Handles a plain **`.apk`**, a **split bundle** (`.apkm`/`.apks`/
 /// `.xapk` — a ZIP of base + split APKs, e.g. from APKMirror), or a bare
@@ -219,6 +254,9 @@ install_bundle() {
   echo "android-install: unpacking $(basename "$bundle")"
   bsdtar -xf "$bundle" -C "$dir" 2>/dev/null || unzip -qo "$bundle" -d "$dir" || {
     echo "  ! cannot read $bundle" >&2; rm -rf "$dir"; return 1; }
+  # mktemp -d is 0700; make it traversable/readable so the base-APK fallback's
+  # `waydroid app install <path>` can read the file.
+  chmod 755 "$dir" 2>/dev/null; find "$dir" -name '*.apk' -exec chmod 644 {} + 2>/dev/null
   apks=$(find "$dir" -name '*.apk')
   [ -n "$apks" ] || { echo "  ! no APKs inside $bundle" >&2; rm -rf "$dir"; return 1; }
   base=$(printf '%s\n' $apks | grep -iE '(^|/)base\.apk$' | head -n1)
@@ -236,6 +274,24 @@ install_bundle() {
   sel=
   for f in "$base" "$abi" "$dpi" $langs $feats; do [ -n "$f" ] && sel="$sel $f"; done
   echo "  selected splits:$(for f in $sel; do printf ' %s' "$(basename "$f")"; done)"
+  # Auto-detect an ARM-only app on an x86 host: the selected ABI split is arm* and
+  # there's no x86 one. Set up ARM translation (libndk), then bring the session
+  # back (arm-setup stops it to patch the image) so the install can proceed.
+  case "$(uname -m)" in
+    x86_64|amd64|i?86)
+      case "$abi" in
+        *arm*)
+          echo "  this app is ARM-only and your Waydroid is x86 — setting up ARM translation..."
+          # Run the stub if installed, else the logic straight from the binary
+          # (so this works right after `pacman -Syu`, before `manifest android`).
+          if command -v waydroid-arm-setup >/dev/null 2>&1; then armrun() { waydroid-arm-setup; }
+          else armrun() { sh -c "$(manifest __script waydroid-arm-setup)" manifest; }; fi
+          if armrun; then
+            waydroid session start >/dev/null 2>&1 &
+            j=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do j=$((j+1)); [ "$j" -gt 60 ] && break; sleep 1; done
+          else echo "  ! ARM translation setup failed — the app may not run" >&2; fi ;;
+      esac ;;
+  esac
   total=0; for f in $sel; do total=$((total + $(stat -c%s "$f"))); done
   out=$(sudo waydroid shell -- pm install-create -S "$total" 2>&1)
   sid=$(printf '%s' "$out" | sed -n 's/.*\[\([0-9]*\)\].*/\1/p' | head -n1)
@@ -261,7 +317,6 @@ install_bundle() {
     else echo "  ! install-commit: $r" >&2; ok=0; fi
   fi
   [ -n "$sid" ] && [ "$ok" != 1 ] && sudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1
-  for f in $sel; do sudo rm -f "$ctmp/$(basename "$f")" 2>/dev/null; done
   if [ "$ok" != 1 ]; then
     echo "  split install failed; trying the base APK alone via waydroid..." >&2
     if waydroid app install "$base"; then echo "  installed base APK only (some resources may be missing)"
@@ -588,6 +643,23 @@ mod tests {
         assert!(!s.contains("NOPASSWD: ALL"), "{s}");
         // ASCII-only — some visudo/locale setups reject non-ASCII even in comments.
         assert!(s.is_ascii(), "sudoers must be ASCII: {s}");
+    }
+
+    #[test]
+    fn arm_setup_installs_libndk_idempotently() {
+        let s = arm_setup_script();
+        assert!(s.contains("waydroid_script"), "uses waydroid_script: {s}");
+        assert!(s.contains("install libndk"), "installs libndk: {s}");
+        // Idempotent — skips if the native bridge is already set.
+        assert!(s.contains("ro.dalvik.vm.native.bridge"), "idempotency check: {s}");
+    }
+
+    #[test]
+    fn installer_auto_sets_up_arm_translation_on_x86() {
+        let s = installer_script();
+        assert!(s.contains("uname -m"), "checks host arch: {s}");
+        assert!(s.contains("*arm*)"), "detects arm-only abi split: {s}");
+        assert!(s.contains("waydroid-arm-setup"), "invokes arm setup: {s}");
     }
 
     #[test]
