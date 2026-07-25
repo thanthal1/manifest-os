@@ -454,10 +454,30 @@ Transparent `/usr/lib`/`/etc`/`/usr/share` + per-file resolution for GUI polish.
 Separately-installed **GPL** component behind a hard boundary — never vendored
 into `src/`. Reassess whether shims already covered the real use cases.
 
-**Phase 5 — Windows apps (a "windows stratum": VM + seamless remoting).**
+**Phase 5 — Android apps (a "waydroid stratum": container, not chroot or VM).**
+Run Android apps (mobile-only messengers, banking apps, games) as native-feeling
+windows on the ManifestOS desktop. Nearer-term and lighter than Windows — no VM,
+no passthrough — so it lands first. See §13 for the full design; the short version:
+
+- **Same mental model, different backend.** An `android` stratum is declared and
+  its apps are exposed onto the menu exactly like a Linux stratum — but Android is
+  bionic/ART/binder, not a chroot of Linux binaries, so the backend is
+  **[Waydroid]**: a single LXC container running an Android image on the *host*
+  kernel, painting each app as a Wayland window (multi-window mode). The engine
+  starts the session on first launch, like the enter-helper wakes a stratum.
+- **Thin orchestration of standard tools.** `waydroid init` (pinned image) →
+  `waydroid session start` → `waydroid app install <apk>` / `waydroid app launch`.
+  No bespoke daemon; Waydroid already emits per-app `.desktop` files we mirror with
+  the existing strata mechanism.
+- **Kernel + GPU are the gate.** Needs `binderfs` (mainline) and a working
+  gralloc/GBM path — real GPU on hardware; the VM's GL 2.1 can't (same wall as the
+  GUI work). Reproducibility = pin the system/vendor image version, like a stratum
+  `snapshot`.
+
+**Phase 6 — Windows apps (a "windows stratum": VM + seamless remoting).**
 The end-goal stretch: run Windows applications (the anchor use case is
 **SolidWorks** and other CAD) as if they were native, on the ManifestOS desktop.
-See §13 for the full design; the short version:
+See §14 for the full design; the short version:
 
 - **Same mental model, different backend.** A `windows` stratum is declared and
   its apps are exposed onto the menu/PATH exactly like a Linux stratum — but you
@@ -478,14 +498,14 @@ See §13 for the full design; the short version:
   carve), so booting the *existing* install in KVM is a natural — if fragile —
   option; a dedicated managed VM is the robust default.
 
-Deliverable ladder: 5a — managed VM + FreeRDP RemoteApp, one app end-to-end;
-5b — manifest `windows` block + auto-expose + `.desktop` menu entries; 5c —
-GPU passthrough (5c-desktop: iGPU+dGPU; 5c-laptop: muxless + Looking Glass); 5d
+Deliverable ladder: 6a — managed VM + FreeRDP RemoteApp, one app end-to-end;
+6b — manifest `windows` block + auto-expose + `.desktop` menu entries; 6c —
+GPU passthrough (6c-desktop: iGPU+dGPU; 6c-laptop: muxless + Looking Glass); 6d
 (stretch) — attach the physical dual-boot Windows partition.
 
 **Honest gate:** this is a far heavier subsystem than the Linux strata (which is
 just chroot). Its usefulness for CAD is **hardware-gated** on IOMMU + a spare
-GPU. It stays design-only until the seam (5a) is proven.
+GPU. It stays design-only until the seam (6a) is proven.
 
 ---
 
@@ -522,14 +542,116 @@ GPU. It stays design-only until the seam (5a) is proven.
 
 ---
 
-## 13. Windows apps — the "windows stratum" (Phase 5, design-only)
+## 13. Android apps — the "waydroid stratum" (Phase 5, design-only)
+
+> Status: **idea / design.** Reuses the strata mental model (declare → expose →
+> menu launcher) with a *container* backend. Nothing here is built. Anchor use
+> case: **mobile-only apps** — messengers, banking apps that refuse the web, and
+> Android games — running as native-feeling windows on the ManifestOS desktop.
+> Lands **before** Windows (§14): lighter (no VM, no passthrough) and higher
+> everyday demand.
+
+### 13.1 Why it fits the strata model (and where it diverges)
+
+A stratum is *"foreign software, declared in the manifest, exposed onto your menu,
+launched through a generated shim."* Android fits that shape — declare an
+`android` stratum, list the apps to expose, get menu launchers. What changes is
+the **backend**: Android is **not Linux** (bionic libc, the ART runtime, binder
+IPC, its own HAL/init), so you can't `chroot` it against host libs the way you can
+Debian. Instead the engine runs **[Waydroid]** — Android in a single privileged
+LXC container on the *host* kernel, its surfaces composited into your Wayland
+session. The per-app "shim" becomes `waydroid app launch <pkg>` against the
+running session, started on first launch the way the enter-helper wakes a stratum.
+
+Divergences from a Linux stratum, all consequences of "it's a container running a
+different OS, not a chroot":
+
+- **One container, many apps.** Unlike per-distro strata there's a single Android
+  instance; "exposing an app" is installing an APK + mirroring its launcher, not
+  bootstrapping a rootfs.
+- **No shared `$HOME`/namespace.** Android has its own filesystem and permission
+  model; files cross via Waydroid's shared folder (`~/Android`), not a bind of the
+  host `$HOME`.
+- **Kernel-coupled.** Needs host-kernel `binderfs` (and a memfd/ashmem path) — a
+  hard dependency the chroot strata don't have.
+- **Wayland-first.** Multi-window mode paints each app as its own toplevel (what
+  makes it feel native, vs. the single full-screen "Android tablet" mode).
+
+### 13.2 Backend — why Waydroid (not the alternatives)
+
+| Option | Mechanism | Verdict |
+|---|---|---|
+| **Waydroid** | LXC container, host kernel, Wayland surfaces | **the pick** — mainlined, active, near-native perf, real GPU |
+| Anbox | older snap-based container | superseded/dead — Waydroid is its successor |
+| AVD / QEMU emulator | full CPU + device emulation | too slow, no desktop integration — a dev tool, not a daily driver |
+| Genymotion / cloud | proprietary / remote | off-thesis (not local, not FOSS) |
+
+Waydroid is the only option matching the repo thesis — thin orchestration of a
+standard tool (`waydroid`), apps composited straight into the user's session, no
+emulation tax.
+
+### 13.3 The hard parts — kernel, GPU, images
+
+- **Kernel.** Needs `binderfs` (`CONFIG_ANDROID_BINDERFS`, mainline since 5.0) and
+  a memfd/ashmem path. ManifestOS owns its kernel choice, so this is a
+  manifest-declarable kernel feature — but a **hard gate**: no binder, no Android.
+- **GPU / gralloc.** Waydroid renders gralloc→GBM→DRM. Fine on real hardware with a
+  working GL/Vulkan driver; **in the build VM it hits the exact GL 2.1 wall** that
+  blocks the GTK4/Hyprland work (see the GPU-fallback notes) — so, like the GUI
+  features, it's **verify-on-hardware-only**: the VM can prove the
+  container/orchestration but not rendering.
+- **Images + reproducibility.** `waydroid init` fetches a system + vendor image
+  (LineageOS-based). Pin the image **channel + version** in the manifest, mirroring
+  a stratum `snapshot`. GApps vs. vanilla is a declared choice — many banking apps
+  need Play services (and pass SafetyNet only with GApps); call that out honestly,
+  it isn't always achievable and we can't redistribute Play.
+- **Networking.** Waydroid NATs through a `waydroid0` bridge — the engine owns that
+  setup like any other declarative network bit.
+
+### 13.4 Manifest shape (sketch)
+
+```json
+"android": {
+  "image": { "system": "lineage-20", "vendor": "lineage-20", "gapps": false },
+  "mode": "multi-window",
+  "apps": [
+    { "id": "org.telegram.messenger", "source": "fdroid" },
+    { "apk": "files/some-app.apk" }
+  ],
+  "expose": ["org.telegram.messenger"]
+}
+```
+
+Same `expose` → menu-launcher pattern as strata; `apps` installs (an F-Droid id or
+a sideloaded APK path, verified before install); `image` is the reproducibility
+pin. The engine mirrors Waydroid's generated `.desktop` files with the **existing**
+strata desktop-mirror mechanism, rewriting `Exec` through a `waydroid app launch`
+shim.
+
+### 13.5 Open questions (before any Phase 5 code)
+
+1. **GApps stance** — vanilla-only, or bundle a helper for the user to add
+   microG/GApps themselves (we can't redistribute Play)? Governs how many real apps
+   work.
+2. **Session lifecycle** — lazy-start on first app launch (like the enter-helper)
+   vs. a user service; clean stop/idle.
+3. **Permissions** — Android's per-app runtime prompts vs. a declarative manifest:
+   how much is pre-grantable.
+4. **APK trust** — sideloaded APKs are unsigned-by-us binaries from anywhere;
+   `scan.py`/marketplace needs an Android-APK stance (prefer F-Droid ids).
+5. **Kernel gate** — confirm the shipped kernel always has binderfs; fail the
+   `android` block **loudly**, never silently, when it doesn't.
+
+---
+
+## 14. Windows apps — the "windows stratum" (Phase 6, design-only)
 
 > Status: **idea / design.** The Linux strata (Phases 1–3) are the foundation
 > this reuses conceptually. This section is a plan, not a commitment; nothing here
 > is built. Anchor use case: **SolidWorks** (and CAD generally) running as a
 > native-feeling window on the ManifestOS desktop.
 
-### 13.1 Why it fits the strata model (and where it diverges)
+### 14.1 Why it fits the strata model (and where it diverges)
 
 A stratum is *"foreign software, declared in the manifest, exposed onto your
 PATH/menu, launched through a generated shim."* Windows fits that shape exactly —
@@ -550,7 +672,7 @@ no shared `$HOME`/namespace (files cross via an RDP drive redirect or a 9p/virti
 share); no glibc story (it's a whole OS); heavyweight (GBs of RAM, a booting
 guest) vs. a chroot's near-zero cost; and a hard hardware dependency for GPU apps.
 
-### 13.2 Tiered backends (mirrors debootstrap / dnf / apk)
+### 14.2 Tiered backends (mirrors debootstrap / dnf / apk)
 
 | Tier | Mechanism | Good for | Not for |
 |---|---|---|---|
@@ -561,7 +683,7 @@ guest) vs. a chroot's near-zero cost; and a hard hardware dependency for GPU app
 The engine picks (or the manifest pins) a tier. `wine` is the cheap default where
 it works; `vm-vfio` is the CAD path.
 
-### 13.3 GPU passthrough — the hard part, and the actual novel feature
+### 14.3 GPU passthrough — the hard part, and the actual novel feature
 
 CAD needs real 3D acceleration → **VFIO passthrough**: hand a physical GPU to the
 guest. This is legendarily fiddly to set up by hand, which is exactly why
@@ -603,7 +725,7 @@ ManifestOS exists to make declarative.
    spare GPU, refuse with a clear explanation rather than producing a broken boot.
    Never leave the machine unbootable in pursuit of passthrough.
 
-### 13.4 VM source: managed image vs. attach the dual-boot partition
+### 14.4 VM source: managed image vs. attach the dual-boot partition
 
 - **Managed image (default, robust).** ManifestOS provisions a dedicated Windows
   VM (its own qcow2, its own license/activation, virtio drivers pre-injected).
@@ -617,7 +739,7 @@ ManifestOS exists to make declarative.
   existing install; and it **cannot run in the VM while also booted natively** —
   the engine must enforce that mutual exclusion.
 
-### 13.5 Manifest shape (sketch)
+### 14.5 Manifest shape (sketch)
 
 ```json
 "windows": {
@@ -636,7 +758,7 @@ ManifestOS exists to make declarative.
 Windows-specific dir) and a `.desktop` menu entry — the same "expose" ergonomics
 as a Linux stratum. `manifest windows add <app>` would mirror `strata add`.
 
-### 13.6 Open questions (before any Phase 5 code)
+### 14.6 Open questions (before any Phase 6 code)
 
 1. Base FreeRDP RemoteApp integration on **WinApps** (license-permitting) or build
    the launcher/`.desktop` generation fresh?
@@ -647,12 +769,13 @@ as a Linux stratum. `manifest windows add <app>` would mirror `strata add`.
 4. Marketplace/security: a `windows` block spins up a VM with disk/GPU access — a
    large new attack surface for `scan.py` to reason about (untrusted ISO, raw
    partition access, passthrough).
-5. How much of §13.3's auto-detection is safe to run unattended vs. requires an
+5. How much of §14.3's auto-detection is safe to run unattended vs. requires an
    explicit "yes, reconfigure my bootloader for passthrough" confirmation.
 
+[Waydroid]: https://waydro.id
 [WinApps]: https://github.com/winapps-org/winapps
 
-## 14. Adjacent — `nix` as a native package source (like `flatpak`, **not** a stratum)
+## 15. Adjacent — `nix` as a native package source (like `flatpak`, **not** a stratum)
 
 > Status: **idea / design.** Deliberately *not* part of strata — it's a sibling to
 > the existing `flatpak` block. Nothing built.
