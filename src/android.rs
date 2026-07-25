@@ -235,6 +235,9 @@ for app in "$@"; do
   case "$app" in
     *.apk)                 waydroid app install "$app" ;;
     *.apkm|*.apks|*.xapk)  install_bundle "$app" ;;
+    *.deb|*.rpm)           # picked the wrong handler? hand off to strata-install.
+      if command -v strata-install >/dev/null 2>&1; then strata-install "$app";
+      else echo "android-install: '$app' is a Linux package — add a stratum: manifest strata add debian" >&2; fi ;;
     *)                     install_fdroid "$app" ;;
   esac
 done
@@ -260,11 +263,16 @@ fn write_mime(ctx: &Ctx) -> Result<()> {
 }
 
 fn mime_xml() -> &'static str {
+    // `.apkm`/`.apks`/`.xapk` are ZIP archives, so magic-sniffing would call them
+    // application/zip. Declaring each as a sub-class-of application/zip (like .jar
+    // /.apk/.docx) makes the more-specific glob match win, so a file manager sees
+    // e.g. application/vnd.apkm and offers the Android installer. High glob weight
+    // for good measure.
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
      <mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n  \
-       <mime-type type=\"application/vnd.apkm\"><comment>Android APKM bundle</comment><glob pattern=\"*.apkm\"/></mime-type>\n  \
-       <mime-type type=\"application/vnd.apks\"><comment>Android split APKs</comment><glob pattern=\"*.apks\"/></mime-type>\n  \
-       <mime-type type=\"application/x-xapk\"><comment>Android XAPK bundle</comment><glob pattern=\"*.xapk\"/></mime-type>\n\
+       <mime-type type=\"application/vnd.apkm\"><comment>Android APKM bundle</comment><sub-class-of type=\"application/zip\"/><glob pattern=\"*.apkm\" weight=\"80\"/></mime-type>\n  \
+       <mime-type type=\"application/vnd.apks\"><comment>Android split APKs</comment><sub-class-of type=\"application/zip\"/><glob pattern=\"*.apks\" weight=\"80\"/></mime-type>\n  \
+       <mime-type type=\"application/x-xapk\"><comment>Android XAPK bundle</comment><sub-class-of type=\"application/zip\"/><glob pattern=\"*.xapk\" weight=\"80\"/></mime-type>\n\
      </mime-info>\n"
 }
 
@@ -486,9 +494,18 @@ mod tests {
     fn mime_registers_bundle_types_and_handler() {
         let xml = mime_xml();
         assert!(xml.contains("*.apkm") && xml.contains("*.apks") && xml.contains("*.xapk"), "globs: {xml}");
+        // ZIP-based, so declared sub-class-of application/zip or magic wins.
+        assert_eq!(xml.matches("<sub-class-of type=\"application/zip\"/>").count(), 3, "zip subclass on all three: {xml}");
         let d = mime_handler_desktop();
         assert!(d.contains("Exec=android-install %f"), "{d}");
         assert!(d.contains("application/vnd.apkm"), "mimetype assoc: {d}");
+    }
+
+    #[test]
+    fn installer_delegates_deb_rpm_to_strata_install() {
+        let s = installer_script();
+        assert!(s.contains("*.deb|*.rpm)"), "deb/rpm handled: {s}");
+        assert!(s.contains("strata-install \"$app\""), "delegates to strata-install: {s}");
     }
 
     #[test]

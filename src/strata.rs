@@ -568,7 +568,10 @@ for f in "$@"; do
   case "$f" in
     *.deb) install_deb "$f" ;;
     *.rpm) install_rpm "$f" ;;
-    *) echo "strata-install: don't know how to install '$f' (expected .deb or .rpm)" >&2; exit 1 ;;
+    *.apk|*.apkm|*.apks|*.xapk)   # Android app — hand off to android-install.
+      if command -v android-install >/dev/null 2>&1; then android-install "$f";
+      else echo "strata-install: '$f' is an Android app — set up Android first: manifest android" >&2; exit 1; fi ;;
+    *) echo "strata-install: don't know how to install '$f' (expected .deb/.rpm/.apk*)" >&2; exit 1 ;;
   esac
 done
 "####
@@ -1399,6 +1402,9 @@ mod tests {
         // Installs through the root enter-helper.
         assert!(s.contains("/strata/.libexec/enter-") && s.contains("apt-get install -y"), "{s}");
         assert!(s.contains("dnf install -y"), "{s}");
+        // Android bundles picked here by mistake are handed off to android-install.
+        assert!(s.contains("*.apk|*.apkm|*.apks|*.xapk)"), "android delegation case: {s}");
+        assert!(s.contains("android-install \"$f\""), "delegates to android-install: {s}");
     }
 
     #[test]
