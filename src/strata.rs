@@ -37,6 +37,10 @@ const PROFILE_D: &str = "/etc/profile.d/00-manifest-strata.sh";
 const SUDOERS: &str = "/etc/sudoers.d/manifest-strata";
 /// Where `.desktop` menu launchers for exposed GUI apps are written.
 const APPLICATIONS_DIR: &str = "/usr/share/applications";
+/// Command that installs a foreign package **file** (.deb/.rpm) into its stratum.
+const STRATA_INSTALL: &str = "/usr/local/bin/strata-install";
+/// The .deb/.rpm "open with" file-manager handler.
+const DEB_RPM_HANDLER: &str = "/usr/share/applications/manifest-strata-install.desktop";
 
 /// Bind-shares set up when a stratum lists none explicitly. `x11`/`wayland` ride
 /// on `/tmp` and `/run` (already shared), so they need no extra bind here — they
@@ -500,7 +504,89 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
             true,
         )?;
     }
+
+    // "Open a .deb/.rpm to install it" — a `strata-install` command + a
+    // file-manager handler, so double-clicking (or `xdg-open`ing) a foreign
+    // package file installs it into the matching stratum, offering to add one if
+    // none is set up. Written on every install like the CNF handler above; mirrors
+    // the Android `.apkm` handler in `crate::android`.
+    ctx.write_root(STRATA_INSTALL, strata_install_script())?;
+    ctx.sudo("chmod", &["0755", STRATA_INSTALL])?;
+    ctx.write_root(DEB_RPM_HANDLER, deb_rpm_handler_desktop())?;
+    ctx.shell(
+        &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),
+        true,
+    )?;
     Ok(())
+}
+
+/// `strata-install <file.deb|.rpm> …` — install a foreign package file into the
+/// stratum whose distro matches (Debian/Ubuntu for `.deb`, Fedora/RHEL-family for
+/// `.rpm`), offering to bootstrap one if none exists. The file is copied into
+/// `/tmp` (bound into every stratum) so it's reachable from inside the chroot.
+fn strata_install_script() -> &'static str {
+    r####"#!/bin/sh
+# ManifestOS — install a foreign package file into its stratum (generated; do not edit).
+# Usage: strata-install <file.deb | file.rpm> …
+set -e
+[ $# -ge 1 ] || { echo 'usage: strata-install <file.deb | file.rpm> …' >&2; exit 2; }
+
+find_stratum() {  # $1 = a case-pattern of distro IDs, e.g. 'debian|ubuntu'
+  for h in /strata/.libexec/enter-*; do
+    [ -e "$h" ] || continue
+    name=${h#/strata/.libexec/enter-}
+    id=$(sed -n 's/^ID=//p' "/strata/$name/etc/os-release" 2>/dev/null | tr -d '"' | head -n1)
+    case "$id" in $1) echo "$name"; return 0 ;; esac
+  done
+  return 1
+}
+
+# Copy the package where the stratum can see it (/tmp is bound in), then install.
+staged() { d=$(mktemp -d /tmp/strata-install.XXXXXX); cp "$1" "$d/"; echo "$d/$(basename "$1")"; }
+
+install_deb() {
+  s=$(find_stratum 'debian|ubuntu') || {
+    printf '\nNo Debian/Ubuntu system is set up (needed for .deb). Add one now? [y/N] ' >&2
+    read -r r; case $r in [yY]|[yY][eE][sS]) sudo manifest strata add debian --expose apt dpkg && s=debian ;; *) echo 'Cancelled.' >&2; return 1 ;; esac
+  }
+  p=$(staged "$1")
+  sudo /strata/.libexec/enter-"$s" root sh -c "apt-get update; apt-get install -y '$p' || { dpkg -i '$p'; apt-get install -f -y; }"
+  rm -rf "$(dirname "$p")"
+}
+
+install_rpm() {
+  s=$(find_stratum 'fedora|rhel|centos|rocky|almalinux') || {
+    printf '\nNo Fedora system is set up (needed for .rpm). Add one now? [y/N] ' >&2
+    read -r r; case $r in [yY]|[yY][eE][sS]) sudo manifest strata add fedora --expose dnf rpm && s=fedora ;; *) echo 'Cancelled.' >&2; return 1 ;; esac
+  }
+  p=$(staged "$1")
+  sudo /strata/.libexec/enter-"$s" root dnf install -y "$p"
+  rm -rf "$(dirname "$p")"
+}
+
+for f in "$@"; do
+  case "$f" in
+    *.deb) install_deb "$f" ;;
+    *.rpm) install_rpm "$f" ;;
+    *) echo "strata-install: don't know how to install '$f' (expected .deb or .rpm)" >&2; exit 1 ;;
+  esac
+done
+"####
+}
+
+/// The file-manager "open with" handler for `.deb`/`.rpm` (standard MIME types,
+/// already in shared-mime-info) pointing at `strata-install`. Pure — tested.
+fn deb_rpm_handler_desktop() -> &'static str {
+    "[Desktop Entry]\n\
+     Type=Application\n\
+     Name=Install to its Linux system (strata)\n\
+     Comment=Install a .deb or .rpm into the matching foreign-distro stratum\n\
+     Exec=strata-install %F\n\
+     Icon=package-x-generic\n\
+     Terminal=true\n\
+     Categories=System;\n\
+     MimeType=application/vnd.debian.binary-package;application/x-deb;application/x-rpm;application/x-redhat-package-manager;\n\
+     NoDisplay=false\n"
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,6 +1381,29 @@ mod tests {
         // paru (native AUR helper, not a stratum) offers to install itself.
         assert!(s.contains("if [ \"$cmd\" = paru ]; then"), "paru branch: {s}");
         assert!(s.contains("sudo manifest paru"), "paru install command: {s}");
+    }
+
+    #[test]
+    fn strata_install_handles_deb_and_rpm_with_offer() {
+        let s = strata_install_script();
+        assert!(s.starts_with("#!/bin/sh"), "{s}");
+        assert!(s.contains("*.deb)") && s.contains("*.rpm)"), "dispatch: {s}");
+        assert!(s.contains("find_stratum 'debian|ubuntu'"), "deb→debian/ubuntu: {s}");
+        assert!(s.contains("find_stratum 'fedora|rhel|centos|rocky|almalinux'"), "rpm→fedora-family: {s}");
+        // Offers to add a stratum if none is set up (the "add if used" pattern).
+        assert!(s.contains("sudo manifest strata add debian --expose apt dpkg"), "{s}");
+        assert!(s.contains("sudo manifest strata add fedora --expose dnf rpm"), "{s}");
+        // Installs through the root enter-helper.
+        assert!(s.contains("/strata/.libexec/enter-") && s.contains("apt-get install -y"), "{s}");
+        assert!(s.contains("dnf install -y"), "{s}");
+    }
+
+    #[test]
+    fn deb_rpm_handler_opens_with_strata_install() {
+        let d = deb_rpm_handler_desktop();
+        assert!(d.contains("Exec=strata-install %F"), "{d}");
+        assert!(d.contains("application/vnd.debian.binary-package"), "deb mime: {d}");
+        assert!(d.contains("application/x-rpm"), "rpm mime: {d}");
     }
 
     #[test]

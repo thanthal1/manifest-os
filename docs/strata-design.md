@@ -25,7 +25,12 @@
 > with host **fonts + icons** bound in (a minimal rootfs ships none) and the
 > Wayland/X display env forwarded; package managers stay root. Command-not-found
 > offers the right distro for `apt`/`dnf`/`apk`; typing `paru` offers to install
-> the AUR helper itself (`manifest paru`). Paths are **`/strata/<name>`**. The
+> the AUR helper itself (`manifest paru`). **Open-to-install** file handlers:
+> opening a `.deb`/`.rpm` in a file manager runs `strata-install`, which installs
+> it into the matching stratum (offering to add one if none) — the file-type
+> analogue of the command-not-found flow; `.apkm`/`.apks`/`.xapk` open into
+> Waydroid (`android-install`). `manifest update` refreshes every source (host +
+> AUR, each stratum, Flatpak, the Waydroid image). Paths are **`/strata/<name>`**. The
 > **System Snapshots app is strata-aware** (an "Other apps" tab + a Home row, from
 > `export::capture_manifest().strata`) — the last Phase-2 ergonomics item, done.
 > **Remaining:** crossfs (Phase 4 — only if demand; shims cover the cases), then
