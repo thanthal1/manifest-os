@@ -651,3 +651,61 @@ as a Linux stratum. `manifest windows add <app>` would mirror `strata add`.
    explicit "yes, reconfigure my bootloader for passthrough" confirmation.
 
 [WinApps]: https://github.com/winapps-org/winapps
+
+## 14. Adjacent — `nix` as a native package source (like `flatpak`, **not** a stratum)
+
+> Status: **idea / design.** Deliberately *not* part of strata — it's a sibling to
+> the existing `flatpak` block. Nothing built.
+
+**Why it's not a stratum.** Debian/Fedora binaries need their own distro's
+`ld.so`/libs, which is *why* strata chroot. Nix doesn't: every package in
+`/nix/store` carries its full dependency closure with absolute rpaths, so a Nix
+binary runs **natively on Arch** with zero glibc-skew — no chroot, no rootfs, no
+shims. Nix's isolation is the *store*, not a namespace. So Nix belongs beside
+`flatpak` as a first-class **native package source** declared in the manifest,
+never under strata. (This is also why "NixOS as a stratum" in §10/§12 is
+pointless — you don't virtualize Nix, you just install it.)
+
+**Why add it.** nixpkgs is the largest package set in existence (~100k+),
+reproducible, per-user (no root for user installs), and never conflicts with
+pacman (separate store + profile). It's the ideal complement: Flatpak covers
+sandboxed GUI apps; Nix covers the long tail of CLI/dev tools **and**
+reproducibility. Fits the repo thesis — declare all your software in one manifest.
+
+**Shape (mirrors `flatpak.rs` / the strata `packages`+`snapshot` pattern):**
+
+```json
+"nix": {
+  "packages": ["ripgrep", "fd", "hello"],
+  "pin": "nixpkgs/<rev>"   // optional — reproducibility, like strata's `snapshot`
+}
+```
+
+**Engine steps (thin orchestration of standard tools — same discipline as the
+rest of the engine):**
+
+1. **Ensure Nix.** `pacman -S --needed nix` (Arch packages it — stays true to
+   "orchestrate Arch tools" rather than piping the upstream installer to a shell),
+   enable `nix-daemon.service` (multi-user), add the primary user to `nix-users`.
+2. **Enable flakes + nix-command** in `/etc/nix/nix.conf` so `nix profile install`
+   works.
+3. **Install each package into the primary user's profile** —
+   `nix profile install nixpkgs#<pkg>` (or pinned: `nixpkgs/<rev>#<pkg>`),
+   per-user (like flatpak `--user` / strata user-mode), run as the manifest's
+   primary account.
+4. **PATH** is already handled — the `nix` package's `/etc/profile.d/nix.sh` puts
+   `~/.nix-profile/bin` on PATH.
+
+**Reproducibility.** A `pin` (nixpkgs commit / flake ref) makes installs
+bit-reproducible — Nix's whole point — mirroring strata's `snapshot`.
+
+**Marketplace/security (`scan.py`).** A `nix` block that installs from **nixpkgs**
+is trusted-ish; an arbitrary **flake ref** (`github:someone/repo#pkg`) is
+unreviewed remote code and must be flagged HIGH, the same way a non-canonical
+strata `mirror` is. `pin` values and package names are otherwise low-risk.
+
+**Deliverable.** A `src/nix.rs` shaped like `src/flatpak.rs`; a `Nix` block in
+`manifest.rs` (with `is_empty()`); wired into `install.rs::apply` next to the
+flatpak step; `diff`/`export`/scan.py support. No new subsystem — it's a fifth
+package source (pacman, AUR/paru, flatpak, strata, **nix**), the smallest kind of
+addition this engine takes.
