@@ -196,24 +196,30 @@ fn write_arm_setup(ctx: &Ctx) -> Result<()> {
 /// Pure — structure unit-tested.
 pub fn arm_setup_script() -> &'static str {
     "#!/bin/sh\n\
-     # ManifestOS — install libndk ARM translation into Waydroid (generated logic).\n\
+     # ManifestOS — install ARM translation into Waydroid via waydroid_script,\n\
+     # in an isolated venv (Arch python is externally-managed). Generated logic.\n\
      command -v waydroid >/dev/null || { echo 'waydroid-arm-setup: waydroid not installed' >&2; exit 1; }\n\
      if sudo waydroid shell getprop ro.dalvik.vm.native.bridge 2>/dev/null | grep -qiE 'libndk|libhoudini'; then\n  \
        echo 'waydroid-arm-setup: ARM translation already installed'; exit 0\n\
      fi\n\
-     echo 'waydroid-arm-setup: installing libndk ARM translation (one-time; downloads Google translation blobs)'\n\
-     sudo pacman -S --needed --noconfirm git python python-requests lzip >/dev/null 2>&1 || true\n\
+     echo 'waydroid-arm-setup: installing ARM translation (one-time; downloads translation blobs)'\n\
+     sudo pacman -S --needed --noconfirm git python lzip >/dev/null 2>&1 || true\n\
      d=$(mktemp -d)\n\
      if ! git clone --depth 1 https://github.com/casualsnek/waydroid_script \"$d/ws\" >/dev/null 2>&1; then\n  \
        echo '  ! could not clone waydroid_script' >&2; rm -rf \"$d\"; exit 1\n\
      fi\n\
+     echo '  · setting up its Python deps in a venv'\n\
+     python -m venv \"$d/venv\" >/dev/null 2>&1\n\
+     if [ -f \"$d/ws/requirements.txt\" ]; then \"$d/venv/bin/pip\" install -q -r \"$d/ws/requirements.txt\" >/dev/null 2>&1; fi\n\
+     \"$d/venv/bin/pip\" install -q InquirerPy requests tqdm >/dev/null 2>&1 || true\n\
      waydroid session stop >/dev/null 2>&1 || true\n\
-     if sudo python3 \"$d/ws/main.py\" install libndk; then\n  \
-       echo 'waydroid-arm-setup: done — ARM apps run after the session restarts'; rm -rf \"$d\"; exit 0\n\
+     PY=\"$d/venv/bin/python\"\n\
+     if sudo \"$PY\" \"$d/ws/main.py\" install libndk; then\n  \
+       echo 'waydroid-arm-setup: done (libndk) — ARM apps run after the session restarts'; rm -rf \"$d\"; exit 0\n\
+     elif sudo \"$PY\" \"$d/ws/main.py\" install libhoudini; then\n  \
+       echo 'waydroid-arm-setup: done (libhoudini) — ARM apps run after the session restarts'; rm -rf \"$d\"; exit 0\n\
      else\n  \
-       echo '  ! libndk install failed. You can try libhoudini (Intel):' >&2\n  \
-       echo '      sudo python3 waydroid_script/main.py install libhoudini' >&2\n  \
-       rm -rf \"$d\"; exit 1\n\
+       echo '  ! ARM translation install failed (tried libndk and libhoudini)' >&2; rm -rf \"$d\"; exit 1\n\
      fi\n"
 }
 
@@ -286,10 +292,12 @@ install_bundle() {
           # (so this works right after `pacman -Syu`, before `manifest android`).
           if command -v waydroid-arm-setup >/dev/null 2>&1; then armrun() { waydroid-arm-setup; }
           else armrun() { sh -c "$(manifest __script waydroid-arm-setup)" manifest; }; fi
-          if armrun; then
-            waydroid session start >/dev/null 2>&1 &
-            j=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do j=$((j+1)); [ "$j" -gt 60 ] && break; sleep 1; done
-          else echo "  ! ARM translation setup failed — the app may not run" >&2; fi ;;
+          armrun; arm_rc=$?
+          # arm-setup stops the session to patch the image — bring it back either way
+          # so the install (or the base-APK fallback) can proceed.
+          waydroid session start >/dev/null 2>&1 &
+          j=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do j=$((j+1)); [ "$j" -gt 60 ] && break; sleep 1; done
+          [ "$arm_rc" = 0 ] || echo "  ! ARM translation setup failed — the app may not run" >&2 ;;
       esac ;;
   esac
   total=0; for f in $sel; do total=$((total + $(stat -c%s "$f"))); done
