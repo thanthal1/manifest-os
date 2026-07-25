@@ -218,8 +218,8 @@ install_bundle() {
   for d in xxxhdpi xxhdpi xhdpi hdpi tvdpi mdpi nodpi; do
     m=$(printf '%s\n' $apks | grep -i "split_config\.$d\.apk" | head -n1); [ -n "$m" ] && { dpi="$m"; break; }
   done
-  langs=$(printf '%s\n' $apks | grep -iE 'split_config\.[a-z][a-z]\.apk')
-  feats=$(printf '%s\n' $apks | grep -i 'split_' | grep -iv 'split_config\.')
+  langs=$(printf '%s\n' $apks | grep -iE 'split_config\.[a-z][a-z]\.apk' || true)
+  feats=$(printf '%s\n' $apks | grep -i 'split_' | grep -iv 'split_config\.' || true)
   sel=
   for f in "$base" "$abi" "$dpi" $langs $feats; do [ -n "$f" ] && sel="$sel $f"; done
   echo "  selected splits:$(for f in $sel; do printf ' %s' "$(basename "$f")"; done)"
@@ -507,6 +507,10 @@ mod tests {
         assert!(s.contains("split_config") && s.contains("x86_64"), "abi selection: {s}");
         assert!(s.contains("pm install-create") && s.contains("pm install-commit"), "split session: {s}");
         assert!(s.contains("waydroid app install \"$base\""), "base-only fallback: {s}");
+        // Under `set -e`, grep-that-finds-nothing (apps with no lang/feature
+        // splits) must not kill the script — guarded with `|| true`.
+        assert!(s.contains("split_config\\.[a-z][a-z]\\.apk' || true"), "langs grep guarded: {s}");
+        assert!(s.contains("grep -iv 'split_config\\.' || true"), "feats grep guarded: {s}");
         // Placeholders got substituted (no @…@ left) and relazy/stamp are present.
         assert!(!s.contains("@ENSURE@") && !s.contains("@RELAZY@") && !s.contains("@STAMP@"), "placeholders unsubstituted: {s}");
         assert!(s.contains("/usr/local/bin/waydroid-launch"), "relazy rewrite: {s}");
