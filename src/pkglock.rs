@@ -237,11 +237,62 @@ pub fn enable_hook(ctx: &Ctx) -> Result<()> {
         println!("  · would install a pacman hook snapshotting package versions for rollback");
         return Ok(());
     }
-    // Point the hook at *this* binary wherever it lives (mirrors export's hook).
-    let exe = std::env::current_exe()
+    let hook = hook_text(&hook_exe());
+    write_hook(ctx, &hook)?;
+    // Seed the baseline now so there's a snapshot to roll back *to* even before
+    // the first upgrade.
+    snapshot(ctx)?;
+    println!("  · package-version tracking on — snapshots on every pacman change");
+    Ok(())
+}
+
+/// Which `manifest` the hook should call.
+///
+/// pacman requires an absolute path here, so the path is baked into a file at
+/// setup time — and a baked absolute path is stale forever (the same trap as the
+/// VM's `compose.yaml`). Using `current_exe()` alone bakes in wherever the binary
+/// happened to be that day: a system that enabled tracking from a locally-built
+/// `/usr/local/bin/manifest` keeps pointing there after the package installs to
+/// `/usr/bin/manifest`, and then **every** pacman transaction ends in
+/// `call to execv failed (No such file or directory)`. So prefer the packaged
+/// location whenever it exists.
+fn hook_exe() -> String {
+    const PACKAGED: &str = "/usr/bin/manifest";
+    if std::path::Path::new(PACKAGED).exists() {
+        return PACKAGED.to_string();
+    }
+    std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "manifest".to_string());
-    let hook = format!(
+        .unwrap_or_else(|_| PACKAGED.to_string())
+}
+
+/// Rewrite the hook if it points at a `manifest` that isn't there any more.
+///
+/// Runs from `manifest __refresh-integration`, which the package's
+/// PostTransaction hook invokes on every upgrade — so `pacman -Syu` alone
+/// repairs a system whose hook was baked with an old path. Best-effort: this
+/// must never fail an upgrade.
+pub fn repair_hook(ctx: &Ctx) {
+    let Ok(existing) = std::fs::read_to_string(HOOK_PATH) else { return };
+    let stale = existing
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Exec = "))
+        .and_then(|cmd| cmd.split_whitespace().next())
+        .is_some_and(|exe| !std::path::Path::new(exe).exists());
+    if !stale {
+        return;
+    }
+    println!("  · repairing the package-version hook (it pointed at a manifest that has moved)");
+    let _ = write_hook(ctx, &hook_text(&hook_exe()));
+}
+
+fn write_hook(ctx: &Ctx, hook: &str) -> Result<()> {
+    ctx.write_root(HOOK_PATH, hook)
+}
+
+/// The hook file itself. Pure — unit-tested.
+fn hook_text(exe: &str) -> String {
+    format!(
         "# Managed by Manifest OS — snapshot package versions for update rollback.\n\
          [Trigger]\n\
          Operation = Install\n\
@@ -253,13 +304,7 @@ pub fn enable_hook(ctx: &Ctx) -> Result<()> {
          Description = Snapshotting package versions (Manifest OS)...\n\
          When = PostTransaction\n\
          Exec = {exe} snapshot-packages\n"
-    );
-    ctx.write_root(HOOK_PATH, &hook)?;
-    // Seed the baseline now so there's a snapshot to roll back *to* even before
-    // the first upgrade.
-    snapshot(ctx)?;
-    println!("  · package-version tracking on — snapshots on every pacman change");
-    Ok(())
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -611,5 +656,45 @@ mod tests {
         assert!(is_pkg_file("foo-1-1-any.pkg.tar.xz"));
         assert!(!is_pkg_file("firefox-1.2.3-1-x86_64.pkg.tar.zst.sig"));
         assert!(!is_pkg_file("firefox.txt"));
+    }
+
+    /// pacman needs an absolute path here, so one gets baked into a file at
+    /// setup time — and a baked absolute path is stale forever. A system that
+    /// enabled tracking from a locally-built /usr/local/bin/manifest kept
+    /// pointing there after the package installed to /usr/bin/manifest, and
+    /// every pacman transaction since ended in "call to execv failed (No such
+    /// file or directory)". Observed on a real machine.
+    #[test]
+    fn the_hook_points_at_the_packaged_manifest() {
+        let h = hook_text("/usr/bin/manifest");
+        assert!(h.contains("Exec = /usr/bin/manifest snapshot-packages"), "{h}");
+        assert!(h.contains("When = PostTransaction"), "must not abort a transaction: {h}");
+        // Absolute, always — pacman rejects a bare command name.
+        assert!(!h.contains("Exec = manifest "), "{h}");
+        // The packaged location wins when it exists, which is the whole point:
+        // this test binary is somewhere under target/, not /usr/bin.
+        if std::path::Path::new("/usr/bin/manifest").exists() {
+            assert_eq!(hook_exe(), "/usr/bin/manifest");
+        }
+    }
+
+    /// The repair only fires on a hook whose target has actually gone away —
+    /// rewriting a good one on every upgrade would be churn.
+    #[test]
+    fn a_stale_hook_is_detected_by_its_missing_target() {
+        let missing = hook_text("/usr/local/bin/manifest-that-is-not-there");
+        let exe = missing
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Exec = "))
+            .and_then(|c| c.split_whitespace().next())
+            .expect("an Exec line");
+        assert!(!std::path::Path::new(exe).exists(), "this one is stale");
+        let good = hook_text("/bin/sh");
+        let exe = good
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Exec = "))
+            .and_then(|c| c.split_whitespace().next())
+            .expect("an Exec line");
+        assert!(std::path::Path::new(exe).exists(), "this one is fine, leave it alone");
     }
 }

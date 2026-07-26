@@ -406,6 +406,14 @@ fn run() -> Result<()> {
         Command::RefreshIntegration => {
             let ctx = Ctx::new(false);
             // Shell integration + .deb/.rpm handler + the GUI wrapper + defaults.
+            // First, and deliberately: the package-version hook bakes an
+            // absolute path to `manifest`, so it goes stale when the binary
+            // moves (a locally-built /usr/local/bin/manifest, then the
+            // package's /usr/bin/manifest), and a stale one fails EVERY pacman
+            // transaction with "call to execv failed". This is what repairs it,
+            // so it must not sit behind another step's `?` — every later step
+            // here is one bad `sudo` away from skipping it forever.
+            pkglock::repair_hook(&ctx);
             strata::write_cnf_handler(&ctx)?;
             // write_cnf_handler already refreshes the Android file handlers too
             // (they're registered even without Waydroid — opening an .apk offers
