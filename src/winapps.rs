@@ -591,6 +591,49 @@ if [ ! -f "$POLICY_STAMP" ] && [ -r "$WACONF" ]; then
   # recoverable. Never block the launch on it.
   touch "$POLICY_STAMP" 2>/dev/null || true
 fi
+
+# Growing the disk is two steps, and only the first is dockur's. It enlarges the
+# image when DISK_SIZE goes up, but Windows then just has unallocated space
+# behind C: -- the volume itself is untouched, so the guest still reports the
+# old size and "not enough storage" persists after an apparently successful
+# resize. Extend it here, once per size change.
+WANTED=$(sed -n 's/.*DISK_SIZE: *"\([^"]*\)".*/\1/p' "$VMDIR/compose.yaml" 2>/dev/null)
+DISK_STAMP="$VMDIR/.disk-extended"
+# Written into the shared home so the guest can run it as a file -- quoting a
+# script this size through /app:program:...,cmd: is unreadable and fragile.
+GROW_PS1=".manifest-grow-disk.ps1"
+cat > "$HOME/$GROW_PS1" <<'GROWEOF'
+$ErrorActionPreference = 'SilentlyContinue'
+$c = Get-Partition -DriveLetter C
+# Windows lays the disk out [EFI][MSR][C:][Recovery], so the space added at the
+# END sits behind the Recovery partition and C: cannot reach it -- extending
+# reports success while changing nothing. Recovery only holds WinRE, which a
+# disposable container guest never boots into, so retire it and reclaim it.
+$rec = Get-Partition -DiskNumber $c.DiskNumber |
+       Where-Object {{ $_.Offset -gt $c.Offset -and $_.Type -eq 'Recovery' }}
+if ($rec) {{
+    reagentc /disable | Out-Null      # moves WinRE.wim onto C: first
+    foreach ($r in $rec) {{
+        Remove-Partition -DiskNumber $c.DiskNumber -PartitionNumber $r.PartitionNumber -Confirm:$false
+    }}
+}}
+$max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
+if ($max -gt (Get-Partition -DriveLetter C).Size) {{
+    Resize-Partition -DriveLetter C -Size $max
+}}
+GROWEOF
+if [ -n "$WANTED" ] && [ "$WANTED" != "$(cat "$DISK_STAMP" 2>/dev/null)" ] && [ -r "$WACONF" ]; then
+  RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
+  . "$WACONF" 2>/dev/null || true
+  if [ -n "$RDP_USER" ]; then
+    echo "Making the extra disk space usable inside Windows..."
+    timeout 120 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+      /v:127.0.0.1:3389 "$(printf '/app:program:C:\\Windows\\System32\\cmd.exe,cmd:/C powershell -NoProfile -ExecutionPolicy Bypass -File Z:\\%s & tsdiscon' "$GROW_PS1")" \
+      >/dev/null 2>&1
+  fi
+  # Record what we tried, so a guest that cannot grow doesn't retry every launch.
+  printf '%s' "$WANTED" > "$DISK_STAMP" 2>/dev/null || true
+fi
 # Only a guest INSTALLED with TSAppAllowList\fDisabledAllowList=1 can run an
 # arbitrary program as a RemoteApp. Without it the connection still succeeds --
 # Windows just serves the console session instead, so you get a full desktop,

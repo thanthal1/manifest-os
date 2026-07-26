@@ -549,7 +549,12 @@ impl WindowsVm {
     pub fn version(&self) -> &str { self.version.as_deref().unwrap_or("11") }
     pub fn ram(&self) -> &str { self.ram.as_deref().unwrap_or("4G") }
     pub fn cpus(&self) -> u32 { self.cpus.unwrap_or(4) }
-    pub fn disk(&self) -> &str { self.disk.as_deref().unwrap_or("64G") }
+    /// The guest's disk. Sparse — dockur grows the image as it fills, so the
+    /// host only ever gives up what Windows actually writes (measured: a 64G
+    /// disk occupying 15G). 64G left ~41G free after Windows, which is not
+    /// enough for the large applications this tier exists to run, and costs
+    /// nothing to raise.
+    pub fn disk(&self) -> &str { self.disk.as_deref().unwrap_or("128G") }
     pub fn username(&self) -> &str { self.username.as_deref().unwrap_or("manifest") }
 }
 
