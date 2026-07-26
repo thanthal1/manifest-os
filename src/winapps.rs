@@ -322,11 +322,15 @@ WALOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-launch.log"
 mkdir -p "$(dirname "$WALOG")" 2>/dev/null || true
 run_wa() {{ "$WA" "$@" >>"$WALOG" 2>&1 || sg docker -c "'$WA' $*" >>"$WALOG" 2>&1; }}
 
-# Which app launchers exist right now, so we can name whatever appears later.
+# Which Windows-app launchers exist right now, so we can name whatever appears
+# later. Match on CONTENT, not filename: WinApps writes "<exe>.desktop" with no
+# prefix of its own, so there is nothing in the name to key off — but every
+# entry it generates Execs winapps.
 list_apps() {{
   for d in "$HOME/.local/share/applications" /usr/share/applications; do
-    [ -d "$d" ] && ls "$d" 2>/dev/null | grep -i 'winapps' || true
-  done | sort -u
+    [ -d "$d" ] || continue
+    grep -rlsi 'winapps' "$d" --include='*.desktop' 2>/dev/null || true
+  done | sed 's#.*/##' | sort -u
 }}
 
 # Run the installer as a RemoteApp: its own window on your desktop. No Windows
@@ -368,7 +372,7 @@ if [ "$opened" = 1 ]; then
 
   if [ -n "$new" ]; then
     echo "Added to your app launcher:"
-    printf '%s\n' "$new" | sed 's/\.desktop$//; s/^winapps-//; s/^/  · /'
+    printf '%s\n' "$new" | sed 's/\.desktop$//; s/^/  · /'
   else
     # Nothing new was installed — which is normal: plenty of Windows tools are
     # a single portable .exe that IS the app (Rufus, for one). There is nothing
@@ -875,6 +879,11 @@ mod tests {
         assert!(s.contains(r#"Exec=windows-vm-run \"$HOME/Windows Transfer/$base\""#), "{s}");
         // And when apps DO get installed, they are named, not merely implied.
         assert!(s.contains("comm -13"), "reports the actual delta: {s}");
+        // WinApps writes "<exe>.desktop" with NO prefix of its own, so the scan
+        // has to match file CONTENT. Keying off the filename finds nothing and
+        // every real install looks like "nothing was installed".
+        assert!(s.contains("--include='*.desktop'"), "delta matches content: {s}");
+        assert!(!s.contains("grep -i 'winapps'"), "filename matching is wrong here: {s}");
         // POSIX sh: no process substitution (this runs under #!/bin/sh).
         assert!(!s.contains("<("), "process substitution is not POSIX sh: {s}");
     }
