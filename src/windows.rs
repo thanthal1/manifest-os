@@ -224,22 +224,36 @@ fi
 info=$(manifest __wincheck "$f" 2>/dev/null)
 verdict=${info%%|*}
 reasons=${info#*|}
+# Declining Wine isn't a dead end: the VM tier runs anything Wine can't. Offer
+# it rather than just giving up.
+offer_vm() {
+  echo
+  echo "You can run it in a Windows VM instead — a real Windows, set up once,"
+  echo "with apps opening as normal windows. It's heavier (a few GB) but works"
+  echo "for things Wine can't handle."
+  printf 'Use the Windows VM for this? [y/N] '
+  read r2
+  case "$r2" in
+    [yY]|[yY][eE][sS]) exec windows-vm-run "$f" ;;
+    *) echo "Cancelled."; exit 1 ;;
+  esac
+}
 case "$verdict" in
   blocked)
     echo "Heads up: this looks like it won't work under Wine."
     echo "  $reasons"
-    printf 'Try anyway? [y/N] '
-    read r; case "$r" in [yY]|[yY][eE][sS]) ;; *) echo "Cancelled."; exit 1 ;; esac ;;
+    printf 'Try Wine anyway? [y/N] '
+    read r; case "$r" in [yY]|[yY][eE][sS]) ;; *) offer_vm ;; esac ;;
   risky)
     echo "Heads up: this one can be awkward under Wine."
     echo "  $reasons"
-    printf 'Go ahead? [Y/n] '
-    read r; case "$r" in [nN]|[nN][oO]) echo "Cancelled."; exit 1 ;; *) ;; esac ;;
+    printf 'Go ahead with Wine? [Y/n] '
+    read r; case "$r" in [nN]|[nN][oO]) offer_vm ;; *) ;; esac ;;
   works) ;;
   *)
     # Unknown app — most are. Ask rather than pretend to know.
     printf 'Install this with Wine? Simple apps and tools usually work; big suites and games often do not. [Y/n] '
-    read r; case "$r" in [nN]|[nN][oO]) echo "Cancelled."; exit 1 ;; *) ;; esac ;;
+    read r; case "$r" in [nN]|[nN][oO]) offer_vm ;; *) ;; esac ;;
 esac
 
 # 3. Its own prefix, named after the installer, so apps stay isolated.
@@ -397,7 +411,7 @@ mod tests {
                 "lazy wine setup: {s}");
         assert!(s.contains("isn't installed yet"), "{s}");
         // The oracle advises; the user decides. Even `blocked` offers "Try anyway".
-        assert!(s.contains("Try anyway?"), "blocked still asks: {s}");
+        assert!(s.contains("Try Wine anyway?"), "blocked still asks: {s}");
         assert!(s.contains("Install this with Wine?"), "unknown apps ask: {s}");
         // Never silently refuses on a fuzzy name match.
         assert!(!s.contains("exit 1 ;; esac
@@ -405,6 +419,17 @@ exit"), "{s}");
         // Per-app prefix, msi handled properly.
         assert!(s.contains("wine msiexec /i"), "msi support: {s}");
         assert!(s.contains(".local/share/manifest-os/wine/$slug"), "{s}");
+    }
+
+    #[test]
+    fn declining_wine_offers_the_vm_tier() {
+        let s = install_script();
+        // Saying no to Wine must not be a dead end — every path offers the VM.
+        assert!(s.contains("offer_vm()"), "{s}");
+        assert!(s.contains("exec windows-vm-run \"$f\""), "hands the file to the VM: {s}");
+        assert_eq!(s.matches("offer_vm ;;").count(), 3,
+                   "blocked, risky and unknown all fall through to the VM offer:
+{s}");
     }
 
     #[test]

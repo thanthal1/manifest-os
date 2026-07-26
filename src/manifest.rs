@@ -527,6 +527,12 @@ pub struct WindowsVm {
     /// Install language, e.g. `English`, `German`, `French`. Defaults to English.
     #[serde(default)]
     pub language: Option<String>,
+
+    /// Lazy lifecycle, like Android's: the VM is **not** kept running. It starts
+    /// when you launch a Windows app and stops after this many minutes with no
+    /// app open. `None` ⇒ 30. `Some(0)` ⇒ never auto-stop.
+    #[serde(default)]
+    pub idle_minutes: Option<u32>,
 }
 
 impl WindowsVm {

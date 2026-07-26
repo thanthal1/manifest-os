@@ -79,6 +79,25 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         );
     }
 
+    // The lazy runtime: on-demand start + idle stop, mirroring Android's
+    // waydroid-launch/waydroid-idle. Thin stubs so `pacman -Syu` updates them.
+    ctx.write_root(
+        "/usr/local/bin/windows-vm-run",
+        &crate::android::thin_stub("windows-vm-run"),
+    )?;
+    ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-vm-run"])?;
+    let idle = vm.idle_minutes.unwrap_or(30);
+    println!(
+        "  · lazy lifecycle: the VM starts when an app needs it{}",
+        if idle == 0 { ", and stays up (idle_minutes: 0)".to_string() }
+        else { format!(", and stops after {idle} min idle") }
+    );
+    ctx.write_root("/usr/local/bin/windows-vm-idle", &vm_idle_script(idle))?;
+    ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-vm-idle"])?;
+    ctx.write_root("/etc/systemd/user/windows-vm-idle.service", idle_service_unit())?;
+    ctx.write_root("/etc/systemd/user/windows-vm-idle.timer", idle_timer_unit())?;
+    ctx.shell("systemctl --user enable --now windows-vm-idle.timer >/dev/null 2>&1 || true", false)?;
+
     // WinApps' own config: how it reaches the guest.
     ctx.shell(&format!("mkdir -p \"{WINAPPS_CONF_DIR}\""), false)?;
     ctx.write_user(
@@ -180,6 +199,113 @@ fn ensure_winapps(ctx: &Ctx) -> Result<()> {
     )?;
     println!("  · winapps + winapps-setup are on your PATH");
     Ok(())
+}
+
+/// Shell helper used by every generated script: run a docker command through
+/// whichever privilege path works. `usermod -aG docker` doesn't affect a session
+/// that's already running, so `sg docker` bridges the gap without a re-login.
+fn docker_fn() -> &'static str {
+    "dk() {
+         if docker \"$@\" 2>/dev/null; then return 0; fi
+         if sg docker -c \"docker $*\" 2>/dev/null; then return 0; fi
+         sudo docker \"$@\"
+     }
+"
+}
+
+/// `windows-vm-run <file.exe>` — the lazy VM entry point, mirroring Android's
+/// `waydroid-launch`: set the VM up if it has never been set up, **start it only
+/// when something needs it**, then hand the installer over. Pure — unit-tested.
+pub fn vm_run_script() -> String {
+    format!(
+        r####"#!/bin/sh
+# ManifestOS — run a Windows program in the Windows VM (generated; do not edit).
+# usage: windows-vm-run <file.exe|file.msi>
+[ $# -ge 1 ] || {{ echo 'usage: windows-vm-run <file.exe|file.msi>' >&2; exit 2; }}
+f=$1
+VMDIR="$HOME/.local/share/manifest-os/windows-vm"
+{docker}
+# 1. First use? Set the VM up (downloads and installs Windows — one time).
+if [ ! -f "$VMDIR/compose.yaml" ]; then
+  echo "The Windows VM isn't set up yet."
+  echo "  It installs a real Windows once (a few GB, 20-40 min); after that,"
+  echo "  Windows apps open like normal windows."
+  printf 'Set it up now? [y/N] '
+  read r
+  case "$r" in
+    [yY]|[yY][eE][sS]) manifest windows-vm || exit 1 ;;
+    *) echo "Cancelled."; exit 1 ;;
+  esac
+fi
+
+# 2. Lazy start: the VM is not kept running, so bring it up on demand.
+state=$(dk inspect -f '{{{{.State.Running}}}}' manifest-windows 2>/dev/null || echo missing)
+if [ "$state" != "true" ]; then
+  echo "Starting Windows (this takes a moment)..."
+  dk start manifest-windows >/dev/null 2>&1 || (cd "$VMDIR" && dk compose up -d) || {{
+    echo "windows-vm-run: could not start the Windows container" >&2; exit 1; }}
+fi
+
+# 3. Wait for RDP to answer — Windows needs a minute after the container starts.
+echo "Waiting for Windows to be ready..."
+i=0
+while [ $i -lt 90 ]; do
+  if command -v ss >/dev/null 2>&1 && ss -Htn state established '( dport = :3389 )' >/dev/null 2>&1; then break; fi
+  (echo > /dev/tcp/127.0.0.1/3389) >/dev/null 2>&1 && break
+  i=$((i+1)); sleep 2
+done
+
+# 4. The installer has to be reachable from inside Windows. dockur shares your
+#    home as a network drive, so copy it there and say where it landed.
+base=$(basename "$f")
+mkdir -p "$HOME/Windows Transfer"
+cp -f "$f" "$HOME/Windows Transfer/$base" 2>/dev/null || true
+: > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
+
+echo
+echo "Opening Windows. Your installer is available inside it at:"
+echo "    \host.lan\Data\Windows Transfer\$base"
+echo "(also in the shared drive as '$base')"
+echo
+winapps windows || {{
+  echo "windows-vm-run: couldn't open the Windows desktop." >&2
+  echo "  Check it with: winapps check" >&2
+  exit 1
+}}
+"####,
+        docker = docker_fn(),
+    )
+}
+
+/// `windows-vm-idle` — the watchdog that stops the VM when nothing is using it,
+/// the same shape as Android's `waydroid-idle`. Pure — unit-tested.
+pub fn vm_idle_script(minutes: u32) -> String {
+    let secs = minutes.saturating_mul(60);
+    format!(
+        r####"#!/bin/sh
+# ManifestOS — stop the Windows VM when idle (generated; do not edit).
+IDLE={secs}
+[ "$IDLE" -eq 0 ] && exit 0   # 0 = never auto-stop
+{docker}
+state=$(dk inspect -f '{{{{.State.Running}}}}' manifest-windows 2>/dev/null || echo missing)
+[ "$state" = "true" ] || exit 0    # not running, nothing to do
+# A live FreeRDP client means an app is on screen — keep it up.
+if pgrep -x xfreerdp >/dev/null 2>&1 || pgrep -x xfreerdp3 >/dev/null 2>&1; then
+  : > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
+  exit 0
+fi
+ACT="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity"
+now=$(date +%s)
+last=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
+[ "$last" -eq 0 ] && {{ mkdir -p "$(dirname "$ACT")"; : > "$ACT"; exit 0; }}
+if [ $((now - last)) -ge "$IDLE" ]; then
+  echo "windows-vm-idle: stopping the idle Windows VM"
+  dk stop manifest-windows >/dev/null 2>&1 || true
+fi
+"####,
+        secs = secs,
+        docker = docker_fn(),
+    )
 }
 
 /// The compose file for the container-hosted Windows (dockur/windows). Pure —
@@ -299,6 +425,26 @@ fn prompt_product_key() -> Option<String> {
     }
 }
 
+fn idle_service_unit() -> &'static str {
+    "[Unit]
+     Description=Stop the idle Windows VM (ManifestOS)
+     [Service]
+     Type=oneshot
+     ExecStart=/usr/local/bin/windows-vm-idle
+"
+}
+
+fn idle_timer_unit() -> &'static str {
+    "[Unit]
+     Description=Check whether the Windows VM is idle (ManifestOS)
+     [Timer]
+     OnBootSec=10min
+     OnUnitActiveSec=5min
+     [Install]
+     WantedBy=timers.target
+"
+}
+
 /// A random password for the Windows account, so a manifest never has to carry
 /// one. Not cryptographic-grade secrecy — it guards a local loopback RDP service
 /// — but unguessable and unique per machine.
@@ -414,6 +560,31 @@ mod tests {
         assert!(c.contains("RDP_PASS=\"hunter2\""), "{c}");
         assert!(c.contains("RDP_IP=\"127.0.0.1\""), "{c}");
         assert!(c.contains("FREERDP_COMMAND=\"xfreerdp3\""), "{c}");
+    }
+
+    #[test]
+    fn vm_run_is_lazy_like_android() {
+        let s = vm_run_script();
+        // First use sets the VM up; after that it only STARTS it on demand.
+        assert!(s.contains("isn't set up yet"), "{s}");
+        assert!(s.contains("manifest windows-vm"), "first-run setup: {s}");
+        assert!(s.contains("dk start manifest-windows"), "lazy start: {s}");
+        // Waits for RDP rather than assuming Windows is instantly ready.
+        assert!(s.contains("Waiting for Windows to be ready"), "{s}");
+        // Records activity so the idle watchdog can tell it's in use.
+        assert!(s.contains("windows-vm-activity"), "{s}");
+    }
+
+    #[test]
+    fn vm_idle_stops_only_when_unused() {
+        let s = vm_idle_script(30);
+        assert!(s.contains("IDLE=1800"), "30 min: {s}");
+        // A live FreeRDP client means an app is on screen — must not stop.
+        assert!(s.contains("pgrep -x xfreerdp"), "{s}");
+        assert!(s.contains("dk stop manifest-windows"), "{s}");
+        // 0 disables auto-stop entirely.
+        let z = vm_idle_script(0);
+        assert!(z.contains("IDLE=0") && z.contains("[ \"$IDLE\" -eq 0 ] && exit 0"), "{z}");
     }
 
     #[test]
