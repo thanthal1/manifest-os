@@ -725,16 +725,6 @@ if pgrep -x xfreerdp >/dev/null 2>&1 || pgrep -x xfreerdp3 >/dev/null 2>&1; then
   : > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
   exit 0
 fi
-# Installing Windows takes 20-40 minutes with no client attached and nothing
-# touching the activity file -- which is this watchdog's exact definition of
-# idle. It stopped a running install once; `manifest windows-vm` promises the
-# user it "needs no input", so it must not need babysitting either.
-# windows.boot is dockur's own marker for "installation finished" (its
-# skipInstall reads it), so its absence means setup is still running.
-VMDIR="$HOME/.local/share/manifest-os/windows-vm"
-if [ -d "$VMDIR/storage" ] && [ ! -f "$VMDIR/storage/windows.boot" ]; then
-  exit 0
-fi
 ACT="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity"
 now=$(date +%s)
 last=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
@@ -745,6 +735,21 @@ last=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
 started=$(dk inspect -f '{{{{.State.StartedAt}}}}' WinApps 2>/dev/null)
 started=$(date -d "$started" +%s 2>/dev/null || echo 0)
 [ "$started" -gt "$last" ] && last=$started
+# Never stop a guest that isn't usable yet. Installing Windows takes 20-40
+# minutes with no client attached and nothing touching the activity file --
+# this watchdog's exact definition of idle -- and it stopped a running install
+# once. `manifest windows-vm` promises that install "needs no input"; it must
+# not need babysitting either. RDP answering is the signal, because serving RDP
+# is the only thing this VM exists to do.
+#
+# NOT dockur's windows.boot: it writes that from finish(), i.e. on container
+# shutdown, so it is absent for the entire life of a guest that has never been
+# stopped -- guarding on it would disable this watchdog permanently.
+if ! nc -z -w 2 127.0.0.1 3389 >/dev/null 2>&1; then
+  # Generous ceiling, so a guest that never comes up at all can't pin the VM
+  # on forever -- but far beyond any real install.
+  {{ [ "$started" -eq 0 ] || [ $((now - started)) -lt 7200 ]; }} && exit 0
+fi
 if [ $((now - last)) -ge "$IDLE" ]; then
   echo "windows-vm-idle: stopping the idle Windows VM"
   dk stop WinApps >/dev/null 2>&1 || true
@@ -1428,9 +1433,14 @@ mod tests {
         // idle. It killed a running install once, 16 minutes in. `manifest
         // windows-vm` promises the install "needs no input"; it must not need
         // babysitting either.
-        let guard = s.find("windows.boot").expect("install guard");
+        let guard = s.find("nc -z -w 2 127.0.0.1 3389").expect("install guard");
         let stop = s.find("dk stop WinApps").expect("stop");
         assert!(guard < stop, "must not stop mid-install:\n{s}");
+        // dockur's windows.boot is NOT that signal: markWindowsBooted runs from
+        // finish(), on container SHUTDOWN, so it is absent for the whole life of
+        // a guest that has never been stopped. Guarding on it would disable this
+        // watchdog permanently -- which is how it was first written.
+        assert!(!s.contains("storage/windows.boot"), "windows.boot only exists after a stop: {s}");
         // And idle means "up and unused for IDLE", not "the last app closed a
         // while ago" -- a container started just now is new, however stale the
         // activity file is, or a fresh start is instantly eligible to be killed.

@@ -202,9 +202,22 @@ produces "the window didn't open", so none of them are guessable from a log.
     an app nobody installed.
 15. **dockur accepts a custom answer file** at `$STORAGE/custom.xml` (also
     `/custom.xml`, `/run/assets/custom.xml` — see its `run/answer.sh`). Its stock
-    `win11x64.xml` autologons with `LogonCount 65432`. That is the supported
-    lever if RemoteApp still won't paint: a *new* session is what RemoteApp
-    wants, and `$STORAGE` is a directory we already own. No fork needed.
+    `win11x64.xml` autologons with `LogonCount 65432`.
+16. **`RDPApps.reg` alone is NOT enough — this is the answer to the question
+    that was open for five releases.** A guest installed cleanly *with* it
+    (uninterrupted install, `/oem` mounted, `fDisabledAllowList=1` imported by
+    WinApps' own `install.bat`) still does not paint a borderless window. You
+    get the full desktop and *"Another user is signed in"*, then
+    `ERRINFO_LOGOFF_BY_USER` about 30 s later when nobody answers the prompt.
+    Windows client editions are **single-session**, and dockur autologons the
+    same user at the console, so the RemoteApp request collides with the session
+    that already exists. Registry permission was never the whole story — the
+    *free session* is. Verified with screenshots on real hardware, twice.
+17. **Do not trust `windows.boot` as "installed".** dockur writes it from
+    `markWindowsBooted`, called only out of `finish()` — i.e. on container
+    **shutdown**. It is absent for the entire life of a guest that has never
+    been stopped, so gating anything on it (the idle watchdog, say) disables
+    that thing permanently. Ask RDP instead: `nc -z 127.0.0.1 3389`.
 
 Engine gate: strata/Android orchestration is unit + dry-run + (strata) VM-verified;
 **Android/Waydroid rendering is real-hardware-only** (VBox GL 2.1 can't run gralloc).
@@ -243,7 +256,7 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 | `paru` command-not-found (`manifest paru`) | ✅ | unit + dry-run |
 | **Android/Waydroid** (`android` block, lazy lifecycle, `android-install`, `.apkm`) | ✅ | **real HW** (install, ARM libndk, launchers, open-to-install) |
 | **Windows wine tier** (`windows` block, oracle, per-app prefix, lazy wine) | ✅ | real HW (Notepad++) |
-| **Windows VM tier** (dockur + WinApps RemoteApp) | ⏳ Windows installs ✅; single-window launch **unconfirmed** | real HW; needs a guest reinstalled with the RemoteApp registry file |
+| **Windows VM tier** (dockur + WinApps RemoteApp) | ⏳ setup + install ✅ (KVM, end to end); single-window launch **confirmed not working** — see §16 | real HW; a clean guest *with* `RDPApps.reg` still serves the console desktop |
 | `manifest update` (host + AUR + strata + Flatpak + Waydroid) | ✅ | unit + dry-run |
 | WiFi list+connect (rfkill-unblock included) | ✅ | real HW (laptop) |
 | Install-log to USB on a real-HW failure | ✅ fixed | needs a real failing USB to re-confirm |
@@ -370,13 +383,19 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
   **This is why generated scripts must stay stubs** — anything written as a real
   file at setup time (e.g. the VM's `compose.yaml`) does *not* get updated by an
   upgrade and needs its own migration path.
-- **Windows VM tier — one unknown left:** whether a guest installed *with*
-  WinApps' `RDPApps.reg` actually paints a borderless RemoteApp window. Untestable
-  on the old rig (no nested KVM in VirtualBox); one local run on a KVM box
-  settles it. Everything upstream of that is fixed and shipped (0.1.0-59). If it
-  works, the fully-borderless path is done; if not, the next thing to check is
-  whether dockur's autologin can be disabled, since a *new* session is what
-  RemoteApp wants.
+- **Windows VM tier — the unknown is now answered, and the answer is no.**
+  A guest installed cleanly *with* `RDPApps.reg` still does not paint a
+  borderless window (§16): Windows client editions are single-session and dockur
+  autologons the same user at the console, so the RemoteApp request collides
+  with the session that already exists. **Next step: free the console session.**
+  The cheap version needs no `custom.xml` and no vendoring — we already append to
+  `C:\OEM\install.bat`, so add `reg add "HKLM\SOFTWARE\Microsoft\Windows NT\
+  CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 0 /f` (and clear
+  `DefaultUserName`/`DefaultPassword`) there. Costs one reinstall to test. The
+  tradeoff to weigh first: autologon is also what makes `http://localhost:8006`
+  show a usable desktop, so disabling it means the viewer lands on a lock
+  screen. Everything upstream of the launch is now fixed and verified locally —
+  setup, install, oem, password, wipe, idle (0.1.0-59 + this branch).
 - **Phase 6c — GPU passthrough (`vm-vfio`, §14.3):** not started. The CAD /
   SolidWorks path.
 - **Real hardware:** WiFi connect, dual-boot alongside Windows, strata GUI and
