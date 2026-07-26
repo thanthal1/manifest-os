@@ -153,6 +153,17 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
             // No WinApps oem at all: our own bat is better than nothing.
             ctx.shell(&setup_fallback_bat_step(), false)?;
         }
+        // Last, so it appends to whichever install.bat the steps above settled
+        // on. NOT gated on `debloat` -- a single-window app depends on this.
+        println!(
+            "  · guest setup: turning off Windows' automatic sign-in, so apps can open \
+             in their own windows"
+        );
+        println!(
+            "    (this is why http://localhost:8006 shows a lock screen — sign in there \
+             if you want the full desktop)"
+        );
+        ctx.shell(&setup_autologon_step(), false)?;
         let compose = compose_yaml(vm, &pass);
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
         // WinApps reads ~/.config/winapps/compose.yaml — the path is hardcoded in
@@ -1094,6 +1105,40 @@ fn link_install_step() -> &'static str {
        fi"#
 }
 
+/// Turn off Windows' automatic sign-in, by appending to `C:\OEM\install.bat`.
+/// Pure — unit-tested.
+///
+/// **This is what makes a RemoteApp possible at all.** Windows client editions
+/// allow one interactive session, and dockur's answer file autologons the same
+/// user at the console (`<AutoLogon>`, `LogonCount` 65432). So a RemoteApp
+/// request arrives at a session that is already taken: Windows serves the
+/// existing desktop and an *"Another user is signed in"* prompt, nobody answers
+/// it, and ~30 s later the connection ends `ERRINFO_LOGOFF_BY_USER`. Verified on
+/// real hardware — `RDPApps.reg` alone does **not** fix this, which is what five
+/// release cycles assumed.
+///
+/// dockur runs `install.bat` as a **FirstLogonCommand**, i.e. inside that very
+/// session, so this takes effect from the guest's *next* boot — the first
+/// restart after installation is what frees the console.
+///
+/// `DefaultUserName` is deliberately left alone: it prefills the name on the
+/// lock screen, which costs nothing and is friendlier.
+fn setup_autologon_step() -> String {
+    // CRLF: this is a batch file read by Windows. `>nul 2>&1` because `reg
+    // delete` of a value that isn't there is a non-zero exit, not a problem.
+    let winlogon = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+    format!(
+        r#"b="{COMPOSE_DIR}/oem/install.bat"
+           if ! grep -qi 'AutoAdminLogon' "$b" 2>/dev/null; then
+             {{
+               printf '%s\r\n' 'reg add "{winlogon}" /v AutoAdminLogon /t REG_SZ /d 0 /f >nul 2>&1'
+               printf '%s\r\n' 'reg delete "{winlogon}" /v DefaultPassword /f >nul 2>&1'
+               printf '%s\r\n' 'reg delete "{winlogon}" /v AutoLogonCount /f >nul 2>&1'
+             }} >> "$b"
+           fi"#
+    )
+}
+
 /// Append our debloat call to WinApps' `install.bat`. Pure — unit-tested.
 ///
 /// Chained onto theirs rather than replacing it: dockur runs exactly one
@@ -1498,6 +1543,7 @@ mod tests {
             ("oem step", setup_oem_step()),
             ("debloat bat step", setup_debloat_bat_step()),
             ("fallback bat step", setup_fallback_bat_step()),
+            ("autologon step", setup_autologon_step()),
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
@@ -1522,6 +1568,27 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+    }
+
+    /// Windows client editions allow ONE interactive session, and dockur
+    /// autologons the same user at the console -- so a RemoteApp request lands
+    /// on a session that is already taken and gets the desktop plus "Another
+    /// user is signed in" instead. `RDPApps.reg` does not fix that; freeing the
+    /// session does. Confirmed on real hardware.
+    #[test]
+    fn automatic_sign_in_is_turned_off_so_a_remoteapp_has_a_session() {
+        let s = setup_autologon_step();
+        assert!(s.contains("AutoAdminLogon /t REG_SZ /d 0"), "{s}");
+        assert!(s.contains("/v DefaultPassword /f"), "a stored password re-enables it: {s}");
+        assert!(s.contains("/v AutoLogonCount /f"), "dockur sets LogonCount 65432: {s}");
+        // Appended to the OEM hook we already own -- no custom.xml, nothing
+        // vendored, and it must not replace WinApps' install.bat.
+        assert!(s.contains("oem/install.bat"), "{s}");
+        assert!(s.contains(">> \"$b\""), "append, never overwrite: {s}");
+        // Idempotent: setup is re-entered freely, and this must not stack up.
+        assert!(s.contains("grep -qi 'AutoAdminLogon'"), "{s}");
+        // A batch file Windows reads: CRLF, not LF.
+        assert!(s.contains(r"'%s\r\n'"), "batch files need CRLF: {s}");
     }
 
     /// The stamp answers "was the Windows in storage/ INSTALLED with
