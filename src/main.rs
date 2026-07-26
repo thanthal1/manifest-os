@@ -481,6 +481,7 @@ fn run() -> Result<()> {
                 "strata-install" => strata::strata_install_script().to_string(),
                 "windows-install" => winapps_wine::install_script().to_string(),
                 "windows-vm-run" => winapps::vm_run_script(),
+                "windows-vm-idle" => winapps::vm_idle_script(),
                 other => anyhow::bail!("unknown generated script: {other}"),
             };
             print!("{body}");
