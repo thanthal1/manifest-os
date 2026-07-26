@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0.0",
+  "meta": {
+    "name": "Windows apps (Wine) demo",
+    "author": "you",
+    "description": "Run Windows applications on the desktop — Phase 6a, the 'wine' tier (docs/strata-design.md §14). Each app gets its OWN Wine prefix so one app's overrides can't break another. Every app is checked against the compatibility oracle first: apps Wine structurally can't run (kernel anti-cheat, CAD, dongles, Store packages) are reported with the tier that could run them instead of being half-installed. Check any app yourself with `manifest windows-check <name|installer.exe>`. The VM tiers (vm-rdp / vm-vfio, for SolidWorks and friends) are designed but not built yet.",
+    "tags": ["windows", "wine", "reference"],
+    "version": "1.0.0",
+    "license": "free"
+  },
+  "windows": {
+    "winetricks": ["corefonts"],
+    "apps": [
+      {
+        "name": "Notepad++",
+        "installer": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.Installer.x64.exe",
+        "exe": "Program Files/Notepad++/notepad++.exe"
+      },
+      {
+        "name": "7-Zip",
+        "installer": "https://www.7-zip.org/a/7z2408-x64.exe",
+        "exe": "Program Files/7-Zip/7zFM.exe"
+      }
+    ]
+  }
+}

@@ -121,6 +121,13 @@ pub struct Manifest {
     /// [`crate::android`].
     pub android: Option<Android>,
 
+    /// Windows applications (Phase 6, `docs/strata-design.md` §14). Tiered:
+    /// `wine` runs an app directly with no VM (the cheap default); the VM tiers
+    /// are design-only so far. Each app is checked against the compatibility
+    /// oracle first, so a Wine-hostile app is flagged rather than silently
+    /// half-installed. See [`crate::windows`].
+    pub windows: Option<Windows>,
+
     /// Foreign-distro **strata** — full rootfs installs of another distro under
     /// the Arch host (`/strata/<name>`), whose package managers and
     /// binaries are exposed on the host PATH via generated shims. Binary access,
@@ -449,6 +456,63 @@ impl Android {
             && self.system_channel.is_none()
             && self.vendor_channel.is_none()
     }
+}
+
+/// Windows-application support. v1 implements the **wine** tier only; the
+/// `vm-rdp`/`vm-vfio` tiers are designed but not built (`docs/strata-design.md`
+/// §14), so an app the oracle says needs a VM is reported, not silently run.
+#[derive(Debug, Default, Deserialize)]
+pub struct Windows {
+    /// Windows apps to install and expose.
+    #[serde(default)]
+    pub apps: Vec<WindowsApp>,
+
+    /// Extra `winetricks` verbs applied to every app prefix (e.g. `corefonts`,
+    /// `dotnet48`). Per-app `winetricks` are added on top.
+    #[serde(default)]
+    pub winetricks: Vec<String>,
+}
+
+impl Windows {
+    pub fn is_empty(&self) -> bool {
+        self.apps.is_empty() && self.winetricks.is_empty()
+    }
+}
+
+/// One Windows application.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct WindowsApp {
+    /// Display name — also the menu entry and the default prefix name.
+    pub name: String,
+
+    /// The installer: an `.exe`/`.msi` URL or a local path. Omit for an app
+    /// that's already installed into an existing prefix.
+    #[serde(default)]
+    pub installer: Option<String>,
+
+    /// Which backend to use: `wine` (default when the oracle allows it), or
+    /// `vm-rdp`/`vm-vfio` (designed, not yet implemented). Omit for `auto` —
+    /// the oracle decides.
+    #[serde(default)]
+    pub tier: Option<String>,
+
+    /// The installed executable, relative to the prefix's C: drive
+    /// (`Program Files/Foo/foo.exe`). Used for the launcher.
+    #[serde(default)]
+    pub exe: Option<String>,
+
+    /// `winetricks` verbs this app needs (`dotnet48`, `vcrun2019`, …).
+    #[serde(default)]
+    pub winetricks: Vec<String>,
+
+    /// Windows version the prefix reports (`win10`, `win7`, …).
+    #[serde(default)]
+    pub windows_version: Option<String>,
+
+    /// Skip the compatibility oracle's verdict and install anyway. For when you
+    /// know better than the knowledge base — it still prints what it found.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// A foreign-distro stratum: a rootfs bootstrapped with that distro's own tool,

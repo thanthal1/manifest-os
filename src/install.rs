@@ -11,6 +11,7 @@
 //! here — those belong to the ISO's TUI layer, never the manifest.
 
 use crate::android;
+use crate::windows as winapps;
 use crate::boot;
 use crate::defaults;
 use crate::desktop;
@@ -148,6 +149,15 @@ fn apply(manifest: &Manifest, ctx: &Ctx, mode: Mode) -> Result<()> {
         if !manifest.strata.is_empty() {
             step("Setting up strata");
             strata::apply(&manifest.strata, ctx)?;
+        }
+
+        // Windows apps (wine tier). After strata/Android so all the foreign-
+        // software steps sit together. Blocked apps are reported, not installed.
+        if let Some(w) = &manifest.windows {
+            if !w.is_empty() {
+                step("Setting up Windows apps (Wine)");
+                winapps::apply(w, ctx)?;
+            }
         }
 
         // Android apps via Waydroid — a container, not a chroot; set up when the

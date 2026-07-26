@@ -34,5 +34,7 @@ pub mod system;
 pub mod theming;
 pub mod tui;
 pub mod update;
+pub mod wincompat;
+pub mod windows;
 pub mod users;
 pub mod wallpaper;

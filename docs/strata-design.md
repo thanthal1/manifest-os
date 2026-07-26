@@ -681,9 +681,28 @@ shim.
 
 ---
 
-## 14. Windows apps — the "windows stratum" (Phase 6, design-only)
+## 14. Windows apps — the "windows stratum" (Phase 6a: wine tier implemented)
 
-> Status: **idea / design.** The Linux strata (Phases 1–3) are the foundation
+> Status: **Phase 6a implemented — the `wine` tier + the compatibility oracle.**
+> [`src/wincompat.rs`](../src/wincompat.rs) answers "will this run under Wine?"
+> from two independent signals: a curated knowledge base of app families (kernel
+> anti-cheat, CAD, dongles, Store packaging, known-good tools) and **marker
+> scanning inside a local installer** (`EasyAntiCheat`, `vgk.sys`, `HASP`, `.sys`)
+> — so an innocent-looking name can't hide a blocker. Verdicts are
+> `works`/`likely`/`risky`/`blocked`, each with reasons and the tier that could
+> run it; `manifest windows-check <name|installer.exe>` prints them without
+> installing anything. [`src/windows.rs`](../src/windows.rs) implements the
+> **wine tier**: install wine+winetricks, a **per-app prefix** (so one app's
+> overrides can't break another), winetricks verbs (manifest + per-app + the
+> oracle's hints), run the installer (URL or local), and a `.desktop` launcher
+> through the generated `windows-app` command. The gate runs **before** any
+> install, so a blocked app is reported with its reason rather than
+> half-installed (`"force": true` overrides). 15 unit tests. Example:
+> [`examples/reference/windows-wine.json`](../examples/reference/windows-wine.json).
+> **Not built:** the `vm-rdp`/`vm-vfio` tiers below — an app that needs one says
+> so clearly. Original design follows.
+>
+> Status (original): **idea / design.** The Linux strata (Phases 1–3) are the foundation
 > this reuses conceptually. This section is a plan, not a commitment; nothing here
 > is built. Anchor use case: **SolidWorks** (and CAD generally) running as a
 > native-feeling window on the ManifestOS desktop.

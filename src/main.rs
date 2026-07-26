@@ -13,7 +13,7 @@ use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::{
     android, desktop, diff, export, history, install, installer, kernel, pacman, pkglock, strata,
-    survey, tui, update,
+    survey, tui, update, wincompat,
 };
 use std::path::PathBuf;
 
@@ -78,6 +78,17 @@ enum Command {
     /// Apps and image pins come from the manifest's `android` block; this bare
     /// command sets up the container with Waydroid's defaults.
     Android,
+    /// Will a Windows app run under Wine? Checks the app name (and, for a local
+    /// installer, markers inside the file) against the compatibility knowledge
+    /// base and prints the verdict, the reasons, and which tier can run it.
+    /// Read-only — installs nothing. See `docs/strata-design.md` §14.
+    WindowsCheck {
+        /// App name, e.g. "SolidWorks" — or a path to an installer .exe/.msi.
+        app: String,
+        /// An installer path/URL to consider alongside the name.
+        #[arg(long)]
+        installer: Option<String>,
+    },
     /// Update everything, everywhere: the Arch host (repos + AUR), every foreign
     /// stratum via its own package manager (apt/dnf/apk), Flatpak apps, and the
     /// Waydroid Android image — one command across all package sources.
@@ -385,6 +396,46 @@ fn run() -> Result<()> {
             // write_cnf_handler already refreshes the Android file handlers too
             // (they're registered even without Waydroid — opening an .apk offers
             // to set it up), so there's nothing extra to do here.
+            Ok(())
+        }
+        Command::WindowsCheck { app, installer } => {
+            // A path given as the app arg doubles as the installer to scan.
+            let looks_like_path = app.to_lowercase().ends_with(".exe")
+                || app.to_lowercase().ends_with(".msi")
+                || std::path::Path::new(&app).exists();
+            let inst = installer.clone().or_else(|| looks_like_path.then(|| app.clone()));
+            let name = if looks_like_path {
+                std::path::Path::new(&app)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| app.clone())
+            } else {
+                app.clone()
+            };
+            let base = wincompat::assess(&name, inst.as_deref());
+            let a = match inst.as_deref() {
+                Some(p) if !p.starts_with("http") => wincompat::read_head(p, 4 << 20)
+                    .map(|b| wincompat::assess_bytes(&base, &b))
+                    .unwrap_or(base),
+                _ => base,
+            };
+            println!("
+  {name}");
+            println!("  verdict: {}", a.verdict.label());
+            for r in &a.reasons {
+                println!("    · {r}");
+            }
+            println!("  suggested tier: {}", a.verdict.tier());
+            if !a.suggest_winetricks.is_empty() {
+                println!("  winetricks: {}", a.suggest_winetricks.join(" "));
+            }
+            if a.verdict == wincompat::Verdict::Blocked {
+                println!();
+                println!("  This app can't work under Wine. The VM tiers that could run it");
+                println!("  (vm-rdp / vm-vfio) are designed but not built yet — see");
+                println!("  docs/strata-design.md §14.");
+            }
+            println!();
             Ok(())
         }
         Command::Script { name } => {
