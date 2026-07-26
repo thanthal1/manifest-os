@@ -108,6 +108,14 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 
     if backend != "libvirt" {
         ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}\""), false)?;
+        // Debloat runs *during Windows setup* via dockur's /oem hook, so the junk
+        // never gets a first run. Off only if the manifest says so.
+        if vm.debloat.unwrap_or(true) {
+            println!("  · debloating: removing preinstalled Store apps, Cortana and telemetry");
+            ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}/oem\""), false)?;
+            ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/install.bat")), debloat_bat())?;
+            ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/debloat.ps1")), debloat_ps1())?;
+        }
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose_yaml(vm, &pass))?;
         println!("  · starting the Windows container (first run installs Windows)");
         let up = if backend == "podman" {
@@ -143,6 +151,10 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
         &["-S", "--needed", "--noconfirm", "dialog", "gawk", "curl", "openbsd-netcat", "freerdp"],
     )?;
 
+    // Make sure winapps + winapps-setup are actually on PATH (an older setup may
+    // have linked only into ~/.local/bin).
+    ensure_winapps(ctx)?;
+
     println!("  · checking the Windows container is running");
     ctx.shell(
         &format!(
@@ -157,7 +169,7 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
 
     println!("  · asking WinApps to detect installed Windows apps");
     ctx.shell(
-        "winapps-setup 2>/dev/null || sg docker -c 'winapps-setup' || {            echo '  ! winapps-setup failed. If it mentions docker permissions, log out' >&2;            echo '    and back in once, then re-run: manifest windows-vm --link' >&2; }",
+        "SETUP=$(command -v winapps-setup 2>/dev/null);          [ -n \"$SETUP\" ] || SETUP=\"$HOME/.local/bin/winapps-setup\";          [ -x \"$SETUP\" ] || SETUP=\"$HOME/.local/share/manifest-os/winapps/setup.sh\";          [ -x \"$SETUP\" ] || { echo '  ! could not find winapps-setup — re-run: manifest windows-vm' >&2; exit 1; };          \"$SETUP\" 2>/dev/null || sg docker -c \"'$SETUP'\" || {            echo '  ! winapps-setup failed. If it mentions docker permissions, log out' >&2;            echo '    and back in once, then re-run: manifest windows-vm --link' >&2; }",
         false,
     )?;
     println!("  · done — installed Windows apps should now appear in your menu");
@@ -196,7 +208,9 @@ fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 /// Install WinApps itself — **as a separate component**, never vendored. Prefers
 /// the AUR package; falls back to an upstream clone into the user's data dir.
 fn ensure_winapps(ctx: &Ctx) -> Result<()> {
-    if ctx.check("sh", &["-c", "command -v winapps"]) {
+    // BOTH commands must be present: an earlier version linked only into
+    // ~/.local/bin, which left `winapps-setup` off PATH and broke `--link`.
+    if ctx.check("sh", &["-c", "command -v winapps && command -v winapps-setup"]) {
         println!("  · winapps already installed");
         return Ok(());
     }
@@ -356,6 +370,14 @@ pub fn compose_yaml(vm: &WindowsVm, password: &str) -> String {
         .filter(|k| !k.is_empty())
         .map(|k| format!("      KEY: \"{k}\"\n"))
         .unwrap_or_default();
+    // dockur copies /oem into the guest and runs install.bat during setup — the
+    // supported hook for post-install tweaks like debloating.
+    let oem_line = if vm.debloat.unwrap_or(true) {
+        "      - ./oem:/oem
+".to_string()
+    } else {
+        String::new()
+    };
     let lang_line = vm
         .language
         .as_deref()
@@ -391,7 +413,8 @@ pub fn compose_yaml(vm: &WindowsVm, password: &str) -> String {
                - 3389:3389/udp\n    \
              volumes:\n      \
                - ./storage:/storage\n      \
-               - ${{HOME}}:/shared\n    \
+               - ${{HOME}}:/shared\n\
+         {oem_line}    \
              restart: on-failure\n    \
              stop_grace_period: 2m\n",
         version = vm.version(),
@@ -402,6 +425,7 @@ pub fn compose_yaml(vm: &WindowsVm, password: &str) -> String {
         password = password,
         key_line = key_line,
         lang_line = lang_line,
+        oem_line = oem_line,
     )
 }
 
@@ -477,6 +501,79 @@ fn idle_timer_unit() -> &'static str {
      [Install]
      WantedBy=timers.target
 "
+}
+
+/// dockur runs `oem/install.bat` inside Windows during setup. Keep it a one-liner
+/// that hands off to PowerShell, where the real work is readable.
+fn debloat_bat() -> &'static str {
+    r#"@echo off
+rem ManifestOS - runs during Windows setup (generated).
+powershell -NoProfile -ExecutionPolicy Bypass -File %~dp0debloat.ps1 >%~dp0debloat.log 2>&1
+exit /b 0
+"#
+}
+
+/// What actually gets removed. Deliberately conservative: it uninstalls *apps*
+/// and flips *policy/preference* registry values -- no system-file surgery, no
+/// service deletion, nothing that stops Windows updating or being repaired. This
+/// VM exists to run one application, so the consumer extras are pure overhead.
+fn debloat_ps1() -> &'static str {
+    r#"# ManifestOS - Windows debloat (generated; runs once during setup).
+# Conservative by design: removes preinstalled Store apps and turns off
+# consumer suggestions/telemetry. No OS surgery - Windows still updates.
+$ErrorActionPreference = 'SilentlyContinue'
+
+$bloat = @(
+  'Microsoft.3DBuilder','Microsoft.549981C3F5F10','Microsoft.BingNews',
+  'Microsoft.BingWeather','Microsoft.BingSearch','Microsoft.GetHelp',
+  'Microsoft.Getstarted','Microsoft.Messaging','Microsoft.MicrosoftOfficeHub',
+  'Microsoft.MicrosoftSolitaireCollection','Microsoft.MicrosoftStickyNotes',
+  'Microsoft.MixedReality.Portal','Microsoft.OneConnect','Microsoft.People',
+  'Microsoft.SkypeApp','Microsoft.Wallet','Microsoft.WindowsFeedbackHub',
+  'Microsoft.WindowsMaps','Microsoft.WindowsSoundRecorder','Microsoft.Xbox.TCUI',
+  'Microsoft.XboxApp','Microsoft.XboxGameOverlay','Microsoft.XboxGamingOverlay',
+  'Microsoft.XboxIdentityProvider','Microsoft.XboxSpeechToTextOverlay',
+  'Microsoft.YourPhone','Microsoft.ZuneMusic','Microsoft.ZuneVideo',
+  'Clipchamp.Clipchamp','MicrosoftTeams','MSTeams','Microsoft.Todos',
+  'Microsoft.PowerAutomateDesktop','Microsoft.MicrosoftJournal'
+)
+foreach ($b in $bloat) {
+  Get-AppxPackage -AllUsers -Name $b | Remove-AppxPackage -AllUsers
+  Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $b |
+    Remove-AppxProvisionedPackage -Online -AllUsers
+}
+
+# Consumer suggestions / 'recommended' junk and silent app installs.
+$cd = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
+New-Item -Path $cd -Force | Out-Null
+Set-ItemProperty -Path $cd -Name 'DisableWindowsConsumerFeatures' -Value 1 -Type DWord
+Set-ItemProperty -Path $cd -Name 'DisableSoftLanding' -Value 1 -Type DWord
+
+# Telemetry to the minimum the OS supports.
+$dc = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
+New-Item -Path $dc -Force | Out-Null
+Set-ItemProperty -Path $dc -Name 'AllowTelemetry' -Value 0 -Type DWord
+
+# Cortana and web results in search - useless in a single-app VM.
+$ws = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'
+New-Item -Path $ws -Force | Out-Null
+Set-ItemProperty -Path $ws -Name 'AllowCortana' -Value 0 -Type DWord
+Set-ItemProperty -Path $ws -Name 'DisableWebSearch' -Value 1 -Type DWord
+Set-ItemProperty -Path $ws -Name 'ConnectedSearchUseWeb' -Value 0 -Type DWord
+
+# Widgets / news feed.
+$dsh = 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'
+New-Item -Path $dsh -Force | Out-Null
+Set-ItemProperty -Path $dsh -Name 'AllowNewsAndInterests' -Value 0 -Type DWord
+
+# Faster, quieter desktop for RemoteApp use.
+$adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+New-Item -Path $adv -Force | Out-Null
+Set-ItemProperty -Path $adv -Name 'ShowTaskViewButton' -Value 0 -Type DWord
+Set-ItemProperty -Path $adv -Name 'TaskbarDa' -Value 0 -Type DWord
+
+Write-Output 'ManifestOS debloat: done'
+"#
 }
 
 /// A random password for the Windows account, so a manifest never has to carry
@@ -575,6 +672,30 @@ mod tests {
         let key_indent = c.lines().find(|l| l.contains("KEY:")).map(|l| l.len() - l.trim_start().len());
         assert_eq!(env_indent, key_indent, "KEY must align with VERSION:
 {c}");
+    }
+
+    #[test]
+    fn debloat_is_on_by_default_and_optional() {
+        // Default on: this VM runs one app, so the consumer extras are overhead.
+        assert!(compose_yaml(&vm(), "p").contains("./oem:/oem"), "oem hook mounted by default");
+        let mut v = vm();
+        v.debloat = Some(false);
+        assert!(!compose_yaml(&v, "p").contains("./oem:/oem"), "opt-out leaves Windows stock");
+    }
+
+    #[test]
+    fn debloat_is_conservative_not_os_surgery() {
+        let ps = debloat_ps1();
+        // Removes apps and flips policy — nothing that breaks servicing.
+        assert!(ps.contains("Remove-AppxPackage"), "{ps}");
+        assert!(ps.contains("DisableWindowsConsumerFeatures"), "{ps}");
+        assert!(ps.contains("AllowTelemetry"), "{ps}");
+        // Must NOT disable Windows Update or strip components: a VM that can't
+        // patch itself is a worse outcome than a bloated one.
+        assert!(!ps.to_lowercase().contains("wuauserv"), "must not touch Windows Update: {ps}");
+        assert!(!ps.to_lowercase().contains("remove-windowspackage"), "no component removal: {ps}");
+        // The batch shim hands off to it.
+        assert!(debloat_bat().contains("debloat.ps1"), "{}", debloat_bat());
     }
 
     #[test]

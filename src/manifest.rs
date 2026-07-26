@@ -533,6 +533,15 @@ pub struct WindowsVm {
     /// app open. `None` ⇒ 30. `Some(0)` ⇒ never auto-stop.
     #[serde(default)]
     pub idle_minutes: Option<u32>,
+
+    /// Strip the preinstalled junk during Windows setup — the Store bloat
+    /// (Xbox, Bing, Solitaire, Clipchamp…), Cortana, consumer "suggestions",
+    /// telemetry and web results in search. Defaults to **true**: this VM exists
+    /// to run one application, so the extras are pure overhead. Set `false` to
+    /// keep Windows exactly as Microsoft ships it. Removals are per-user/app
+    /// only — no OS surgery, so Windows still updates normally.
+    #[serde(default)]
+    pub debloat: Option<bool>,
 }
 
 impl WindowsVm {
