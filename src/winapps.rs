@@ -167,10 +167,14 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
         false,
     )?;
 
-    println!("  · running WinApps' installer (it will ask a few questions)");
-    println!("    choose: Install → System (or User) → Automatic");
+    // Fully automatic: no wizard, no commands for the user to run. WinApps
+    // refuses to install over a previous installation (exit 3), so clear any
+    // prior one first — uninstall is a no-op when there's nothing there — then
+    // install non-interactively. `--system` first, `--user` as the fallback for
+    // machines where the system-wide path isn't available.
+    println!("  · installing WinApps and detecting your Windows apps");
     ctx.shell(
-        "SETUP=\"$HOME/.local/share/manifest-os/winapps/setup.sh\";          [ -x \"$SETUP\" ] || { echo '  ! WinApps source missing — re-run: manifest windows-vm' >&2; exit 1; };          \"$SETUP\" || sg docker -c \"'$SETUP'\" || {            echo >&2;            echo '  ! WinApps setup did not complete.' >&2;            echo '    · docker permission errors: log out and back in once, then retry.' >&2;            echo \"    · 'existing installation' errors: remove it with  '$SETUP' --uninstall\" >&2;            echo '      (or answer Uninstall in the wizard), then re-run this command.' >&2; }",
+        "SETUP=\"$HOME/.local/share/manifest-os/winapps/setup.sh\";          [ -x \"$SETUP\" ] || { echo '  ! WinApps source missing — re-run: manifest windows-vm' >&2; exit 1; };          run() { \"$SETUP\" \"$@\" 2>&1 || sg docker -c \"'$SETUP' $*\" 2>&1; };          # Clear any earlier installation so the conflict check can't stop us.          run --system --uninstall >/dev/null 2>&1 || true;          run --user --uninstall  >/dev/null 2>&1 || true;          out=$(run --system); rc=$?;          if [ $rc -ne 0 ]; then out=$(run --user); rc=$?; fi;          printf '%s\n' \"$out\" | sed 's/^/    /';          if [ $rc -ne 0 ]; then            echo >&2;            echo '  ! WinApps could not finish installing.' >&2;            echo '    If the message above mentions docker permissions, log out and back' >&2;            echo '    in once — that is the only thing this cannot do for you.' >&2;            exit 1;          fi",
         false,
     )?;
     println!("  · done — installed Windows apps should now appear in your menu");
@@ -292,6 +296,13 @@ if [ "$(health)" != "healthy" ]; then
   echo
   echo "  (progress:  docker logs -f manifest-windows)"
   exit 0
+fi
+
+# 3b. First time Windows is ready: finish WinApps setup ourselves. You should
+#     never have to run a command to make this work.
+if ! command -v winapps >/dev/null 2>&1    && [ ! -x "$HOME/.local/share/manifest-os/winapps/bin/winapps" ]; then
+  echo "Finishing Windows setup (first time only)..."
+  manifest windows-vm --link || true
 fi
 
 # 4. The installer has to be reachable from inside Windows. dockur shares your
