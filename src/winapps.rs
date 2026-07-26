@@ -303,20 +303,39 @@ mkdir -p "$HOME/Windows Transfer"
 cp -f "$f" "$HOME/Windows Transfer/$base" 2>/dev/null || true
 : > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
 
-echo
-echo "Opening Windows. Your installer is available inside it at:"
-echo '    \\host.lan\Data\Windows Transfer\'"$base"
-echo "(also in the shared drive, as '$base')"
-echo
 # Resolve winapps: its own installer puts it on PATH, but fall back to the
 # checkout if `--link` hasn't been run yet.
 WA=$(command -v winapps 2>/dev/null)
 [ -n "$WA" ] || WA="$HOME/.local/share/manifest-os/winapps/bin/winapps"
 [ -x "$WA" ] || {{ echo "windows-vm-run: winapps isn't set up — run: manifest windows-vm --link" >&2; exit 1; }}
 # winapps runs docker itself, so it needs the same group bridge dk() gives us.
-"$WA" windows 2>/dev/null   || sg docker -c "'$WA' windows" 2>/dev/null   || {{
+run_wa() {{ "$WA" "$@" 2>/dev/null || sg docker -c "'$WA' $*" 2>/dev/null; }}
+
+# Run the installer as a RemoteApp: its own window on your desktop. No Windows
+# desktop, no Windows taskbar, no browser tab — which is the entire point of
+# this tier. The file lives on the share dockur exposes to the guest.
+WINPATH='\\host.lan\Data\Windows Transfer\'"$base"
+echo
+echo "Opening $base in Windows..."
+if run_wa manual "$WINPATH"; then
+  echo
+  echo "Installer finished."
+  # Whatever it installed should now be in your launcher — re-detect so you
+  # never have to run anything yourself.
+  echo "Adding any newly installed Windows apps to your menu..."
+  manifest windows-vm --link >/dev/null 2>&1 || true
+  echo "Done — look for it in your app launcher."
+  exit 0
+fi
+
+# Older WinApps (no `manual`), or the launch didn't take: fall back to the full
+# desktop so the file is still reachable by hand.
+echo "Couldn't open it as a single window — opening the Windows desktop instead." >&2
+echo "Your installer is inside Windows at:" >&2
+echo "    $WINPATH" >&2
+run_wa windows || {{
     echo >&2
-    echo "Couldn't open the Windows desktop yet. The usual reasons:" >&2
+    echo "Couldn't open Windows yet. The usual reasons:" >&2
     echo >&2
     echo "  · Windows is still installing (the first run takes 20-40 minutes)." >&2
     echo "    Look at http://localhost:8006 — if setup is running, just wait and" >&2
@@ -454,7 +473,10 @@ pub fn winapps_conf(vm: &WindowsVm, password: &str) -> String {
          RDP_IP=\"127.0.0.1\"\n\
          WAFLAVOR=\"{flavor}\"\n\
          RDP_SCALE=100\n\
-         RDP_FLAGS=\"\"\n\
+         # Make it feel native: resize with the window, no cert prompt for our\n\
+         # own loopback VM, reconnect quietly, and full-screen if a desktop is\n\
+         # ever opened. RemoteApp windows are borderless regardless.\n\
+         RDP_FLAGS=\"/dynamic-resolution /cert:ignore +auto-reconnect\"\n\
          MULTIMON=\"false\"\n\
          DEBUG=\"true\"\n\
          FREERDP_COMMAND=\"xfreerdp3\"\n",
@@ -753,7 +775,16 @@ mod tests {
         assert!(s.contains(r#"Transfer\'"$base""#), "filename must expand: {s}");
         assert!(!s.contains(r#"Transfer\$base""#), "an escaped $ would print literally: {s}");
         // winapps talks to docker itself, so it needs the group bridge too.
-        assert!(s.contains("sg docker -c \"'$WA' windows\""), "{s}");
+        assert!(s.contains("sg docker -c \"'$WA' $*\""), "{s}");
+        // The installer must open as a RemoteApp — its own window — not as a
+        // Windows desktop in a browser tab.
+        assert!(s.contains("run_wa manual \"$WINPATH\""), "runs the exe as a native window: {s}");
+        // Opening a desktop is only the fallback.
+        let manual_at = s.find("run_wa manual").expect("manual launch");
+        let desktop_at = s.find("run_wa windows").expect("desktop fallback");
+        assert!(manual_at < desktop_at, "RemoteApp must be tried before the desktop:\n{s}");
+        // After installing, newly-installed apps get added to the launcher.
+        assert!(s.contains("manifest windows-vm --link"), "re-detects apps: {s}");
     }
 
     #[test]
