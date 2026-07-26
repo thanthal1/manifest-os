@@ -188,6 +188,14 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
             )
         };
         ctx.shell(&up, false)?;
+        // Start the idle clock now. Otherwise the watchdog inherits whenever an
+        // app was last used -- possibly hours ago -- and a container we just
+        // started is already past its deadline.
+        ctx.shell(
+            "a=\"${XDG_STATE_HOME:-$HOME/.local/state}/windows-vm-activity\"; \
+             mkdir -p \"$(dirname \"$a\")\" 2>/dev/null || true; : > \"$a\" 2>/dev/null || true",
+            false,
+        )?;
         println!();
         println!("  Windows is installing inside the container. Watch it at:");
         println!("      http://localhost:8006");
@@ -203,11 +211,11 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 pub fn link_apps(ctx: &Ctx) -> Result<()> {
     // WinApps' wizard needs `dialog`; installing it here means `--link` works
     // even if the VM was set up by an older version that didn't pull it in.
+    // Only when something is genuinely missing: `--link` is re-entered from
+    // `windows-vm-run`, which runs from a .desktop launcher with no TTY, and an
+    // interactive sudo there aborts it. Same reasoning as `ensure_deps`.
     println!("  · checking WinApps' dependencies");
-    ctx.sudo(
-        "pacman",
-        &["-S", "--needed", "--noconfirm", "dialog", "gawk", "curl", "openbsd-netcat", "freerdp"],
-    )?;
+    ensure_packages(ctx, &["dialog", "gawk", "curl", "openbsd-netcat", "freerdp"])?;
 
     // Make sure winapps + winapps-setup are actually on PATH (an older setup may
     // have linked only into ~/.local/bin).
@@ -245,19 +253,7 @@ fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
     // TTY, where an interactive sudo aborts the whole setup with
     // "sudo: a terminal is required". A second run on a configured machine must
     // need no root at all.
-    let missing: Vec<&str> = pkgs
-        .iter()
-        .copied()
-        .filter(|p| !ctx.check("pacman", &["-Q", p]))
-        .collect();
-    if missing.is_empty() {
-        println!("  · host dependencies already installed: {}", pkgs.join(", "));
-    } else {
-        println!("  · installing host dependencies: {}", missing.join(", "));
-        let mut args = vec!["-S", "--needed", "--noconfirm"];
-        args.extend(missing.iter().copied());
-        ctx.sudo("pacman", &args)?;
-    }
+    ensure_packages(ctx, &pkgs)?;
     if vm.backend() == "docker" {
         // Docker must actually be running, and the user needs to reach it.
         ensure_service(ctx, "docker.service")?;
@@ -268,6 +264,26 @@ fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         ensure_group(ctx, "libvirt")?;
     }
     Ok(())
+}
+
+/// Install only the packages that are actually missing.
+///
+/// `pacman -S --needed` is already a no-op when everything is present, but it
+/// still asks for a password — and both `manifest windows-vm` and
+/// `manifest windows-vm --link` are re-entered from `windows-vm-run`, i.e. from
+/// a .desktop launcher with no TTY, where that aborts the whole run with
+/// "sudo: a terminal is required".
+fn ensure_packages(ctx: &Ctx, pkgs: &[&str]) -> Result<()> {
+    let missing: Vec<&str> =
+        pkgs.iter().copied().filter(|p| !ctx.check("pacman", &["-Q", p])).collect();
+    if missing.is_empty() {
+        println!("  · host dependencies already installed: {}", pkgs.join(", "));
+        return Ok(());
+    }
+    println!("  · installing host dependencies: {}", missing.join(", "));
+    let mut args = vec!["-S", "--needed", "--noconfirm"];
+    args.extend(missing.iter().copied());
+    ctx.sudo("pacman", &args)
 }
 
 /// Start and enable a service, but only if it isn't already both. Root is asked
@@ -314,12 +330,20 @@ fn ensure_winapps_step() -> &'static str {
        fi
        chmod +x "$d/setup.sh" "$d/bin/winapps" 2>/dev/null || true
        # Remove symlinks an earlier version of ManifestOS created — they are
-       # what WinApps' installer trips over. Only ours (symlinks into our
-       # checkout) are touched; a real WinApps install is left alone.
+       # what WinApps' installer trips over: its conflict check is
+       # `[ -f /usr/local/bin/winapps ]`, which follows symlinks, so ours reads
+       # as an existing system-wide installation and BOTH --system and --user
+       # refuse with exit 3. Only ours (symlinks into our checkout) are touched;
+       # a real WinApps install is left alone.
        for l in /usr/local/bin/winapps /usr/local/bin/winapps-setup; do
          if [ -L "$l" ] && readlink "$l" | grep -q 'manifest-os/winapps'; then
            echo "  · removing our old symlink $l (it conflicts with WinApps' installer)"
-           sudo rm -f "$l"
+           # Non-interactive first: this runs from a .desktop launcher too, and
+           # a bare `sudo` there waits forever on a prompt nobody can see. Only
+           # escalate interactively when there is a terminal to answer on.
+           sudo -n rm -f "$l" 2>/dev/null ||
+             { [ -t 0 ] && sudo rm -f "$l"; } ||
+             echo "  ! could not remove $l — needs root; app detection will fail until it is gone" >&2
          fi
        done
        for l in "$HOME/.local/bin/winapps" "$HOME/.local/bin/winapps-setup"; do
@@ -701,10 +725,26 @@ if pgrep -x xfreerdp >/dev/null 2>&1 || pgrep -x xfreerdp3 >/dev/null 2>&1; then
   : > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
   exit 0
 fi
+# Installing Windows takes 20-40 minutes with no client attached and nothing
+# touching the activity file -- which is this watchdog's exact definition of
+# idle. It stopped a running install once; `manifest windows-vm` promises the
+# user it "needs no input", so it must not need babysitting either.
+# windows.boot is dockur's own marker for "installation finished" (its
+# skipInstall reads it), so its absence means setup is still running.
+VMDIR="$HOME/.local/share/manifest-os/windows-vm"
+if [ -d "$VMDIR/storage" ] && [ ! -f "$VMDIR/storage/windows.boot" ]; then
+  exit 0
+fi
 ACT="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity"
 now=$(date +%s)
 last=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
 [ "$last" -eq 0 ] && {{ mkdir -p "$(dirname "$ACT")"; : > "$ACT"; exit 0; }}
+# Idle means "up and unused for IDLE", not "the last app closed a while ago".
+# A container started just now after a long gap is brand new, not stale: count
+# from whichever is later, or a fresh start is instantly eligible to be killed.
+started=$(dk inspect -f '{{{{.State.StartedAt}}}}' WinApps 2>/dev/null)
+started=$(date -d "$started" +%s 2>/dev/null || echo 0)
+[ "$started" -gt "$last" ] && last=$started
 if [ $((now - last)) -ge "$IDLE" ]; then
   echo "windows-vm-idle: stopping the idle Windows VM"
   dk stop WinApps >/dev/null 2>&1 || true
@@ -1383,6 +1423,19 @@ mod tests {
         // 0 disables auto-stop entirely.
         let z = vm_idle_script(0);
         assert!(z.contains("IDLE=0") && z.contains("[ \"$IDLE\" -eq 0 ] && exit 0"), "{z}");
+        // Installing Windows takes 20-40 min with no client attached and nothing
+        // touching the activity file -- this watchdog's exact definition of
+        // idle. It killed a running install once, 16 minutes in. `manifest
+        // windows-vm` promises the install "needs no input"; it must not need
+        // babysitting either.
+        let guard = s.find("windows.boot").expect("install guard");
+        let stop = s.find("dk stop WinApps").expect("stop");
+        assert!(guard < stop, "must not stop mid-install:\n{s}");
+        // And idle means "up and unused for IDLE", not "the last app closed a
+        // while ago" -- a container started just now is new, however stale the
+        // activity file is, or a fresh start is instantly eligible to be killed.
+        assert!(s.contains("{{.State.StartedAt}}"), "count from the container start too: {s}");
+        assert!(s.contains("[ \"$started\" -gt \"$last\" ] && last=$started"), "{s}");
     }
 
     #[test]
@@ -1438,6 +1491,12 @@ mod tests {
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
+            // These are whole scripts. `windows-vm-run` is reachable via
+            // `__script`, so the release loop can pipe it through `sh -n` by
+            // hand -- the other two are written as real files and never were.
+            ("windows-vm-run", vm_run_script()),
+            ("windows-vm-idle", vm_idle_script(30)),
+            ("manifest-freerdp", freerdp_wrapper().to_string()),
         ] {
             let mut sh = Command::new("sh")
                 .arg("-n")
