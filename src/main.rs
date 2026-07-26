@@ -377,6 +377,7 @@ fn run() -> Result<()> {
                 "android-install" => android::installer_script(),
                 "waydroid-launch" => android::launcher_script(),
                 "waydroid-arm-setup" => android::arm_setup_script().to_string(),
+                "manifest-install-gui" => android::gui_install_script().to_string(),
                 "strata-install" => strata::strata_install_script().to_string(),
                 other => anyhow::bail!("unknown generated script: {other}"),
             };

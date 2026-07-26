@@ -514,11 +514,20 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
     // keeps it current with no regeneration. Same mechanism as the Android stubs.
     ctx.write_root(STRATA_INSTALL, &crate::android::thin_stub("strata-install"))?;
     ctx.sudo("chmod", &["0755", STRATA_INSTALL])?;
+    // The shared GUI wrapper the handler Execs (also written by the android step;
+    // written here too so .deb/.rpm open-to-install works with no android block).
+    ctx.write_root(
+        "/usr/local/bin/manifest-install-gui",
+        &crate::android::thin_stub("manifest-install-gui"),
+    )?;
+    ctx.sudo("chmod", &["0755", "/usr/local/bin/manifest-install-gui"])?;
     ctx.write_root(DEB_RPM_HANDLER, deb_rpm_handler_desktop())?;
     ctx.shell(
         &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),
         true,
     )?;
+    // Make these handlers the default for package files (merged, not clobbered).
+    crate::android::write_mime_defaults_pub(ctx)?;
     Ok(())
 }
 
@@ -582,13 +591,17 @@ done
 /// The file-manager "open with" handler for `.deb`/`.rpm` (standard MIME types,
 /// already in shared-mime-info) pointing at `strata-install`. Pure — tested.
 fn deb_rpm_handler_desktop() -> &'static str {
+    // Uses the shared GUI wrapper (opens a terminal when there is one, else
+    // notifies) — `Terminal=true` silently fails in file managers with no
+    // terminal configured. See `crate::android::gui_install_script`.
     "[Desktop Entry]\n\
      Type=Application\n\
      Name=Install to its Linux system (strata)\n\
      Comment=Install a .deb or .rpm into the matching foreign-distro stratum\n\
-     Exec=strata-install %F\n\
+     Exec=/usr/local/bin/manifest-install-gui %f\n\
+     TryExec=/usr/local/bin/manifest-install-gui\n\
      Icon=package-x-generic\n\
-     Terminal=true\n\
+     Terminal=false\n\
      Categories=System;\n\
      MimeType=application/vnd.debian.binary-package;application/x-deb;application/x-rpm;application/x-redhat-package-manager;\n\
      NoDisplay=false\n"
@@ -1412,7 +1425,7 @@ mod tests {
     #[test]
     fn deb_rpm_handler_opens_with_strata_install() {
         let d = deb_rpm_handler_desktop();
-        assert!(d.contains("Exec=strata-install %F"), "{d}");
+        assert!(d.contains("Exec=/usr/local/bin/manifest-install-gui %f"), "{d}");
         assert!(d.contains("application/vnd.debian.binary-package"), "deb mime: {d}");
         assert!(d.contains("application/x-rpm"), "rpm mime: {d}");
     }

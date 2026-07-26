@@ -32,6 +32,11 @@ const IDLE_TIMER: &str = "/etc/systemd/user/waydroid-idle.timer";
 const APPLICATIONS_DIR: &str = "/usr/share/applications";
 const MIME_XML: &str = "/usr/share/mime/packages/manifest-android-bundles.xml";
 const MIME_HANDLER: &str = "/usr/share/applications/manifest-apkm-install.desktop";
+/// GUI-friendly installer wrapper (opens a terminal if there is one, else runs
+/// headless with desktop notifications) — what the file-manager handlers Exec.
+const GUI_INSTALL: &str = "/usr/local/bin/manifest-install-gui";
+/// System-wide XDG default-application map (merged, never clobbered).
+const MIMEAPPS: &str = "/etc/xdg/mimeapps.list";
 /// Default auto-stop timeout when `idle_minutes` is unset.
 const DEFAULT_IDLE_MIN: u32 = 45;
 
@@ -383,16 +388,149 @@ done
 }
 
 /// Register `.apkm`/`.apks`/`.xapk` as file types + a handler so opening one in a
-/// file manager (or `xdg-open`) installs it into Waydroid via `android-install`.
+/// file manager (or `xdg-open`) installs it into Waydroid via `android-install`,
+/// and make that handler the **default** for those types (merged into the XDG
+/// system defaults so double-click Just Works in any compliant file manager).
 fn write_mime(ctx: &Ctx) -> Result<()> {
-    println!("  · registering .apkm/.apks/.xapk → open with Waydroid");
+    println!("  · registering .apk/.apkm/.apks/.xapk → open with Waydroid");
     ctx.write_root(MIME_XML, mime_xml())?;
     ctx.shell("update-mime-database /usr/share/mime 2>/dev/null || true", true)?;
+    ctx.write_root(GUI_INSTALL, &thin_stub("manifest-install-gui"))?;
+    ctx.sudo("chmod", &["0755", GUI_INSTALL])?;
     ctx.write_root(MIME_HANDLER, mime_handler_desktop())?;
     ctx.shell(
         &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),
         true,
-    )
+    )?;
+    write_mime_defaults(ctx)
+}
+
+/// Make our handlers the default application for the package types we own, by
+/// **merging** into `/etc/xdg/mimeapps.list` (other entries are preserved — this
+/// file may already carry the user's/desktop's own defaults).
+pub fn write_mime_defaults_pub(ctx: &Ctx) -> Result<()> { write_mime_defaults(ctx) }
+
+fn write_mime_defaults(ctx: &Ctx) -> Result<()> {
+    println!("  · making them the default for package files (merged into {MIMEAPPS})");
+    let existing = std::fs::read_to_string(MIMEAPPS).unwrap_or_default();
+    ctx.write_root(MIMEAPPS, &merge_mimeapps(&existing, default_associations()))
+}
+
+/// The MIME type → handler `.desktop` mappings we own.
+fn default_associations() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("application/vnd.android.package-archive", "manifest-apkm-install.desktop"),
+        ("application/vnd.apkm", "manifest-apkm-install.desktop"),
+        ("application/vnd.apks", "manifest-apkm-install.desktop"),
+        ("application/x-xapk", "manifest-apkm-install.desktop"),
+        ("application/vnd.debian.binary-package", "manifest-strata-install.desktop"),
+        ("application/x-deb", "manifest-strata-install.desktop"),
+        ("application/x-rpm", "manifest-strata-install.desktop"),
+        ("application/x-redhat-package-manager", "manifest-strata-install.desktop"),
+    ]
+}
+
+/// Merge `entries` into a `mimeapps.list`, into both `[Default Applications]`
+/// (what opens on double-click) and `[Added Associations]` (what shows in "Open
+/// With"). Existing keys we own are replaced; everything else is preserved
+/// verbatim, including unrelated sections. Pure — unit-tested.
+fn merge_mimeapps(existing: &str, entries: &[(&str, &str)]) -> String {
+    let sections = ["[Default Applications]", "[Added Associations]"];
+    // Split the file into (section header, lines) keeping order and unknown parts.
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current = String::new();
+    for line in existing.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            current = t.to_string();
+            if !out.iter().any(|(h, _)| h == &current) {
+                out.push((current.clone(), Vec::new()));
+            }
+        } else if !current.is_empty() {
+            if let Some(sec) = out.iter_mut().find(|(h, _)| h == &current) {
+                sec.1.push(line.to_string());
+            }
+        } else if !t.is_empty() {
+            // Content before any section header (rare) — keep it at the top.
+            out.insert(0, (String::new(), vec![line.to_string()]));
+        }
+    }
+    for header in sections {
+        if !out.iter().any(|(h, _)| h == header) {
+            out.push((header.to_string(), Vec::new()));
+        }
+        let sec = out.iter_mut().find(|(h, _)| h == header).expect("just ensured");
+        for (mime, desktop) in entries {
+            // Drop any existing mapping for this type, then add ours.
+            sec.1.retain(|l| {
+                let key = l.split('=').next().unwrap_or("").trim();
+                key != *mime
+            });
+            sec.1.push(format!("{mime}={desktop}"));
+        }
+        // Tidy: no blank lines inside the sections we manage.
+        sec.1.retain(|l| !l.trim().is_empty());
+    }
+    let mut s = String::from(
+        "# Managed in part by ManifestOS: the package-file entries below are\n\
+         # rewritten on install. Other entries are preserved.\n",
+    );
+    for (header, lines) in out {
+        if !header.is_empty() {
+            s.push_str(&header);
+            s.push('\n');
+        }
+        for l in lines {
+            s.push_str(&l);
+            s.push('\n');
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// The GUI-launched installer: file managers can't show a long-running install,
+/// and `Terminal=true` silently fails where no terminal is configured. So this
+/// opens the user's terminal when one exists (keeping it open so the log is
+/// readable) and otherwise runs headless, reporting via desktop notifications.
+/// Dispatches by extension to `android-install` or `strata-install`.
+pub fn gui_install_script() -> &'static str {
+    r####"#!/bin/sh
+# ManifestOS — install a package file opened from a file manager (generated logic).
+[ $# -ge 1 ] || { echo 'usage: manifest-install-gui <file>' >&2; exit 2; }
+f=$1
+case "$f" in
+  *.apk|*.apkm|*.apks|*.xapk) tool=android-install; what="Android app" ;;
+  *.deb|*.rpm)                tool=strata-install;  what="Linux package" ;;
+  *) echo "manifest-install-gui: don't know how to install '$f'" >&2; exit 1 ;;
+esac
+command -v "$tool" >/dev/null 2>&1 || { tool_missing=1; }
+if [ -n "$tool_missing" ]; then
+  msg="$tool is not set up yet. Run: manifest android (or manifest strata add ...)"
+  command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Install' "$msg"
+  echo "$msg" >&2; exit 1
+fi
+# Run in a terminal so the user can watch progress; keep it open at the end.
+inner="$tool \"$f\"; echo; echo '--- done - press Enter to close ---'; read _"
+for t in "$TERMINAL" kitty foot alacritty wezterm konsole gnome-terminal xfce4-terminal \
+         mate-terminal tilix ghostty x-terminal-emulator xterm; do
+  [ -n "$t" ] || continue
+  command -v "$t" >/dev/null 2>&1 || continue
+  case "$t" in
+    gnome-terminal) exec "$t" -- sh -c "$inner" ;;
+    *)              exec "$t" -e sh -c "$inner" ;;
+  esac
+done
+# No terminal available: run headless and report via notifications.
+command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Installing' "Installing $what..."
+if out=$("$tool" "$f" 2>&1); then
+  command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Installed' "$(basename "$f")"
+  printf '%s\n' "$out"
+else
+  command -v notify-send >/dev/null 2>&1 && notify-send -u critical -a ManifestOS 'Install failed' "$(printf '%s' "$out" | tail -n2)"
+  printf '%s\n' "$out" >&2; exit 1
+fi
+"####
 }
 
 fn mime_xml() -> &'static str {
@@ -410,13 +548,17 @@ fn mime_xml() -> &'static str {
 }
 
 fn mime_handler_desktop() -> &'static str {
+    // Terminal=false + the GUI wrapper: `Terminal=true` silently fails in file
+    // managers with no configured terminal emulator. The wrapper opens one when
+    // it can and otherwise notifies, so a double-click always does something.
     "[Desktop Entry]\n\
      Type=Application\n\
      Name=Install to Android (Waydroid)\n\
      Comment=Install an APK / APKM / APKS / XAPK into Waydroid\n\
-     Exec=android-install %f\n\
+     Exec=/usr/local/bin/manifest-install-gui %f\n\
+     TryExec=/usr/local/bin/manifest-install-gui\n\
      Icon=waydroid\n\
-     Terminal=true\n\
+     Terminal=false\n\
      Categories=System;\n\
      MimeType=application/vnd.apkm;application/vnd.apks;application/x-xapk;application/vnd.android.package-archive;\n\
      NoDisplay=false\n"
@@ -681,7 +823,7 @@ mod tests {
         // ZIP-based, so declared sub-class-of application/zip or magic wins.
         assert_eq!(xml.matches("<sub-class-of type=\"application/zip\"/>").count(), 3, "zip subclass on all three: {xml}");
         let d = mime_handler_desktop();
-        assert!(d.contains("Exec=android-install %f"), "{d}");
+        assert!(d.contains("Exec=/usr/local/bin/manifest-install-gui %f"), "{d}");
         assert!(d.contains("application/vnd.apkm"), "mimetype assoc: {d}");
     }
 
@@ -747,6 +889,58 @@ mod tests {
         assert!(s.contains("uname -m"), "checks host arch: {s}");
         assert!(s.contains("*arm*)"), "detects arm-only abi split: {s}");
         assert!(s.contains("waydroid-arm-setup"), "invokes arm setup: {s}");
+    }
+
+    #[test]
+    fn merge_mimeapps_sets_defaults_without_clobbering_others() {
+        let existing = "[Default Applications]\n\
+                        text/html=firefox.desktop\n\
+                        application/pdf=org.pwmt.zathura.desktop\n\
+                        \n\
+                        [Added Associations]\n\
+                        text/html=firefox.desktop;\n";
+        let out = merge_mimeapps(existing, default_associations());
+        // Ours become the default.
+        assert!(out.contains("application/vnd.apkm=manifest-apkm-install.desktop"), "{out}");
+        assert!(out.contains("application/vnd.android.package-archive=manifest-apkm-install.desktop"), "{out}");
+        assert!(out.contains("application/x-rpm=manifest-strata-install.desktop"), "{out}");
+        // Unrelated entries survive untouched.
+        assert!(out.contains("text/html=firefox.desktop"), "{out}");
+        assert!(out.contains("application/pdf=org.pwmt.zathura.desktop"), "{out}");
+        // Both sections present.
+        assert!(out.contains("[Default Applications]") && out.contains("[Added Associations]"), "{out}");
+    }
+
+    #[test]
+    fn merge_mimeapps_replaces_a_previous_owner_and_is_idempotent() {
+        let existing = "[Default Applications]\napplication/x-rpm=some-other.desktop\n";
+        let once = merge_mimeapps(existing, default_associations());
+        assert!(!once.contains("some-other.desktop"), "old owner replaced: {once}");
+        assert_eq!(once.matches("application/x-rpm=").count(), 2, "one per section: {once}");
+        // Re-running must not duplicate anything.
+        let twice = merge_mimeapps(&once, default_associations());
+        assert_eq!(twice.matches("application/x-rpm=").count(), 2, "idempotent: {twice}");
+    }
+
+    #[test]
+    fn merge_mimeapps_from_empty_creates_both_sections() {
+        let out = merge_mimeapps("", default_associations());
+        assert!(out.contains("[Default Applications]"), "{out}");
+        assert!(out.contains("[Added Associations]"), "{out}");
+        assert!(out.contains("application/x-xapk=manifest-apkm-install.desktop"), "{out}");
+    }
+
+    #[test]
+    fn gui_wrapper_dispatches_and_never_needs_a_terminal() {
+        let s = gui_install_script();
+        assert!(s.contains("tool=android-install"), "apk→android: {s}");
+        assert!(s.contains("tool=strata-install"), "deb→strata: {s}");
+        // Tries terminals, but works without one via notifications.
+        assert!(s.contains("notify-send"), "{s}");
+        assert!(s.contains("x-terminal-emulator") && s.contains("gnome-terminal"), "terminal list: {s}");
+        // The handler must not rely on Terminal=true.
+        assert!(mime_handler_desktop().contains("Terminal=false"), "{}", mime_handler_desktop());
+        assert!(mime_handler_desktop().contains("Exec=/usr/local/bin/manifest-install-gui %f"), "{}", mime_handler_desktop());
     }
 
     #[test]
