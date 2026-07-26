@@ -563,6 +563,65 @@ case "$MOS_FILE" in
   *) echo "manifest-install-gui: don't know how to install '$MOS_FILE'" >&2; exit 1 ;;
 esac
 export MOS_FILE MOS_TOOL MOS_WHAT MOS_SETUP
+MOS_NAME=$(basename "$MOS_FILE")
+
+# --- graphical path -------------------------------------------------------
+# Double-clicking a file in a file manager should not fling a terminal at you.
+# zenity is GTK4, so this looks like the rest of the desktop; it is preferred
+# when present and everything below is the fallback for when it isn't.
+if command -v zenity >/dev/null 2>&1; then
+  z() { zenity "$@" 2>/dev/null; }
+  MOS_TMP=$(mktemp -d 2>/dev/null) || MOS_TMP=${TMPDIR:-/tmp}
+  trap 'rm -rf "$MOS_TMP"' EXIT INT TERM
+  # `echo $?` inside the group captures the TOOL's status, before the pipe --
+  # $? after a pipeline is the last command's, and PIPESTATUS is a bashism this
+  # #!/bin/sh script cannot use.
+  run_logged() {
+    { "$@" 2>&1; echo "$?" > "$MOS_TMP/rc"; } | tee "$MOS_TMP/log" | sed -u 's/^/#/'
+  }
+  ok() { [ "$(cat "$MOS_TMP/rc" 2>/dev/null)" = "0" ]; }
+  if ! command -v "$MOS_TOOL" >/dev/null 2>&1; then
+    if [ -z "$MOS_SETUP" ]; then
+      z --error --width=420 --title='ManifestOS' \
+        --text="$MOS_WHAT is not set up.
+
+Install it with:  manifest strata add debian"
+      exit 1
+    fi
+    z --question --width=460 --title='ManifestOS' \
+      --ok-label='Set up' --cancel-label='Not now' \
+      --text="<b>$MOS_WHAT is not set up yet.</b>
+
+Setting it up downloads and configures what is needed. It can take
+a few minutes, and only happens once." || exit 0
+    # Live log into the progress dialog: zenity treats a leading '#' as a text
+    # update, so every line the tool prints becomes the current status.
+    run_logged $MOS_SETUP \
+      | z --progress --pulsate --auto-close --no-cancel --width=460 \
+          --title='ManifestOS' --text="Setting up $MOS_WHAT..."
+    if ! ok; then
+      z --error --width=520 --title='ManifestOS' \
+        --text="Could not set up $MOS_WHAT.
+
+$(tail -n 3 "$MOS_TMP/log" 2>/dev/null)"
+      exit 1
+    fi
+  fi
+  run_logged "$MOS_TOOL" "$MOS_FILE" \
+    | z --progress --pulsate --auto-close --no-cancel --width=460 \
+        --title='ManifestOS' --text="Opening $MOS_NAME..."
+  if ok; then
+    command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'ManifestOS' "$MOS_NAME finished"
+    exit 0
+  fi
+  z --error --width=520 --title='ManifestOS' \
+    --text="<b>$MOS_NAME could not be opened.</b>
+
+$(tail -n 4 "$MOS_TMP/log" 2>/dev/null)"
+  exit 1
+fi
+
+# --- terminal fallback ----------------------------------------------------
 # Runs inside the terminal: offer to set support up if it isn't there, then install.
 inner='
 if ! command -v "$MOS_TOOL" >/dev/null 2>&1; then

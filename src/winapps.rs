@@ -71,6 +71,14 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
             vm.product_key = Some(k);
         }
     }
+    // Only before the first install: the size becomes the partition layout, and
+    // changing it afterwards means evicting the Recovery partition Windows puts
+    // behind C:. Asking again later would imply a choice that isn't free.
+    if vm.disk.is_none() && !guest_disk_exists() {
+        if let Some(d) = prompt_disk_size(vm.disk()) {
+            vm.disk = Some(d);
+        }
+    }
     let vm = &vm;
 
     // The Windows account password is written into the guest while Windows
@@ -271,7 +279,11 @@ fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
     // `dialog` drives WinApps' setup wizard; gawk/curl/netcat are used by its
     // scripts. Missing any of them fails only at `--link`, long after setup.
     let mut pkgs = vec![
+        // zenity is what makes opening a file show a progress window instead of
+        // a terminal (see android::gui_install_script). GTK4, so it matches the
+        // rest of the desktop.
         "freerdp", "iproute2", "libnotify", "git", "dialog", "gawk", "curl", "openbsd-netcat",
+        "zenity",
     ];
     match vm.backend() {
         "podman" => pkgs.extend(["podman", "podman-compose"]),
@@ -1011,6 +1023,96 @@ pub fn winapps_conf(vm: &WindowsVm, password: &str) -> String {
 /// Ask for a Windows product key, explaining plainly what skipping costs. Only
 /// prompts on a terminal (never blocks a scripted run), and an empty answer is a
 /// perfectly good answer.
+/// Whether a Windows disk already exists. Empty counts as absent — docker
+/// recreates the bind-mount directory, and a wipe can only empty it.
+fn guest_disk_exists() -> bool {
+    std::fs::read_dir(expand(&format!("{COMPOSE_DIR}/storage")))
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
+}
+
+/// Free bytes on the filesystem that will hold the guest's disk.
+fn free_bytes_for_storage() -> Option<u64> {
+    let dir = expand(COMPOSE_DIR);
+    // The directory may not exist yet on a first run; ask about its parent.
+    let probe = if std::path::Path::new(&dir).exists() { dir } else { expand("$HOME") };
+    let out = std::process::Command::new("df")
+        .args(["-B1", "--output=avail", &probe])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().nth(1)?.trim().parse().ok()
+}
+
+/// Ask how big the guest's disk should be, before Windows installs.
+///
+/// Only asked once, when there is no guest yet: the size is written into the
+/// partition layout at install time, and growing it afterwards means removing
+/// the Recovery partition Windows puts *after* C: (see `windows-vm-run`). Much
+/// better to be right the first time.
+///
+/// The image is sparse — it occupies what Windows has written, not what it was
+/// declared as — so a generous number is nearly free. What it is *not* free of
+/// is the host filling up later: this is one file that can grow to the declared
+/// size, and if the filesystem runs out underneath it the guest gets I/O errors
+/// mid-write. That is worth care on a machine dual-booting Windows, where this
+/// Linux partition is only a slice of the disk and the free space here is not
+/// the free space on the drive.
+fn prompt_disk_size(default: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    const GB: u64 = 1024 * 1024 * 1024;
+    let free = free_bytes_for_storage();
+    println!();
+    println!("  How much disk should Windows get?");
+    match free {
+        Some(b) => println!("    · {} GB free on this filesystem right now.", b / GB),
+        None => println!("    · (couldn't read the free space on this filesystem)"),
+    }
+    println!("    · The disk file is sparse: it only takes up what Windows actually");
+    println!("      writes, so a large number costs nothing today.");
+    println!("    · But it can grow to the full size later. Leave room — especially if");
+    println!("      this machine dual-boots and Linux only has part of the drive.");
+    println!("    · Windows itself uses ~25 GB. Growing it later is possible but");
+    println!("      awkward, so pick generously now.");
+    print!("  Size (e.g. 128G, or press Enter for {default}): ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return None;
+    }
+    let want = line.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let parsed = parse_size_gb(want)?;
+    if let Some(b) = free {
+        let free_gb = b / GB;
+        // Warn, don't refuse: over-committing is legitimate on a big filesystem
+        // that will never actually be filled, and it is the user's disk.
+        if parsed > free_gb {
+            println!(
+                "  ! {parsed} GB is more than the {free_gb} GB free here. That is allowed \
+                 (the file is sparse), but if Windows ever fills it the host runs out first."
+            );
+        }
+    }
+    Some(want.to_string())
+}
+
+/// Parse a `128G` / `128` / `1T` size into whole GB. Pure — unit-tested.
+fn parse_size_gb(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let (num, mult) = match t.chars().last()? {
+        'g' | 'G' => (&t[..t.len() - 1], 1),
+        't' | 'T' => (&t[..t.len() - 1], 1024),
+        c if c.is_ascii_digit() => (t, 1),
+        _ => return None,
+    };
+    num.trim().parse::<u64>().ok().filter(|n| *n > 0).map(|n| n * mult)
+}
+
 fn prompt_product_key() -> Option<String> {
     use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
@@ -1815,6 +1917,24 @@ mod tests {
             let stopped = sh.wait().expect("run sh").success();
             assert_eq!(stopped, expect_stop, "{what}: expected stop={expect_stop}");
         }
+    }
+
+    /// The size becomes the guest's partition layout at install time, so it is
+    /// asked once, before Windows exists. Growing it afterwards means evicting
+    /// the Recovery partition Windows parks behind C:.
+    #[test]
+    fn disk_sizes_parse_the_way_people_write_them() {
+        assert_eq!(parse_size_gb("128G"), Some(128));
+        assert_eq!(parse_size_gb("128g"), Some(128));
+        assert_eq!(parse_size_gb("128"), Some(128));
+        assert_eq!(parse_size_gb(" 256G "), Some(256));
+        assert_eq!(parse_size_gb("1T"), Some(1024));
+        // Nonsense must not silently become a disk size.
+        assert_eq!(parse_size_gb(""), None);
+        assert_eq!(parse_size_gb("big"), None);
+        assert_eq!(parse_size_gb("0G"), None);
+        assert_eq!(parse_size_gb("128M"), None, "MB-sized Windows is a typo, not a choice");
+        assert_eq!(parse_size_gb("-5G"), None);
     }
 
     /// Windows client editions allow ONE interactive session, and dockur
