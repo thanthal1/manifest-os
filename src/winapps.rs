@@ -214,16 +214,7 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
     ensure_winapps(ctx)?;
 
     println!("  · checking the Windows container is running");
-    ctx.shell(
-        &format!(
-            "{docker}             st=$(dk ps --filter name=WinApps --format '{{{{.Names}}}} {{{{.Status}}}}' 2>/dev/null)
-             if [ -n \"$st\" ]; then echo \"  · container: $st\"; 
-             else echo '  ! the Windows container is not running — start it with: manifest windows-vm' >&2; fi
-",
-            docker = docker_fn()
-        ),
-        false,
-    )?;
+    ctx.shell(&link_container_check_step(), false)?;
 
     // Fully automatic: no wizard, no commands for the user to run. WinApps
     // refuses to install over a previous installation (exit 3), so clear any
@@ -231,10 +222,7 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
     // install non-interactively. `--system` first, `--user` as the fallback for
     // machines where the system-wide path isn't available.
     println!("  · installing WinApps and detecting your Windows apps");
-    ctx.shell(
-        "SETUP=\"$HOME/.local/share/manifest-os/winapps/setup.sh\";          [ -x \"$SETUP\" ] || { echo '  ! WinApps source missing — re-run: manifest windows-vm' >&2; exit 1; };          run() { \"$SETUP\" \"$@\" 2>&1 || sg docker -c \"'$SETUP' $*\" 2>&1; };          # Clear any earlier installation so the conflict check can't stop us.          run --system --uninstall >/dev/null 2>&1 || true;          run --user --uninstall  >/dev/null 2>&1 || true;          out=$(run --system); rc=$?;          if [ $rc -ne 0 ]; then out=$(run --user); rc=$?; fi;          printf '%s\n' \"$out\" | sed 's/^/    /';          if [ $rc -ne 0 ]; then            echo >&2;            echo '  ! WinApps could not finish installing.' >&2;            echo '    If the message above mentions docker permissions, log out and back' >&2;            echo '    in once — that is the only thing this cannot do for you.' >&2;            exit 1;          fi",
-        false,
-    )?;
+    ctx.shell(link_install_step(), false)?;
     println!("  · done — installed Windows apps should now appear in your menu");
     Ok(())
 }
@@ -311,10 +299,33 @@ fn ensure_winapps(ctx: &Ctx) -> Result<()> {
     // it makes its conflict check fail with "EXISTING 'SYSTEM' WINAPPS
     // INSTALLATION", so we deliberately install nothing ourselves.
     println!("  · fetching WinApps (GPL-3.0, installed separately — not part of ManifestOS)");
-    ctx.shell(
-        "d=\"$HOME/.local/share/manifest-os/winapps\";          mkdir -p \"$(dirname \"$d\")\";          if [ -d \"$d/.git\" ]; then git -C \"$d\" pull --ff-only >/dev/null 2>&1 || true;          else git clone --depth 1 https://github.com/winapps-org/winapps \"$d\" || exit 1; fi;          chmod +x \"$d/setup.sh\" \"$d/bin/winapps\" 2>/dev/null || true;          # Remove symlinks an earlier version of ManifestOS created — they are          # what WinApps' installer trips over. Only ours (symlinks into our          # checkout) are touched; a real WinApps install is left alone.          for l in /usr/local/bin/winapps /usr/local/bin/winapps-setup; do            if [ -L \"$l\" ] && readlink \"$l\" | grep -q 'manifest-os/winapps'; then              echo \"  · removing our old symlink $l (it conflicts with WinApps' installer)\";              sudo rm -f \"$l\";            fi;          done;          for l in \"$HOME/.local/bin/winapps\" \"$HOME/.local/bin/winapps-setup\"; do            [ -L \"$l\" ] && readlink \"$l\" | grep -q 'manifest-os/winapps' && rm -f \"$l\";          done; true",
-        false,
-    )
+    ctx.shell(ensure_winapps_step(), false)
+}
+
+/// Fetch the WinApps checkout and clear symlinks an older ManifestOS made.
+/// Pure — unit-tested.
+fn ensure_winapps_step() -> &'static str {
+    r#"d="$HOME/.local/share/manifest-os/winapps"
+       mkdir -p "$(dirname "$d")"
+       if [ -d "$d/.git" ]; then
+         git -C "$d" pull --ff-only >/dev/null 2>&1 || true
+       else
+         git clone --depth 1 https://github.com/winapps-org/winapps "$d" || exit 1
+       fi
+       chmod +x "$d/setup.sh" "$d/bin/winapps" 2>/dev/null || true
+       # Remove symlinks an earlier version of ManifestOS created — they are
+       # what WinApps' installer trips over. Only ours (symlinks into our
+       # checkout) are touched; a real WinApps install is left alone.
+       for l in /usr/local/bin/winapps /usr/local/bin/winapps-setup; do
+         if [ -L "$l" ] && readlink "$l" | grep -q 'manifest-os/winapps'; then
+           echo "  · removing our old symlink $l (it conflicts with WinApps' installer)"
+           sudo rm -f "$l"
+         fi
+       done
+       for l in "$HOME/.local/bin/winapps" "$HOME/.local/bin/winapps-setup"; do
+         [ -L "$l" ] && readlink "$l" | grep -q 'manifest-os/winapps' && rm -f "$l"
+       done
+       true"#
 }
 
 /// Shell helper used by every generated script: run a docker command through
@@ -999,6 +1010,45 @@ fn setup_oem_step() -> String {
     )
 }
 
+/// Report whether the Windows container is up, for `--link`. Pure — unit-tested.
+fn link_container_check_step() -> String {
+    format!(
+        r#"{docker}
+           st=$(dk ps --filter name=WinApps --format '{{{{.Names}}}} {{{{.Status}}}}' 2>/dev/null)
+           if [ -n "$st" ]; then
+             echo "  · container: $st"
+           else
+             echo '  ! the Windows container is not running — start it with: manifest windows-vm' >&2
+           fi"#,
+        docker = docker_fn()
+    )
+}
+
+/// Run WinApps' own installer to detect the guest's apps. Pure — unit-tested.
+///
+/// Fully automatic: no wizard, no commands for the user to run. WinApps refuses
+/// to install over a previous installation (exit 3), so any prior one is cleared
+/// first — uninstall is a no-op when there is nothing there. `--system` first,
+/// `--user` as the fallback for machines where the system-wide path isn't
+/// available.
+fn link_install_step() -> &'static str {
+    r#"SETUP="$HOME/.local/share/manifest-os/winapps/setup.sh"
+       [ -x "$SETUP" ] || { echo '  ! WinApps source missing — re-run: manifest windows-vm' >&2; exit 1; }
+       run() { "$SETUP" "$@" 2>&1 || sg docker -c "'$SETUP' $*" 2>&1; }
+       run --system --uninstall >/dev/null 2>&1 || true
+       run --user --uninstall  >/dev/null 2>&1 || true
+       out=$(run --system); rc=$?
+       if [ $rc -ne 0 ]; then out=$(run --user); rc=$?; fi
+       printf '%s\n' "$out" | sed 's/^/    /'
+       if [ $rc -ne 0 ]; then
+         echo >&2
+         echo '  ! WinApps could not finish installing.' >&2
+         echo '    If the message above mentions docker permissions, log out and back' >&2
+         echo '    in once — that is the only thing this cannot do for you.' >&2
+         exit 1
+       fi"#
+}
+
 /// Append our debloat call to WinApps' `install.bat`. Pure — unit-tested.
 ///
 /// Chained onto theirs rather than replacing it: dockur runs exactly one
@@ -1385,6 +1435,9 @@ mod tests {
             ("oem step", setup_oem_step()),
             ("debloat bat step", setup_debloat_bat_step()),
             ("fallback bat step", setup_fallback_bat_step()),
+            ("link container check", link_container_check_step()),
+            ("link install step", link_install_step().to_string()),
+            ("ensure winapps", ensure_winapps_step().to_string()),
         ] {
             let mut sh = Command::new("sh")
                 .arg("-n")
