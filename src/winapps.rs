@@ -246,14 +246,34 @@ if [ "$state" != "true" ]; then
     echo "windows-vm-run: could not start the Windows container" >&2; exit 1; }}
 fi
 
-# 3. Wait for RDP to answer — Windows needs a minute after the container starts.
-echo "Waiting for Windows to be ready..."
-i=0
-while [ $i -lt 90 ]; do
-  if command -v ss >/dev/null 2>&1 && ss -Htn state established '( dport = :3389 )' >/dev/null 2>&1; then break; fi
-  (echo > /dev/tcp/127.0.0.1/3389) >/dev/null 2>&1 && break
-  i=$((i+1)); sleep 2
-done
+# 3. Wait for Windows to actually be up. NOT a TCP probe of 3389: docker
+#    publishes that port the moment the container starts, so it answers long
+#    before Windows does. The image's own healthcheck is the honest signal.
+health() {{ dk inspect -f '{{{{.State.Health.Status}}}}' manifest-windows 2>/dev/null || echo unknown; }}
+if [ "$(health)" != "healthy" ]; then
+  echo "Waiting for Windows to be ready..."
+  i=0
+  while [ $i -lt 60 ]; do            # ~2 minutes for an ordinary boot
+    [ "$(health)" = "healthy" ] && break
+    i=$((i+1)); sleep 2
+  done
+fi
+if [ "$(health)" != "healthy" ]; then
+  # Almost always the first run: Windows is still doing its unattended install,
+  # which takes 20-40 minutes and reboots several times. That's not a failure,
+  # so say so plainly instead of dumping an error.
+  echo
+  echo "Windows isn't ready yet — it's still installing."
+  echo "  This happens once, and takes roughly 20-40 minutes."
+  echo "  Watch the progress here:  http://localhost:8006"
+  echo
+  echo "  When the Windows desktop appears there, run:"
+  echo "      manifest windows-vm --link     # add your Windows apps to the menu"
+  echo "  then open this installer again."
+  echo
+  echo "  (progress:  docker logs -f manifest-windows)"
+  exit 0
+fi
 
 # 4. The installer has to be reachable from inside Windows. dockur shares your
 #    home as a network drive, so copy it there and say where it landed.
@@ -572,8 +592,14 @@ mod tests {
         assert!(s.contains("isn't set up yet"), "{s}");
         assert!(s.contains("manifest windows-vm"), "first-run setup: {s}");
         assert!(s.contains("dk start manifest-windows"), "lazy start: {s}");
-        // Waits for RDP rather than assuming Windows is instantly ready.
+        // Readiness uses the image's healthcheck, NOT a TCP probe of 3389 —
+        // docker publishes that port before Windows is listening on it.
         assert!(s.contains("Waiting for Windows to be ready"), "{s}");
+        assert!(s.contains(".State.Health.Status"), "health-based readiness: {s}");
+        assert!(!s.contains("/dev/tcp/127.0.0.1/3389"), "TCP probe is a false positive: {s}");
+        // A first run is still installing — that's not an error, so say so.
+        assert!(s.contains("still installing"), "{s}");
+        assert!(s.contains("http://localhost:8006"), "points at the viewer: {s}");
         // Records activity so the idle watchdog can tell it's in use.
         assert!(s.contains("windows-vm-activity"), "{s}");
         // The share path must interpolate the real filename: `\$base` inside
