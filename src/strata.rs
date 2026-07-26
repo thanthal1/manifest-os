@@ -526,8 +526,11 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
         &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),
         true,
     )?;
-    // Make these handlers the default for package files (merged, not clobbered).
-    crate::android::write_mime_defaults_pub(ctx)?;
+    // Register the Android file types + handler too, even when Waydroid isn't
+    // installed: opening an .apk/.apkm then OFFERS to set Android up (the same
+    // "add if used" flow as command-not-found), instead of there being no
+    // handler at all. Also writes the shared GUI wrapper + MIME defaults.
+    crate::android::refresh_file_handlers(ctx)?;
     Ok(())
 }
 

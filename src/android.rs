@@ -497,23 +497,44 @@ fn merge_mimeapps(existing: &str, entries: &[(&str, &str)]) -> String {
 /// readable) and otherwise runs headless, reporting via desktop notifications.
 /// Dispatches by extension to `android-install` or `strata-install`.
 pub fn gui_install_script() -> &'static str {
+    // Env-passing (MOS_*) keeps the terminal payload single-quoted, so no nested
+    // quoting games with user file names.
     r####"#!/bin/sh
 # ManifestOS — install a package file opened from a file manager (generated logic).
 [ $# -ge 1 ] || { echo 'usage: manifest-install-gui <file>' >&2; exit 2; }
-f=$1
-case "$f" in
-  *.apk|*.apkm|*.apks|*.xapk) tool=android-install; what="Android app" ;;
-  *.deb|*.rpm)                tool=strata-install;  what="Linux package" ;;
-  *) echo "manifest-install-gui: don't know how to install '$f'" >&2; exit 1 ;;
+MOS_FILE=$1
+case "$MOS_FILE" in
+  *.apk|*.apkm|*.apks|*.xapk)
+    MOS_TOOL=android-install; MOS_WHAT="Android app support (Waydroid)"; MOS_SETUP="manifest android" ;;
+  *.deb|*.rpm)
+    # strata-install offers to add the matching stratum itself.
+    MOS_TOOL=strata-install;  MOS_WHAT="Linux package support"; MOS_SETUP="" ;;
+  *) echo "manifest-install-gui: don't know how to install '$MOS_FILE'" >&2; exit 1 ;;
 esac
-command -v "$tool" >/dev/null 2>&1 || { tool_missing=1; }
-if [ -n "$tool_missing" ]; then
-  msg="$tool is not set up yet. Run: manifest android (or manifest strata add ...)"
-  command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Install' "$msg"
-  echo "$msg" >&2; exit 1
+export MOS_FILE MOS_TOOL MOS_WHAT MOS_SETUP
+# Runs inside the terminal: offer to set support up if it isn't there, then install.
+inner='
+if ! command -v "$MOS_TOOL" >/dev/null 2>&1; then
+  echo "$MOS_WHAT is not set up on this system yet."
+  if [ -n "$MOS_SETUP" ]; then
+    printf "Set it up now? (downloads and configures it - a few minutes) [y/N] "
+    read r
+    case "$r" in
+      [yY]|[yY][eE][sS])
+        if ! $MOS_SETUP; then
+          echo; echo "Setup failed - see the messages above."
+          printf "Press Enter to close "; read _; exit 1
+        fi ;;
+      *) echo "Cancelled."; printf "Press Enter to close "; read _; exit 1 ;;
+    esac
+  else
+    echo "Install it with: manifest strata add debian"
+    printf "Press Enter to close "; read _; exit 1
+  fi
 fi
-# Run in a terminal so the user can watch progress; keep it open at the end.
-inner="$tool \"$f\"; echo; echo '--- done - press Enter to close ---'; read _"
+"$MOS_TOOL" "$MOS_FILE"
+echo; echo "--- done - press Enter to close ---"; read _
+'
 for t in "$TERMINAL" kitty foot alacritty wezterm konsole gnome-terminal xfce4-terminal \
          mate-terminal tilix ghostty x-terminal-emulator xterm; do
   [ -n "$t" ] || continue
@@ -523,10 +544,15 @@ for t in "$TERMINAL" kitty foot alacritty wezterm konsole gnome-terminal xfce4-t
     *)              exec "$t" -e sh -c "$inner" ;;
   esac
 done
-# No terminal available: run headless and report via notifications.
-command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Installing' "Installing $what..."
-if out=$("$tool" "$f" 2>&1); then
-  command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Installed' "$(basename "$f")"
+# No terminal at all: can't ask, so report what to run and bail.
+if ! command -v "$MOS_TOOL" >/dev/null 2>&1; then
+  msg="$MOS_WHAT is not set up. Run: ${MOS_SETUP:-manifest strata add debian}"
+  command -v notify-send >/dev/null 2>&1 && notify-send -u critical -a ManifestOS 'Not set up' "$msg"
+  echo "$msg" >&2; exit 1
+fi
+command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Installing' "Installing $(basename "$MOS_FILE")..."
+if out=$("$MOS_TOOL" "$MOS_FILE" 2>&1); then
+  command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'Installed' "$(basename "$MOS_FILE")"
   printf '%s\n' "$out"
 else
   command -v notify-send >/dev/null 2>&1 && notify-send -u critical -a ManifestOS 'Install failed' "$(printf '%s' "$out" | tail -n2)"
@@ -894,6 +920,18 @@ mod tests {
     }
 
     #[test]
+    fn gui_wrapper_offers_setup_when_support_is_missing() {
+        let s = gui_install_script();
+        // Opening an .apk on a box with no Waydroid must OFFER to set it up
+        // (the "add if used" flow), not just fail.
+        assert!(s.contains("MOS_SETUP=\"manifest android\""), "android setup cmd: {s}");
+        assert!(s.contains("is not set up on this system yet."), "{s}");
+        assert!(s.contains("Set it up now?"), "interactive offer: {s}");
+        // Headless (no terminal to ask in) still says exactly what to run.
+        assert!(s.contains("${MOS_SETUP:-manifest strata add debian}"), "headless advice: {s}");
+    }
+
+    #[test]
     fn merge_mimeapps_sets_defaults_without_clobbering_others() {
         let existing = "[Default Applications]\n\
                         text/html=firefox.desktop\n\
@@ -935,8 +973,8 @@ mod tests {
     #[test]
     fn gui_wrapper_dispatches_and_never_needs_a_terminal() {
         let s = gui_install_script();
-        assert!(s.contains("tool=android-install"), "apk→android: {s}");
-        assert!(s.contains("tool=strata-install"), "deb→strata: {s}");
+        assert!(s.contains("MOS_TOOL=android-install"), "apk→android: {s}");
+        assert!(s.contains("MOS_TOOL=strata-install"), "deb→strata: {s}");
         // Tries terminals, but works without one via notifications.
         assert!(s.contains("notify-send"), "{s}");
         assert!(s.contains("x-terminal-emulator") && s.contains("gnome-terminal"), "terminal list: {s}");

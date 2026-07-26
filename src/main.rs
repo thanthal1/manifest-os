@@ -382,11 +382,9 @@ fn run() -> Result<()> {
             let ctx = Ctx::new(false);
             // Shell integration + .deb/.rpm handler + the GUI wrapper + defaults.
             strata::write_cnf_handler(&ctx)?;
-            // Android file handlers too, but only where Waydroid is actually set
-            // up (otherwise we'd claim .apk types on a system with no Android).
-            if std::path::Path::new("/var/lib/waydroid/waydroid.cfg").exists() {
-                android::refresh_file_handlers(&ctx)?;
-            }
+            // write_cnf_handler already refreshes the Android file handlers too
+            // (they're registered even without Waydroid — opening an .apk offers
+            // to set it up), so there's nothing extra to do here.
             Ok(())
         }
         Command::Script { name } => {
