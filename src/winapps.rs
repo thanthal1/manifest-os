@@ -526,6 +526,48 @@ fn docker_fn() -> &'static str {
 "
 }
 
+/// Bring each Windows window forward as a floating window, on whichever
+/// compositor is running.
+///
+/// A RemoteApp window arrives as an ordinary client, so a tiling compositor
+/// tiles it — and a Windows app that opens a second window (a browser for a
+/// sign-in, a file dialog, Inventor's part chooser) takes a share of the
+/// layout, or a whole screen, and buries the window you were actually using.
+/// Floating and raising them makes a Windows app behave like the dialog it is
+/// instead of rearranging the desktop.
+///
+/// This is done imperatively, after the window exists, rather than as a config
+/// rule: the rule syntax differs per compositor *and* per version (Hyprland
+/// 0.56 rejects every `windowrule` spelling that 0.4x accepted), whereas these
+/// dispatchers are stable and a missing one just fails harmlessly.
+fn float_windows_fn() -> &'static str {
+    "float_windows() {
+         # Run detached: the launch below blocks until the app exits, and
+         # windows appear a few seconds after it starts.
+         (
+           i=0
+           while [ $i -lt 12 ]; do
+             sleep 2; i=$((i+1))
+             if [ -n \"${HYPRLAND_INSTANCE_SIGNATURE:-}\" ] && command -v hyprctl >/dev/null 2>&1; then
+                 hyprctl dispatch setfloating 'class:^(RAIL:.*)$'   >/dev/null 2>&1
+                 hyprctl dispatch alterzorder 'top,class:^(RAIL:.*)$' >/dev/null 2>&1
+             elif [ -n \"${SWAYSOCK:-}\" ] && command -v swaymsg >/dev/null 2>&1; then
+                 swaymsg '[class=\"^RAIL:.*$\"] floating enable, focus' >/dev/null 2>&1
+             elif command -v i3-msg >/dev/null 2>&1 && [ -n \"${I3SOCK:-}\" ]; then
+                 i3-msg '[class=\"^RAIL:.*$\"] floating enable, focus' >/dev/null 2>&1
+             elif command -v wmctrl >/dev/null 2>&1; then
+                 # Last resort: no floating concept reachable, but at least
+                 # raise it so it is not lost behind what you were using.
+                 wmctrl -x -a 'RAIL' >/dev/null 2>&1
+             else
+                 break
+             fi
+           done
+         ) >/dev/null 2>&1 &
+     }
+"
+}
+
 /// Erase the Windows disk, used by `windows-vm-run`'s reinstall offer.
 ///
 /// dockur creates `storage/` as `root:root`, so the obvious `rm -rf` from the
@@ -580,7 +622,7 @@ case "$f" in
   *) INGUEST=0 ;;
 esac
 VMDIR="$HOME/.local/share/manifest-os/windows-vm"
-{docker}{wipe}
+{docker}{wipe}{floatfn}
 # 1. First use? Set the VM up (downloads and installs Windows — one time).
 if [ ! -f "$VMDIR/compose.yaml" ]; then
   echo "The Windows VM isn't set up yet."
@@ -780,6 +822,9 @@ fi
 # Windows desktop, and a launcher for an app nobody installed. Don't attempt
 # what the guest cannot do -- the reinstall offer below is the actual fix.
 if [ -f "$VMDIR/.remoteapp-enabled" ]; then
+  # Float and raise the windows as they appear, so a second window from a
+  # Windows app doesn't tile itself over whatever you were using.
+  float_windows
   # An in-guest path is already exact -- the share-prefix search below only
   # applies to a file we copied across.
   if [ "$INGUEST" = 1 ]; then set -- "$f"; else set -- 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; fi
@@ -926,6 +971,7 @@ run_wa windows || {{
 "####,
         docker = docker_fn(),
         wipe = wipe_storage_fn(),
+        floatfn = float_windows_fn(),
     )
 }
 
@@ -2010,6 +2056,22 @@ mod tests {
         assert!(prompt_at < rm_at, "must confirm BEFORE deleting the install:
 {s}");
         assert!(s.contains("[ -t 0 ]"), "never prompt where there is no terminal: {s}");
+        // A RemoteApp window is an ordinary client, so a tiling compositor
+        // tiles it -- and a second window from a Windows app (a sign-in
+        // browser, a file dialog, Inventor's part chooser) then takes a share
+        // of the layout or a whole screen and buries what you were using.
+        // Float and raise them instead, imperatively: rule syntax differs per
+        // compositor AND per version (Hyprland 0.56 rejects every `windowrule`
+        // spelling 0.4x accepted), while these dispatchers are stable.
+        let float_at = s.find("float_windows\n").expect("called");
+        let launch_at = s.find("run_wa manual \"$WINPATH\"").expect("launch");
+        assert!(float_at < launch_at, "must be running before the window appears:\n{s}");
+        for c in ["hyprctl dispatch setfloating", "swaymsg", "i3-msg", "wmctrl"] {
+            assert!(s.contains(c), "no path for {c}: {s}");
+        }
+        // The launch blocks until the app exits, so the watcher has to be
+        // detached or it would never run.
+        assert!(s.contains(") >/dev/null 2>&1 &"), "float_windows must detach: {s}");
         // A guest without the registry key cannot run a RemoteApp, but it CAN
         // serve the console session -- a full Windows desktop that outlives the
         // 5-second check and reports success. Verified on real hardware: the
