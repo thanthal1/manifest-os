@@ -124,7 +124,7 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}/oem\""), false)?;
         ctx.shell(
             &format!(
-                "src=\"$HOME/.local/share/manifest-os/winapps/oem\";                  if [ -d \"$src\" ]; then                    cp -f \"$src\"/*.reg \"$src\"/*.ps1 \"$src\"/install.bat \"{COMPOSE_DIR}/oem/\" 2>/dev/null || true;                    echo '  · guest setup: enabling RemoteApp (WinApps oem/RDPApps.reg)';                  else                    echo '  ! WinApps oem files not found — RemoteApp may be refused by Windows' >&2;                  fi"
+                "src=\"$HOME/.local/share/manifest-os/winapps/oem\";                  if [ -f \"$src/RDPApps.reg\" ]; then                    cp -f \"$src\"/*.reg \"$src\"/*.ps1 \"$src\"/install.bat \"{COMPOSE_DIR}/oem/\" 2>/dev/null || true;                    echo '  · guest setup: enabling single-window apps (WinApps oem/RDPApps.reg)';                    # Only a guest that INSTALLS with this file can run RemoteApp.                    # The stamp is what tells windows-vm-run whether to offer a                    # reinstall when a single-window launch is refused.                    touch \"{COMPOSE_DIR}/.remoteapp-enabled\";                  else                    rm -f \"{COMPOSE_DIR}/.remoteapp-enabled\";                    echo '  ! WinApps oem files not found — Windows will refuse single-window apps' >&2;                  fi"
             ),
             false,
         )?;
@@ -432,37 +432,14 @@ for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
   if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
 done
 
-# Tier 2. RemoteApp is refused unless the guest has
-# TSAppAllowList\fDisabledAllowList=1, which WinApps' oem/RDPApps.reg sets
-# during Windows *setup* -- so a Windows installed before we knew that can
-# never run one, and there is no re-running setup on it.
-#
-# RDP's "alternate shell" runs a single program as the session's shell: a
-# desktop session with no explorer, so no Windows taskbar and no browser --
-# and it is NOT gated by the RemoteApp allow-list. Slightly less seamless
-# than a true RemoteApp, but it works on the guest the user already has.
-if [ "$opened" != 1 ]; then
-  CONF="$HOME/.config/winapps/winapps.conf"
-  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
-  FRDP=""
-  for c in xfreerdp3 xfreerdp sdl-freerdp3 wlfreerdp; do
-    command -v "$c" >/dev/null 2>&1 && {{ FRDP=$c; break; }}
-  done
-  if [ -n "$FRDP" ] && [ -n "${{RDP_USER:-}}" ]; then
-    echo "Opening it as a single-app session..."
-    for p in 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; do
-      WINPATH="$p$base"
-      t0=$(date +%s)
-      # Run FreeRDP ourselves, so unlike winapps we can see why it failed.
-      "$FRDP" /v:"${{RDP_IP:-127.0.0.1}}" /port:"${{RDP_PORT:-3389}}" \
-              /u:"$RDP_USER" /p:"${{RDP_PASS:-}}" /cert:ignore \
-              /dynamic-resolution +auto-reconnect \
-              /shell:"$WINPATH" >>"$WALOG" 2>&1
-      t1=$(date +%s)
-      if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
-    done
-  fi
-fi
+# NOTE: RDP's "alternate shell" (/shell:) was tried here and does NOT work on
+# this stack. Windows client editions allow one interactive session, and dockur
+# signs the user in at the console automatically -- so an RDP connection as that
+# user TAKES OVER the existing session instead of creating one, and the
+# alternate shell is ignored. The result is an ordinary Windows desktop with
+# explorer running, which also looks "successful" to any duration check. The
+# only real single-window mechanism here is RemoteApp, which needs the guest
+# registry key below.
 
 if [ "$opened" = 1 ]; then
   echo
@@ -515,11 +492,39 @@ echo "Couldn't open it as its own window." >&2
 # only place the real reason appears.
 FRLOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-freerdp.log"
 [ -s "$FRLOG" ] && {{ echo "What FreeRDP reported:" >&2; tail -n 20 "$FRLOG" | sed 's/^/    /' >&2; }}
-# The overwhelmingly likely cause, so name it instead of leaving them guessing.
-echo >&2
-echo "Most likely: this Windows was installed before ManifestOS knew to enable" >&2
-echo "RemoteApp in the guest, and that setting is applied during Windows setup." >&2
-echo "Single-window mode needs it; the full desktop below does not." >&2
+# Windows only runs an arbitrary program as a RemoteApp when the guest has
+# TSAppAllowList\fDisabledAllowList=1, which is applied during Windows SETUP
+# (WinApps' oem/RDPApps.reg, via dockur's C:\OEM\install.bat). A guest built
+# before we mounted those files can never do it, and there is no way to re-run
+# setup on an installed Windows -- so offer the one thing that does fix it.
+if [ ! -f "$VMDIR/.remoteapp-enabled" ]; then
+  echo >&2
+  echo "This Windows was set up before ManifestOS knew to enable single-window" >&2
+  echo "apps, and that switch is only thrown while Windows installs." >&2
+  echo >&2
+  if [ -t 0 ]; then
+    echo "Windows can reinstall itself with it enabled. It runs unattended and" >&2
+    echo "takes 20-40 minutes. ANYTHING INSIDE THIS WINDOWS IS ERASED -- your" >&2
+    echo "Linux files are untouched." >&2
+    printf 'Reinstall Windows now? [y/N] ' >&2
+    read ans
+    case "$ans" in
+      [yY]|[yY][eE][sS])
+        echo "Removing the old Windows VM..." >&2
+        dk stop WinApps >/dev/null 2>&1 || true
+        dk rm WinApps >/dev/null 2>&1 || true
+        rm -rf "$VMDIR/storage" 2>/dev/null || true
+        echo "Reinstalling — watch it at http://localhost:8006" >&2
+        manifest windows-vm || exit 1
+        echo >&2
+        echo "When Windows finishes, open this file again and it will get its own window." >&2
+        exit 0 ;;
+      *) echo "Left as is — opening the Windows desktop instead." >&2 ;;
+    esac
+  else
+    echo "Run this from a terminal to be offered the fix." >&2
+  fi
+fi
 
 # Older WinApps (no `manual`), or the launch didn't take: fall back to the full
 # desktop so the file is still reachable by hand.
@@ -1068,6 +1073,17 @@ mod tests {
         assert!(!s.contains("grep -i 'winapps'"), "filename matching is wrong here: {s}");
         // POSIX sh: no process substitution (this runs under #!/bin/sh).
         assert!(!s.contains("<("), "process substitution is not POSIX sh: {s}");
+        // The RDP alternate shell is a dead end here: Windows client editions
+        // are single-session and dockur signs the user in at the console, so an
+        // RDP connect TAKES OVER that session and /shell: is ignored -- you get
+        // a plain desktop that also looks "successful" to a duration check.
+        assert!(!s.contains("/shell:\""), "alternate shell cannot work on this stack: {s}");
+        // Erasing a Windows install must never happen without being asked.
+        let rm_at = s.find("rm -rf \"$VMDIR/storage\"").expect("reinstall path");
+        let prompt_at = s.find("Reinstall Windows now?").expect("prompt");
+        assert!(prompt_at < rm_at, "must confirm BEFORE deleting the install:
+{s}");
+        assert!(s.contains("[ -t 0 ]"), "never prompt where there is no terminal: {s}");
     }
 
     /// Every generated script here is something a .desktop launcher Execs, and
