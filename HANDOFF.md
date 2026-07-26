@@ -203,16 +203,28 @@ produces "the window didn't open", so none of them are guessable from a log.
 15. **dockur accepts a custom answer file** at `$STORAGE/custom.xml` (also
     `/custom.xml`, `/run/assets/custom.xml` — see its `run/answer.sh`). Its stock
     `win11x64.xml` autologons with `LogonCount 65432`.
-16. **`RDPApps.reg` alone is NOT enough — this is the answer to the question
-    that was open for five releases.** A guest installed cleanly *with* it
-    (uninterrupted install, `/oem` mounted, `fDisabledAllowList=1` imported by
-    WinApps' own `install.bat`) still does not paint a borderless window. You
-    get the full desktop and *"Another user is signed in"*, then
-    `ERRINFO_LOGOFF_BY_USER` about 30 s later when nobody answers the prompt.
-    Windows client editions are **single-session**, and dockur autologons the
-    same user at the console, so the RemoteApp request collides with the session
-    that already exists. Registry permission was never the whole story — the
-    *free session* is. Verified with screenshots on real hardware, twice.
+16. **It takes THREE things at once, which is why no single fix ever showed
+    progress.** This is the answer to the question that was open for five
+    releases, and the tier works now — verified end to end, screenshotted:
+    a borderless RemoteApp window tiled by Hyprland as a native client, with no
+    Windows desktop anywhere.
+    1. **`RDPApps.reg`** (`fDisabledAllowList=1`) — permission to run an
+       arbitrary program as a RemoteApp. Necessary, and on its own it changes
+       *nothing*; a guest with it still just serves the desktop.
+    2. **Automatic sign-in off** (§20). Windows client editions are
+       **single-session** and dockur autologons the same user at the console, so
+       the request collides with the session that already exists: you get the
+       desktop plus *"Another user is signed in"*, then `ERRINFO_LOGOFF_BY_USER`
+       ~30 s later when nobody answers. Permission was never the whole story —
+       a *free session* is.
+    3. **Reach the file by `Z:`, not `\\tsclient\home`.** `\\tsclient` exists
+       only if the **client** enables drive redirection, and we do not pass
+       `+home-drive`, so that path doesn't resolve, the app never starts, and no
+       window is created. `Z:` is dockur's `/shared` mount — always there.
+       **`windows-vm-run` tries `Z:` first, and that order is load-bearing:**
+       the failing `\\tsclient` attempt still holds the connection ~20 s, which
+       the duration check reads as success, so the working path is never
+       reached.
 17. **Do not trust `windows.boot` as "installed".** dockur writes it from
     `markWindowsBooted`, called only out of `finish()` — i.e. on container
     **shutdown**. It is absent for the entire life of a guest that has never
@@ -279,7 +291,7 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 | `paru` command-not-found (`manifest paru`) | ✅ | unit + dry-run |
 | **Android/Waydroid** (`android` block, lazy lifecycle, `android-install`, `.apkm`) | ✅ | **real HW** (install, ARM libndk, launchers, open-to-install) |
 | **Windows wine tier** (`windows` block, oracle, per-app prefix, lazy wine) | ✅ | real HW (Notepad++) |
-| **Windows VM tier** (dockur + WinApps RemoteApp) | ⏳ setup + install ✅ (KVM, end to end); single-window launch **confirmed not working** — see §16 | real HW; a clean guest *with* `RDPApps.reg` still serves the console desktop |
+| **Windows VM tier** (dockur + WinApps RemoteApp) | ✅ **single-window launch works** — needs all three of §16 | real HW (KVM): setup → install → borderless RemoteApp window, screenshotted |
 | `manifest update` (host + AUR + strata + Flatpak + Waydroid) | ✅ | unit + dry-run |
 | WiFi list+connect (rfkill-unblock included) | ✅ | real HW (laptop) |
 | Install-log to USB on a real-HW failure | ✅ fixed | needs a real failing USB to re-confirm |
@@ -406,19 +418,21 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
   **This is why generated scripts must stay stubs** — anything written as a real
   file at setup time (e.g. the VM's `compose.yaml`) does *not* get updated by an
   upgrade and needs its own migration path.
-- **Windows VM tier — the unknown is now answered, and the answer is no.**
-  A guest installed cleanly *with* `RDPApps.reg` still does not paint a
-  borderless window (§16): Windows client editions are single-session and dockur
-  autologons the same user at the console, so the RemoteApp request collides
-  with the session that already exists. **Next step: free the console session.**
-  The cheap version needs no `custom.xml` and no vendoring — we already append to
-  `C:\OEM\install.bat`, so add `reg add "HKLM\SOFTWARE\Microsoft\Windows NT\
-  CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 0 /f` (and clear
-  `DefaultUserName`/`DefaultPassword`) there. Costs one reinstall to test. The
-  tradeoff to weigh first: autologon is also what makes `http://localhost:8006`
-  show a usable desktop, so disabling it means the viewer lands on a lock
-  screen. Everything upstream of the launch is now fixed and verified locally —
-  setup, install, oem, password, wipe, idle (0.1.0-59 + this branch).
+- ~~**Windows VM tier — does a RemoteApp paint?**~~ — **done.** It needed all
+  three of §16 together (registry permission, automatic sign-in off, and the
+  `Z:` share tried first), which is why five releases of registry-only work
+  showed nothing. Verified end to end on this KVM box and screenshotted.
+  Remaining polish, none of it blocking:
+  - **The launch check is still a duration heuristic**, so it reports success
+    for a launch that painted nothing. It no longer *hides* a failure now that
+    the working path is tried first, but it is still wrong. The reliable signal
+    is the X11 window class — a real RemoteApp is `RAIL:<hex>`, a desktop
+    session is `xfreerdp` / `FreeRDP: <host>` — and FreeRDP's log cannot tell
+    them apart (`Invalid appWindow` and `xf_rail_monitored_desktop` appear
+    identically in both). Costs an `xdotool`-class dependency, hence deferred.
+  - **RemoteApp windows land tiled.** Hyprland stretched a small dialog to a
+    full tile; they almost certainly want a float rule per compositor.
+  - `--link` app detection is untested since the cert-pin fix.
 - **Phase 6c — GPU passthrough (`vm-vfio`, §14.3):** not started. The CAD /
   SolidWorks path.
 - **Real hardware:** WiFi connect, dual-boot alongside Windows, strata GUI and
