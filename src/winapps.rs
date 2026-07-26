@@ -269,34 +269,25 @@ if [ "$state" != "true" ]; then
     echo "windows-vm-run: could not start the Windows container" >&2; exit 1; }}
 fi
 
-# 3. Wait for Windows to actually be up. NOT a TCP probe of 3389: docker
-#    publishes that port the moment the container starts, so it answers long
-#    before Windows does. The image's own healthcheck is the honest signal.
-health() {{ dk inspect -f '{{{{.State.Health.Status}}}}' manifest-windows 2>/dev/null || echo unknown; }}
-if [ "$(health)" != "healthy" ]; then
-  echo "Waiting for Windows to be ready..."
-  i=0
-  while [ $i -lt 60 ]; do            # ~2 minutes for an ordinary boot
-    [ "$(health)" = "healthy" ] && break
-    i=$((i+1)); sleep 2
-  done
-fi
-if [ "$(health)" != "healthy" ]; then
-  # Almost always the first run: Windows is still doing its unattended install,
-  # which takes 20-40 minutes and reboots several times. That's not a failure,
-  # so say so plainly instead of dumping an error.
-  echo
-  echo "Windows isn't ready yet — it's still installing."
-  echo "  This happens once, and takes roughly 20-40 minutes."
-  echo "  Watch the progress here:  http://localhost:8006"
-  echo
-  echo "  When the Windows desktop appears there, run:"
-  echo "      manifest windows-vm --link     # add your Windows apps to the menu"
-  echo "  then open this installer again."
-  echo
-  echo "  (progress:  docker logs -f manifest-windows)"
-  exit 0
-fi
+# 3. Give Windows a moment to be ready — but never insist. The image may not
+#    define a healthcheck at all (the field comes back empty), and a TCP probe of
+#    3389 is useless because docker publishes that port before Windows listens on
+#    it. So: wait *if* health is reported, otherwise just get on with it and let
+#    the actual launch be the test.
+health() {{ dk inspect -f '{{{{.State.Health.Status}}}}' manifest-windows 2>/dev/null | tr -d '
+'; }}
+h=$(health)
+case "$h" in
+  healthy) ;;                       # ready
+  ""|"<no value>") ;;               # image reports no health — don't block on it
+  *)
+    echo "Waiting for Windows to be ready..."
+    i=0
+    while [ $i -lt 60 ]; do          # ~2 minutes, then try anyway
+      [ "$(health)" = "healthy" ] && break
+      i=$((i+1)); sleep 2
+    done ;;
+esac
 
 # 3b. First time Windows is ready: finish WinApps setup ourselves. You should
 #     never have to run a command to make this work.
@@ -324,10 +315,18 @@ WA=$(command -v winapps 2>/dev/null)
 [ -x "$WA" ] || {{ echo "windows-vm-run: winapps isn't set up — run: manifest windows-vm --link" >&2; exit 1; }}
 # winapps runs docker itself, so it needs the same group bridge dk() gives us.
 "$WA" windows 2>/dev/null   || sg docker -c "'$WA' windows" 2>/dev/null   || {{
-    echo "windows-vm-run: couldn't open the Windows desktop." >&2
-    echo "  If it mentions docker permissions, log out and back in once —" >&2
-    echo "  your user was added to the 'docker' group and the session needs to" >&2
-    echo "  pick it up. Then try again." >&2
+    echo >&2
+    echo "Couldn't open the Windows desktop yet. The usual reasons:" >&2
+    echo >&2
+    echo "  · Windows is still installing (the first run takes 20-40 minutes)." >&2
+    echo "    Look at http://localhost:8006 — if setup is running, just wait and" >&2
+    echo "    open this again once the desktop appears." >&2
+    echo >&2
+    echo "  · Remote Desktop hasn't started yet, even though Windows looks up." >&2
+    echo "    Give it a minute after the desktop appears, then retry." >&2
+    echo >&2
+    echo "  · Docker permissions — log out and back in once (your user was added" >&2
+    echo "    to the 'docker' group and a session only picks that up at login)." >&2
     exit 1
   }}
 "####,
@@ -739,7 +738,11 @@ mod tests {
         assert!(s.contains("Waiting for Windows to be ready"), "{s}");
         assert!(s.contains(".State.Health.Status"), "health-based readiness: {s}");
         assert!(!s.contains("/dev/tcp/127.0.0.1/3389"), "TCP probe is a false positive: {s}");
-        // A first run is still installing — that's not an error, so say so.
+        // An image that reports NO health must not block us — that produced a
+        // "still installing" message while Windows was visibly running.
+        assert!(s.contains(r#""<no value>") ;;"#), "empty health must not block: {s}");
+        // If the launch does fail, explain the real causes (install still
+        // running, RDP not up yet, docker group) rather than one guess.
         assert!(s.contains("still installing"), "{s}");
         assert!(s.contains("http://localhost:8006"), "points at the viewer: {s}");
         // Records activity so the idle watchdog can tell it's in use.
