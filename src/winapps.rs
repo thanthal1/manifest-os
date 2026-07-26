@@ -187,7 +187,7 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
             "  · guest setup: allowing apps to launch from your home folder (Windows blocks \
              programs on a network drive, and the prompt is fatal to a single-window app)"
         );
-        ctx.shell(&setup_zone_policy_step(), false)?;
+        ctx.shell(&setup_guest_policy_step(), false)?;
         let compose = compose_yaml(vm, &pass);
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
         // WinApps reads ~/.config/winapps/compose.yaml — the path is hardcoded in
@@ -578,25 +578,18 @@ opened=0
 # stale dialog instead. Setup writes this into C:\OEM\install.bat for new
 # guests; a guest installed before that never ran it, so apply it once here.
 # Costs one short RDP round-trip, exactly once per guest.
-ZONE_STAMP="$VMDIR/.launch-policy-set"
+POLICY_STAMP="$VMDIR/.guest-policy-set"
 WACONF="$HOME/.config/winapps/winapps.conf"
-if [ ! -f "$ZONE_STAMP" ] && [ -r "$WACONF" ]; then
+if [ ! -f "$POLICY_STAMP" ] && [ -r "$WACONF" ]; then
   RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
   . "$WACONF" 2>/dev/null || true
   if [ -n "$RDP_USER" ]; then
-    # Through cmd.exe, ending in `tsdiscon`: a RemoteApp session does not close
-    # when the program exits, so running reg.exe directly leaves FreeRDP sitting
-    # there until the timeout -- a 90-second stall before the app the user
-    # actually asked for. Disconnecting explicitly is what WinApps' own
-    # connection test does, and it returns in seconds.
     timeout 60 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
-      /v:127.0.0.1:3389 \
-      '/app:program:C:\Windows\System32\cmd.exe,cmd:/C reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v 1806 /t REG_DWORD /d 0 /f & tsdiscon' \
-      >/dev/null 2>&1
+      /v:127.0.0.1:3389 {GUEST_POLICY_CMD} >/dev/null 2>&1
   fi
-  # Best-effort: a failure here just means the warning may still appear, which
-  # is visible and recoverable. Never block the launch on it.
-  touch "$ZONE_STAMP" 2>/dev/null || true
+  # Best-effort: if it fails the prompts may still appear, which is visible and
+  # recoverable. Never block the launch on it.
+  touch "$POLICY_STAMP" 2>/dev/null || true
 fi
 # Only a guest INSTALLED with TSAppAllowList\fDisabledAllowList=1 can run an
 # arbitrary program as a RemoteApp. Without it the connection still succeeds --
@@ -1244,15 +1237,45 @@ fn setup_autologon_step() -> String {
 /// it is the right call *here*: the only network location involved is the
 /// user's own `$HOME`, they picked the file themselves on the Linux side, and
 /// the guest is a disposable container. It is not a general-purpose Windows.
-fn setup_zone_policy_step() -> String {
-    let zone = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3";
+fn setup_guest_policy_step() -> String {
     format!(
         r#"b="{COMPOSE_DIR}/oem/install.bat"
            if ! grep -qi 'Internet Settings' "$b" 2>/dev/null; then
-             printf '%s\r\n' 'reg add "{zone}" /v 1806 /t REG_DWORD /d 0 /f >nul 2>&1' >> "$b"
+             {{
+{GUEST_POLICY_BAT}
+             }} >> "$b"
            fi"#
     )
 }
+
+/// Registry policy for the guest, as `printf` lines for `install.bat`.
+///
+/// `1806` — see [`setup_guest_policy_step`].
+///
+/// `MaxDisconnectionTime` + `fResetBroken` are what stop *"Another user is
+/// signed in"*. A RemoteApp session does **not** end when its program exits, it
+/// merely disconnects — and with no disconnection limit set (Windows' default)
+/// it lingers forever. They pile up, and a later connection collides with one,
+/// which is the prompt. Windows client editions allow a single interactive
+/// session, so there is no headroom to absorb the leak. 30 s after the last
+/// client for a session goes away, log it off; the next launch then gets a
+/// clean session instead of a fight over a stale one.
+const GUEST_POLICY_BAT: &str = concat!(
+    "               printf '%s\\r\\n' 'reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\3\" /v 1806 /t REG_DWORD /d 0 /f >nul 2>&1'\n",
+    "               printf '%s\\r\\n' 'reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\" /v MaxDisconnectionTime /t REG_DWORD /d 30000 /f >nul 2>&1'\n",
+    "               printf '%s\\r\\n' 'reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\" /v fResetBroken /t REG_DWORD /d 1 /f >nul 2>&1'",
+);
+
+/// The same policy as one `cmd.exe` line, for applying to a guest that was
+/// installed before it existed. Ends in `tsdiscon` — a RemoteApp session does
+/// not close when its program exits, so without it FreeRDP sits there until the
+/// timeout, stalling the launch the user actually asked for.
+const GUEST_POLICY_CMD: &str = concat!(
+    r#"'/app:program:C:\Windows\System32\cmd.exe,cmd:/C "#,
+    r#"reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v 1806 /t REG_DWORD /d 0 /f & "#,
+    r#"reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v MaxDisconnectionTime /t REG_DWORD /d 30000 /f & "#,
+    r#"reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fResetBroken /t REG_DWORD /d 1 /f & tsdiscon'"#,
+);
 
 /// Append our debloat call to WinApps' `install.bat`. Pure — unit-tested.
 ///
@@ -1683,7 +1706,7 @@ mod tests {
             ("debloat bat step", setup_debloat_bat_step()),
             ("fallback bat step", setup_fallback_bat_step()),
             ("autologon step", setup_autologon_step()),
-            ("zone policy step", setup_zone_policy_step()),
+            ("guest policy step", setup_guest_policy_step()),
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
@@ -1780,18 +1803,29 @@ mod tests {
     /// produced a security warning left over from an earlier attempt.
     #[test]
     fn apps_are_allowed_to_launch_from_the_shared_home() {
-        let s = setup_zone_policy_step();
+        let s = setup_guest_policy_step();
         // Zone 3, policy 1806 = "launching applications and unsafe files".
         assert!(s.contains(r"Internet Settings\Zones\3"), "{s}");
         assert!(s.contains("/v 1806 /t REG_DWORD /d 0 /f"), "{s}");
         assert!(s.contains(">> \"$b\""), "append to the OEM hook, never replace it: {s}");
         assert!(s.contains("grep -qi 'Internet Settings'"), "idempotent: {s}");
+        // "Another user is signed in": a RemoteApp session does NOT end when its
+        // program exits, it only disconnects, and Windows sets no disconnection
+        // limit by default — so sessions linger forever, pile up, and a later
+        // connection collides with a stale one. Client editions allow a single
+        // interactive session, so there is no headroom to absorb the leak.
+        // Observed on real hardware: sessions 2 Active and 3 Down at once, with
+        // MaxDisconnectionTime unset.
+        assert!(s.contains("MaxDisconnectionTime /t REG_DWORD /d 30000"), "{s}");
+        assert!(s.contains("fResetBroken /t REG_DWORD /d 1"), "logging off needs both: {s}");
         // A guest installed before this existed never ran that install.bat, so
         // the launcher applies it once itself rather than telling the user to.
         let run = vm_run_script();
-        assert!(run.contains(".launch-policy-set"), "existing guests get it too: {run}");
+        assert!(run.contains(".guest-policy-set"), "existing guests get it too: {run}");
         assert!(run.contains("/v 1806 /t REG_DWORD /d 0 /f"), "{run}");
-        let stamp = run.find("ZONE_STAMP=").expect("stamp");
+        assert!(run.contains("MaxDisconnectionTime"), "{run}");
+        assert!(run.contains("tsdiscon"), "or FreeRDP sits there stalling the launch: {run}");
+        let stamp = run.find("POLICY_STAMP=").expect("stamp");
         let launch = run.find("run_wa manual \"$WINPATH\"").expect("launch");
         assert!(stamp < launch, "must be set before the first launch, not after:\n{run}");
     }
