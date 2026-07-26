@@ -71,7 +71,18 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
     }
     let vm = &vm;
 
-    let pass = vm.password.clone().unwrap_or_else(generated_password);
+    // The Windows account password is written into the guest while Windows
+    // installs, and nothing afterwards can change it from out here. Minting a
+    // fresh one on a re-run therefore doesn't rotate anything -- it just locks
+    // us out of the guest we already have, and every RDP connect dies at
+    // post_connect with no message that says why. So: an existing setup's
+    // password wins, and a new one is only generated when there is nothing yet
+    // to be locked out of.
+    let pass = vm
+        .password
+        .clone()
+        .or_else(|| password_in_compose(&read_existing_compose().unwrap_or_default()))
+        .unwrap_or_else(generated_password);
     if vm.password.is_some() {
         println!(
             "  · note: a password in the manifest is a credential leak if you share it — \
@@ -81,23 +92,32 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 
     // The lazy runtime: on-demand start + idle stop, mirroring Android's
     // waydroid-launch/waydroid-idle. Thin stubs so `pacman -Syu` updates them.
-    ctx.write_root(
+    write_root_if_changed(
+        ctx,
         "/usr/local/bin/windows-vm-run",
         &crate::android::thin_stub("windows-vm-run"),
+        true,
     )?;
-    ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-vm-run"])?;
     let idle = vm.idle_minutes.unwrap_or(30);
     println!(
         "  · lazy lifecycle: the VM starts when an app needs it{}",
         if idle == 0 { ", and stays up (idle_minutes: 0)".to_string() }
         else { format!(", and stops after {idle} min idle") }
     );
-    ctx.write_root("/usr/local/bin/windows-vm-idle", &vm_idle_script(idle))?;
-    ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-vm-idle"])?;
-    ctx.write_root("/usr/local/bin/manifest-freerdp", freerdp_wrapper())?;
-    ctx.sudo("chmod", &["0755", "/usr/local/bin/manifest-freerdp"])?;
-    ctx.write_root("/etc/systemd/user/windows-vm-idle.service", idle_service_unit())?;
-    ctx.write_root("/etc/systemd/user/windows-vm-idle.timer", idle_timer_unit())?;
+    write_root_if_changed(ctx, "/usr/local/bin/windows-vm-idle", &vm_idle_script(idle), true)?;
+    write_root_if_changed(ctx, "/usr/local/bin/manifest-freerdp", freerdp_wrapper(), true)?;
+    write_root_if_changed(
+        ctx,
+        "/etc/systemd/user/windows-vm-idle.service",
+        idle_service_unit(),
+        false,
+    )?;
+    write_root_if_changed(
+        ctx,
+        "/etc/systemd/user/windows-vm-idle.timer",
+        idle_timer_unit(),
+        false,
+    )?;
     ctx.shell("systemctl --user enable --now windows-vm-idle.timer >/dev/null 2>&1 || true", false)?;
 
     // WinApps' own config: how it reaches the guest.
@@ -122,32 +142,16 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         // on the user's machine -- never into this tree. Same boundary as the
         // rest of this module.
         ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}/oem\""), false)?;
-        ctx.shell(
-            &format!(
-                "src=\"$HOME/.local/share/manifest-os/winapps/oem\";                  if [ -f \"$src/RDPApps.reg\" ]; then                    cp -f \"$src\"/*.reg \"$src\"/*.ps1 \"$src\"/install.bat \"{COMPOSE_DIR}/oem/\" 2>/dev/null || true;                    echo '  · guest setup: enabling single-window apps (WinApps oem/RDPApps.reg)';                    # Only a guest that INSTALLS with this file can run RemoteApp.                    # The stamp is what tells windows-vm-run whether to offer a                    # reinstall when a single-window launch is refused.                    touch \"{COMPOSE_DIR}/.remoteapp-enabled\";                  else                    rm -f \"{COMPOSE_DIR}/.remoteapp-enabled\";                    echo '  ! WinApps oem files not found — Windows will refuse single-window apps' >&2;                  fi"
-            ),
-            false,
-        )?;
+        ctx.shell(&setup_oem_step(), false)?;
         if vm.debloat.unwrap_or(true) {
             println!("  · debloating: removing preinstalled Store apps, Cortana and telemetry");
             ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/debloat.ps1")), debloat_ps1())?;
             // Chain onto WinApps' install.bat rather than replacing it: dockur
             // runs exactly one install.bat, and theirs is the one that enables
             // RemoteApp. Ours must not be what overwrites it.
-            ctx.shell(
-                &format!(
-                    "b=\"{COMPOSE_DIR}/oem/install.bat\";                      if [ -f \"$b\" ] && ! grep -qi 'debloat.ps1' \"$b\"; then                        printf '%s\\r\\n' 'powershell -NoProfile -ExecutionPolicy Bypass -File %~dp0debloat.ps1 >%~dp0debloat.log 2>&1' >> \"$b\";                      elif [ ! -f \"$b\" ]; then                        :                      fi"
-                ),
-                false,
-            )?;
+            ctx.shell(&setup_debloat_bat_step(), false)?;
             // No WinApps oem at all: our own bat is better than nothing.
-            ctx.shell(
-                &format!(
-                    "[ -f \"{COMPOSE_DIR}/oem/install.bat\" ] || printf '%s' \"$(cat <<'EOF'\n{bat}EOF\n)\" > \"{COMPOSE_DIR}/oem/install.bat\"",
-                    bat = debloat_bat()
-                ),
-                false,
-            )?;
+            ctx.shell(&setup_fallback_bat_step(), false)?;
         }
         let compose = compose_yaml(vm, &pass);
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
@@ -247,20 +251,55 @@ fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         "libvirt" => pkgs.extend(["libvirt", "qemu-full", "virt-manager"]),
         _ => pkgs.extend(["docker", "docker-compose"]),
     }
-    println!("  · installing host dependencies: {}", pkgs.join(", "));
-    let mut args = vec!["-S", "--needed", "--noconfirm"];
-    args.extend(pkgs.iter().copied());
-    ctx.sudo("pacman", &args)?;
+    // Every root step below is skipped when it has already been done. `--needed`
+    // makes pacman a no-op, but it still asks for a password -- and this command
+    // is re-entered from `windows-vm-run`, i.e. from a .desktop launcher with no
+    // TTY, where an interactive sudo aborts the whole setup with
+    // "sudo: a terminal is required". A second run on a configured machine must
+    // need no root at all.
+    let missing: Vec<&str> = pkgs
+        .iter()
+        .copied()
+        .filter(|p| !ctx.check("pacman", &["-Q", p]))
+        .collect();
+    if missing.is_empty() {
+        println!("  · host dependencies already installed: {}", pkgs.join(", "));
+    } else {
+        println!("  · installing host dependencies: {}", missing.join(", "));
+        let mut args = vec!["-S", "--needed", "--noconfirm"];
+        args.extend(missing.iter().copied());
+        ctx.sudo("pacman", &args)?;
+    }
     if vm.backend() == "docker" {
         // Docker must actually be running, and the user needs to reach it.
-        ctx.sudo("systemctl", &["enable", "--now", "docker.service"])?;
-        ctx.shell("sudo usermod -aG docker \"$USER\" || true", false)?;
-        println!("  · added you to the `docker` group (log out and back in if the next step fails)");
+        ensure_service(ctx, "docker.service")?;
+        ensure_group(ctx, "docker")?;
     }
     if vm.backend() == "libvirt" {
-        ctx.sudo("systemctl", &["enable", "--now", "libvirtd.service"])?;
-        ctx.shell("sudo usermod -aG libvirt \"$USER\" || true", false)?;
+        ensure_service(ctx, "libvirtd.service")?;
+        ensure_group(ctx, "libvirt")?;
     }
+    Ok(())
+}
+
+/// Start and enable a service, but only if it isn't already both. Root is asked
+/// for exactly when there is something to change — see [`ensure_deps`].
+fn ensure_service(ctx: &Ctx, unit: &str) -> Result<()> {
+    if ctx.check("systemctl", &["is-active", "--quiet", unit])
+        && ctx.check("systemctl", &["is-enabled", "--quiet", unit])
+    {
+        return Ok(());
+    }
+    ctx.sudo("systemctl", &["enable", "--now", unit])
+}
+
+/// Put the user in a group, but only if they aren't in it yet.
+fn ensure_group(ctx: &Ctx, group: &str) -> Result<()> {
+    if ctx.check("sh", &["-c", &format!("id -nG | tr ' ' '\\n' | grep -qx {group}")]) {
+        return Ok(());
+    }
+    ctx.shell(&format!("sudo usermod -aG {group} \"$USER\" || true"), false)?;
+    println!("  · added you to the `{group}` group (log out and back in if the next step fails)");
     Ok(())
 }
 
@@ -298,6 +337,32 @@ fn docker_fn() -> &'static str {
 "
 }
 
+/// Erase the Windows disk, used by `windows-vm-run`'s reinstall offer.
+///
+/// dockur creates `storage/` as `root:root`, so the obvious `rm -rf` from the
+/// user's shell removes **nothing** — and with its error swallowed the
+/// reinstall looks like it worked while booting the very same Windows, costing
+/// another 20-40 minutes to find out. Delete it with the privilege that made
+/// it: docker itself.
+fn wipe_storage_fn() -> &'static str {
+    "wipe_storage() {
+         rm -rf \"$1\" 2>/dev/null
+         # The image is already local, so this pulls nothing.
+         if [ -n \"$(ls -A \"$1\" 2>/dev/null)\" ]; then
+             dk run --rm -v \"$1:/wipe\" --entrypoint /bin/sh dockurr/windows \\
+                 -c 'rm -rf /wipe/..?* /wipe/.[!.]* /wipe/*' >/dev/null 2>&1 || true
+         fi
+         # Never interactive: this is reachable from a launcher (see dk).
+         if [ -n \"$(ls -A \"$1\" 2>/dev/null)\" ]; then
+             sudo -n rm -rf \"$1\" >/dev/null 2>&1 || true
+         fi
+         rmdir \"$1\" 2>/dev/null || true
+         # Empty is as good as gone: docker recreates the bind-mount directory.
+         [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]
+     }
+"
+}
+
 /// `windows-vm-run <file.exe>` — the lazy VM entry point, mirroring Android's
 /// `waydroid-launch`: set the VM up if it has never been set up, **start it only
 /// when something needs it**, then hand the installer over. Pure — unit-tested.
@@ -309,7 +374,7 @@ pub fn vm_run_script() -> String {
 [ $# -ge 1 ] || {{ echo 'usage: windows-vm-run <file.exe|file.msi>' >&2; exit 2; }}
 f=$1
 VMDIR="$HOME/.local/share/manifest-os/windows-vm"
-{docker}
+{docker}{wipe}
 # 1. First use? Set the VM up (downloads and installs Windows — one time).
 if [ ! -f "$VMDIR/compose.yaml" ]; then
   echo "The Windows VM isn't set up yet."
@@ -418,19 +483,32 @@ echo
 echo "Opening $base in Windows..."
 : > "$WALOG" 2>/dev/null || true
 APPSBEFORE=$(mktemp) && list_apps > "$APPSBEFORE"
-WINPATH=
+# Where the file lands inside Windows. Set up front, not in the loop below:
+# the loop is skipped on a guest that can't do RemoteApp, and the desktop
+# fallback still has to tell the user where to find their installer.
+WINPATH='Z:\Windows Transfer\'"$base"
 opened=0
-for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
-  WINPATH="$p$base"
-  t0=$(date +%s)
-  run_wa manual "$WINPATH"
-  t1=$(date +%s)
-  # winapps blocks on `wait $FREERDP_PID`, so a session you actually saw and
-  # closed lasts longer than a few seconds. An instant return means FreeRDP
-  # died on the spot -- and winapps launches it with `&>/dev/null`, so its
-  # reason never reaches us. Hence the alternate-shell attempt below.
-  if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
-done
+# Only a guest INSTALLED with TSAppAllowList\fDisabledAllowList=1 can run an
+# arbitrary program as a RemoteApp. Without it the connection still succeeds --
+# Windows just serves the console session instead, so you get a full desktop,
+# plus an "Another user is signed in" prompt because dockur is already signed
+# in there. That sits on screen well past any duration check, so attempting it
+# anyway does not produce evidence: it produces a false success, a stray
+# Windows desktop, and a launcher for an app nobody installed. Don't attempt
+# what the guest cannot do -- the reinstall offer below is the actual fix.
+if [ -f "$VMDIR/.remoteapp-enabled" ]; then
+  for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
+    WINPATH="$p$base"
+    t0=$(date +%s)
+    run_wa manual "$WINPATH"
+    t1=$(date +%s)
+    # winapps blocks on `wait $FREERDP_PID`, so a session you actually saw and
+    # closed lasts longer than a few seconds. An instant return means FreeRDP
+    # died on the spot -- and winapps launches it with `&>/dev/null`, so its
+    # reason never reaches us.
+    if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
+  done
+fi
 
 # NOTE: RDP's "alternate shell" (/shell:) was tried here and does NOT work on
 # this stack. Windows client editions allow one interactive session, and dockur
@@ -486,12 +564,15 @@ fi
 # Both share paths came back instantly: the RemoteApp never painted. Show what
 # winapps actually said rather than guessing.
 rm -f "$APPSBEFORE" 2>/dev/null || true
-echo "Couldn't open it as its own window." >&2
-[ -s "$WALOG" ] && {{ echo "What winapps reported:" >&2; tail -n 20 "$WALOG" | sed 's/^/    /' >&2; }}
-# winapps throws FreeRDP's own output away, so the wrapper's log is usually the
-# only place the real reason appears.
-FRLOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-freerdp.log"
-[ -s "$FRLOG" ] && {{ echo "What FreeRDP reported:" >&2; tail -n 20 "$FRLOG" | sed 's/^/    /' >&2; }}
+# Only report on an attempt we actually made.
+if [ -f "$VMDIR/.remoteapp-enabled" ]; then
+  echo "Couldn't open it as its own window." >&2
+  [ -s "$WALOG" ] && {{ echo "What winapps reported:" >&2; tail -n 20 "$WALOG" | sed 's/^/    /' >&2; }}
+  # winapps throws FreeRDP's own output away, so the wrapper's log is usually
+  # the only place the real reason appears.
+  FRLOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-freerdp.log"
+  [ -s "$FRLOG" ] && {{ echo "What FreeRDP reported:" >&2; tail -n 20 "$FRLOG" | sed 's/^/    /' >&2; }}
+fi
 # Windows only runs an arbitrary program as a RemoteApp when the guest has
 # TSAppAllowList\fDisabledAllowList=1, which is applied during Windows SETUP
 # (WinApps' oem/RDPApps.reg, via dockur's C:\OEM\install.bat). A guest built
@@ -513,7 +594,16 @@ if [ ! -f "$VMDIR/.remoteapp-enabled" ]; then
         echo "Removing the old Windows VM..." >&2
         dk stop WinApps >/dev/null 2>&1 || true
         dk rm WinApps >/dev/null 2>&1 || true
-        rm -rf "$VMDIR/storage" 2>/dev/null || true
+        # If the old disk survives, `manifest windows-vm` just boots the SAME
+        # Windows -- the reinstall silently does nothing and the 40 minutes are
+        # wasted. Never claim it happened without checking.
+        wipe_storage "$VMDIR/storage" || {{
+          echo "Couldn't erase the old Windows disk." >&2
+          echo "It belongs to root (docker created it), and neither docker nor" >&2
+          echo "passwordless root could remove it. Delete this folder as root," >&2
+          echo "then open this file again:" >&2
+          echo "    $VMDIR/storage" >&2
+          exit 1; }}
         echo "Reinstalling — watch it at http://localhost:8006" >&2
         manifest windows-vm || exit 1
         echo >&2
@@ -549,6 +639,7 @@ run_wa windows || {{
   }}
 "####,
         docker = docker_fn(),
+        wipe = wipe_storage_fn(),
     )
 }
 
@@ -867,6 +958,112 @@ fn generated_password() -> String {
     out
 }
 
+/// Stage WinApps' `oem/` files for dockur, and decide whether the guest can
+/// actually run a RemoteApp. Pure — unit-tested.
+///
+/// Windows refuses to run an arbitrary program as a RemoteApp unless
+/// `TSAppAllowList\fDisabledAllowList=1`, which WinApps' `oem/RDPApps.reg`
+/// sets — applied by dockur running `C:\OEM\install.bat` **during Windows
+/// setup**. There is no re-running setup on an installed Windows, so this is
+/// decided once, at install, and never again.
+///
+/// Hence `.remoteapp-enabled` answers *"was the Windows in `storage/` installed
+/// with those files"*, which is emphatically not *"do we have those files
+/// now"*. Stamping the latter is silent and permanent: `windows-vm-run` reads
+/// the stamp to decide whether to offer the reinstall, so a wrong stamp
+/// withdraws the only available fix.
+///
+/// This runs **before** the new compose is written, so `compose.yaml` here is
+/// still the one the existing guest was built from.
+fn setup_oem_step() -> String {
+    // WinApps' oem files are GPL-3.0: copied at runtime from the user's clone,
+    // never into this MIT tree. Same boundary as the rest of this module.
+    format!(
+        r#"src="$HOME/.local/share/manifest-os/winapps/oem"
+           if [ -f "$src/RDPApps.reg" ]; then
+             cp -f "$src"/*.reg "$src"/*.ps1 "$src"/install.bat "{COMPOSE_DIR}/oem/" 2>/dev/null || true
+             # Empty counts as absent: docker recreates the bind-mount
+             # directory, and a wipe can only empty it.
+             if [ -z "$(ls -A "{COMPOSE_DIR}/storage" 2>/dev/null)" ] || grep -qs '/oem:/oem' "{COMPOSE_DIR}/compose.yaml"; then
+               echo '  · guest setup: enabling single-window apps (WinApps oem/RDPApps.reg)'
+               touch "{COMPOSE_DIR}/.remoteapp-enabled"
+             else
+               rm -f "{COMPOSE_DIR}/.remoteapp-enabled"
+               echo '  ! this Windows was installed before single-window apps could be'
+               echo '    enabled; opening an app will offer to reinstall it with them on'
+             fi
+           else
+             rm -f "{COMPOSE_DIR}/.remoteapp-enabled"
+             echo '  ! WinApps oem files not found — Windows will refuse single-window apps' >&2
+           fi"#
+    )
+}
+
+/// Append our debloat call to WinApps' `install.bat`. Pure — unit-tested.
+///
+/// Chained onto theirs rather than replacing it: dockur runs exactly one
+/// `install.bat`, and theirs is the one that enables RemoteApp.
+fn setup_debloat_bat_step() -> String {
+    // CRLF, because this is a batch file read by Windows.
+    format!(
+        r#"b="{COMPOSE_DIR}/oem/install.bat"
+           if [ -f "$b" ] && ! grep -qi 'debloat.ps1' "$b"; then
+             printf '%s\r\n' 'powershell -NoProfile -ExecutionPolicy Bypass -File %~dp0debloat.ps1 >%~dp0debloat.log 2>&1' >> "$b"
+           fi"#
+    )
+}
+
+/// Write our own `install.bat` when WinApps' clone had none to chain onto.
+/// Pure — unit-tested.
+fn setup_fallback_bat_step() -> String {
+    format!(
+        "[ -f \"{COMPOSE_DIR}/oem/install.bat\" ] || printf '%s' \"$(cat <<'EOF'\n{bat}EOF\n)\" > \"{COMPOSE_DIR}/oem/install.bat\"",
+        bat = debloat_bat()
+    )
+}
+
+/// The compose file from a previous setup, if there is one. It is the only
+/// record of what the installed guest was actually built with.
+fn read_existing_compose() -> Option<String> {
+    std::fs::read_to_string(expand(&format!("{COMPOSE_DIR}/compose.yaml"))).ok()
+}
+
+/// The Windows account password recorded in a compose file. Pure — unit-tested.
+pub fn password_in_compose(compose: &str) -> Option<String> {
+    compose
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("PASSWORD:"))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .filter(|p| !p.is_empty())
+}
+
+/// Write a root-owned file only when its contents (or executable bit) would
+/// actually change.
+///
+/// Re-running setup must not need a password. `windows-vm-run` re-enters
+/// `manifest windows-vm` to heal a half-finished setup, and it does so from a
+/// .desktop launcher with no TTY — where a single unnecessary `sudo` aborts
+/// everything with "sudo: a terminal is required" and leaves the user with the
+/// same broken state they started with.
+fn write_root_if_changed(ctx: &Ctx, path: &str, content: &str, executable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if !ctx.dry_run {
+        let same = std::fs::read_to_string(path).map(|c| c == content).unwrap_or(false);
+        let mode_ok = !executable
+            || std::fs::metadata(path)
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+        if same && mode_ok {
+            return Ok(());
+        }
+    }
+    ctx.write_root(path, content)?;
+    if executable {
+        ctx.sudo("chmod", &["0755", path])?;
+    }
+    Ok(())
+}
+
 /// Expand a leading `$HOME` for the write_user path (which is a real path, not a
 /// shell string).
 fn expand(p: &str) -> String {
@@ -1079,11 +1276,29 @@ mod tests {
         // a plain desktop that also looks "successful" to a duration check.
         assert!(!s.contains("/shell:\""), "alternate shell cannot work on this stack: {s}");
         // Erasing a Windows install must never happen without being asked.
-        let rm_at = s.find("rm -rf \"$VMDIR/storage\"").expect("reinstall path");
+        let rm_at = s.find("wipe_storage \"$VMDIR/storage\"").expect("reinstall path");
         let prompt_at = s.find("Reinstall Windows now?").expect("prompt");
         assert!(prompt_at < rm_at, "must confirm BEFORE deleting the install:
 {s}");
         assert!(s.contains("[ -t 0 ]"), "never prompt where there is no terminal: {s}");
+        // A guest without the registry key cannot run a RemoteApp, but it CAN
+        // serve the console session -- a full Windows desktop that outlives the
+        // 5-second check and reports success. Verified on real hardware: the
+        // desktop appears with an "Another user is signed in" prompt, because
+        // dockur is already signed in at the console. So the attempt has to be
+        // gated on the stamp, not merely explained after the fact.
+        let gate = s.find("if [ -f \"$VMDIR/.remoteapp-enabled\" ]; then").expect("gate");
+        let attempt = s.find("run_wa manual \"$WINPATH\"").expect("attempt");
+        assert!(gate < attempt, "must not attempt what the guest cannot do:\n{s}");
+        // dockur creates storage/ as root:root, so a plain `rm -rf` deletes
+        // NOTHING -- and with the error swallowed the reinstall looks like it
+        // worked while booting the very same Windows. It must be wiped with
+        // docker's privilege, and the result must be checked.
+        assert!(s.contains("dk run --rm -v \"$1:/wipe\""), "wipe with docker's privilege: {s}");
+        assert!(
+            s.contains("wipe_storage \"$VMDIR/storage\" || {"),
+            "a failed wipe must abort, not pretend it reinstalled: {s}"
+        );
     }
 
     /// Every generated script here is something a .desktop launcher Execs, and
@@ -1129,5 +1344,77 @@ mod tests {
         // time component has to be doing work).
         let b = generated_password();
         assert_ne!(a, b, "passwords must not repeat");
+    }
+
+    /// The guest's password is written into Windows while it installs, and
+    /// nothing out here can change it afterwards. A re-run that mints a fresh
+    /// one doesn't rotate anything — it locks us out of the guest we already
+    /// have, and FreeRDP's only symptom is a connection reset with no reason
+    /// attached. So an existing setup's password has to be recoverable.
+    #[test]
+    fn an_existing_setups_password_is_read_back_from_its_compose() {
+        let c = compose_yaml(&vm(), "hunter2");
+        assert_eq!(password_in_compose(&c).as_deref(), Some("hunter2"), "{c}");
+        // A round trip has to survive the exact file we write, quotes and all.
+        let generated = generated_password();
+        let c = compose_yaml(&vm(), &generated);
+        assert_eq!(password_in_compose(&c).as_deref(), Some(generated.as_str()));
+        // Nothing to reuse is a perfectly good answer — that's a first run.
+        assert_eq!(password_in_compose(""), None);
+        assert_eq!(password_in_compose("services:\n  windows:\n"), None);
+        assert_eq!(password_in_compose("      PASSWORD: \"\"\n"), None);
+        // USERNAME must not be mistaken for it.
+        assert_eq!(password_in_compose("      USERNAME: \"manifest\"\n"), None);
+    }
+
+    /// Every shell fragment this module hands to `sh -c` must at least *parse*.
+    ///
+    /// The release loop pipes `manifest __script <name>` through `sh -n`, but
+    /// that only ever covered the scripts `__script` exposes — the fragments
+    /// below go straight to `ctx.shell()` and were checked by nothing. One of
+    /// them ended `then : fi`, with `fi` separated from `:` by spaces alone, so
+    /// `fi` parsed as an argument and the `if` was never closed. Being a *parse*
+    /// error it fired whichever branch would have been taken, aborting
+    /// `manifest windows-vm` for every user, one step before it wrote
+    /// compose.yaml — leaving a guest built from whatever compose came before.
+    #[test]
+    fn every_generated_shell_fragment_parses() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        for (what, fragment) in [
+            ("oem step", setup_oem_step()),
+            ("debloat bat step", setup_debloat_bat_step()),
+            ("fallback bat step", setup_fallback_bat_step()),
+        ] {
+            let mut sh = Command::new("sh")
+                .arg("-n")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn sh");
+            sh.stdin.take().unwrap().write_all(fragment.as_bytes()).unwrap();
+            let out = sh.wait_with_output().expect("run sh -n");
+            assert!(
+                out.status.success(),
+                "{what} is not valid sh:\n{}\n--- fragment ---\n{fragment}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// The stamp answers "was the Windows in storage/ INSTALLED with
+    /// RDPApps.reg", which is not the same question as "do we have that file
+    /// now". Getting it wrong is silent: windows-vm-run stops offering the
+    /// reinstall that is the only way to fix an older guest.
+    #[test]
+    fn the_remoteapp_stamp_describes_the_guest_not_the_clone() {
+        let s = setup_oem_step();
+        // Decided from the guest's own evidence: an empty/absent disk (nothing
+        // installed yet) or a compose that already mounted /oem.
+        assert!(s.contains("ls -A"), "an empty storage dir counts as no guest: {s}");
+        assert!(s.contains("grep -qs '/oem:/oem'"), "check what built the guest: {s}");
+        // And it must actively clear a stamp it can't justify, not just skip it.
+        assert!(s.contains("rm -f"), "an unjustified stamp must be removed: {s}");
+        assert!(s.contains("touch"), "{s}");
     }
 }

@@ -415,12 +415,22 @@ pub fn active_dm_unit() -> Option<String> {
 pub fn switch_default(d: &Resolved, ctx: &Ctx) -> bool {
     let Some(target) = &d.dm else { return false };
     let Some(current) = active_dm_unit() else { return false };
-    if current == target.service {
+    if !needs_dm_switch(Some(&current), target.service) {
         return false;
     }
     println!("  · switching login manager: {current} → {}", target.service);
     let _ = ctx.sudo("systemctl", &["disable", &current]);
     true
+}
+
+/// Whether the currently-active login manager has to be disabled to make
+/// `target` the boot default. Split out from [`switch_default`] so the decision
+/// is testable: the rest of that function reads
+/// `/etc/systemd/system/display-manager.service` off the live host, so a test
+/// calling it directly asserts a fact about whatever machine happens to be
+/// running it.
+fn needs_dm_switch(current: Option<&str>, target: &str) -> bool {
+    matches!(current, Some(c) if c != target)
 }
 
 /// tuigreet's `--theme` spec (component=named-ANSI-color pairs, semicolon
@@ -922,11 +932,20 @@ mod tests {
 
     #[test]
     fn switch_default_no_ops_when_dm_matches_or_absent() {
-        // Dry-run ctx never executes; switch_default reads the live symlink,
-        // which won't exist on a dev box, so active_dm_unit() is None → false.
-        let ctx = Ctx::new(true);
+        // The decision, not the wiring: switch_default reads the live
+        // /etc/systemd/system/display-manager.service symlink, so asserting on
+        // it directly asserts a fact about the dev machine. That held on the
+        // old Windows + VirtualBox rig (no display manager to find) and stopped
+        // holding the moment development moved onto a real Arch desktop, where
+        // the symlink points at whatever greeter is actually running.
         let gnome = resolve(&manifest_with_desktop("gnome")).unwrap().unwrap();
-        assert!(!switch_default(&gnome, &ctx));
+        let target = gnome.dm.as_ref().unwrap().service;
+        assert_eq!(target, "gdm.service");
+        // Nothing active to disable, and already correct: both no-ops.
+        assert!(!needs_dm_switch(None, target));
+        assert!(!needs_dm_switch(Some("gdm.service"), target));
+        // A different one is live — that is the case worth acting on.
+        assert!(needs_dm_switch(Some("sddm.service"), target));
     }
 
     #[test]
