@@ -196,6 +196,17 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
              programs on a network drive, and the prompt is fatal to a single-window app)"
         );
         ctx.shell(&setup_guest_policy_step(), false)?;
+        // A browser that renders. Edge is Chromium and Chromium comes across
+        // RemoteApp blank, so every web sign-in is dead without this.
+        println!(
+            "  · guest setup: installing Waterfox as the browser (Edge can't render in a \
+             single-window app, so web sign-ins need it)"
+        );
+        ctx.write_user(
+            &expand(&format!("{COMPOSE_DIR}/oem/manifest-browser.ps1")),
+            &browser_setup_ps1(WATERFOX_URL),
+        )?;
+        ctx.shell(&setup_browser_bat_step(), false)?;
         let compose = compose_yaml(vm, &pass);
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
         // WinApps reads ~/.config/winapps/compose.yaml — the path is hardcoded in
@@ -1393,6 +1404,118 @@ fn setup_guest_policy_step() -> String {
     )
 }
 
+/// Chain the browser setup onto `install.bat`, so a new guest is installed with
+/// it. Pure — unit-tested.
+fn setup_browser_bat_step() -> String {
+    format!(
+        r#"b="{COMPOSE_DIR}/oem/install.bat"
+           if ! grep -qi 'manifest-browser.ps1' "$b" 2>/dev/null; then
+             printf '%s\r\n' 'powershell -NoProfile -ExecutionPolicy Bypass -File %~dp0manifest-browser.ps1 >%~dp0browser.log 2>&1' >> "$b"
+           fi"#
+    )
+}
+
+/// Waterfox's enterprise policy file, shipped into the guest.
+///
+/// `OfferToSaveLogins` is the one that matters. Firefox-family "doorhanger"
+/// panels come across RAIL as **full-desktop-sized transient windows that paint
+/// nothing** — measured: "Save your password?" arrived at 1920x1091 and covered
+/// the whole screen, blank, immediately after a successful sign-in. The same
+/// shape breaks "Open File - Security Warning" (1916x1087) and installer
+/// language pickers. Ordinary top-level windows are fine, which is why the
+/// browser itself renders perfectly.
+///
+/// This does not fix that FreeRDP bug — nothing here can — it removes the
+/// popup that a sign-in flow is guaranteed to hit.
+const WATERFOX_POLICIES: &str = r#"{
+  "policies": {
+    "OfferToSaveLogins": false,
+    "PasswordManagerEnabled": false,
+    "DontCheckDefaultBrowser": true,
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "NoDefaultBookmarks": true,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": ""
+  }
+}
+"#;
+
+/// Install Waterfox in the guest and make it the default browser.
+///
+/// **Why a second browser at all.** Chromium — which is Edge, which is what
+/// Windows hands every `https://` link to — renders as a blank window under
+/// RemoteApp, and no flag fixes it: `--disable-gpu`,
+/// `--disable-direct-composition` and the `HardwareAccelerationModeEnabled`
+/// policy were all tried and all still blank. Gecko renders correctly, verified
+/// on real hardware with the Autodesk sign-in page. Any app with a web-based
+/// sign-in (Autodesk, Adobe, anything OAuth) is unusable otherwise.
+///
+/// Waterfox specifically: Gecko, but lighter than Firefox, which matters in a
+/// tier that is already a whole Windows in a container.
+///
+/// **The default-browser part is the awkward bit.** Windows 11 hash-protects
+/// the per-user `UserChoice` association, so it cannot simply be written. The
+/// supported route is the `DefaultAssociationsConfiguration` policy pointing at
+/// an XML — which needs Waterfox's ProgIds, and those carry an install-specific
+/// hash. So the ProgIds are read out of the registry *in the guest* rather than
+/// hardcoded here.
+fn browser_setup_ps1(url: &str) -> String {
+    format!(
+        r#"$ErrorActionPreference = 'SilentlyContinue'
+$exe = 'C:\Program Files\Waterfox\waterfox.exe'
+if (-not (Test-Path $exe)) {{
+    $tmp = Join-Path $env:TEMP 'waterfox-setup.exe'
+    Invoke-WebRequest -Uri '{url}' -OutFile $tmp -UseBasicParsing
+    Start-Process -FilePath $tmp -ArgumentList '/S' -Wait
+    Remove-Item $tmp -Force
+}}
+if (-not (Test-Path $exe)) {{ return }}
+
+# Popups are what break under RemoteApp, so switch off the ones a sign-in hits.
+$dist = 'C:\Program Files\Waterfox\distribution'
+New-Item -ItemType Directory -Path $dist -Force | Out-Null
+Set-Content -Path (Join-Path $dist 'policies.json') -Encoding UTF8 -Value @'
+{policies}
+'@
+
+# ProgIds carry a per-install hash, so discover them rather than guess.
+$html = (Get-ChildItem HKLM:\SOFTWARE\Classes |
+         Where-Object PSChildName -match '^Waterfox(HTML|-)' |
+         Select-Object -First 1).PSChildName
+$url  = (Get-ChildItem HKLM:\SOFTWARE\Classes |
+         Where-Object PSChildName -match '^WaterfoxURL' |
+         Select-Object -First 1).PSChildName
+if (-not $html) {{ $html = 'WaterfoxHTML' }}
+if (-not $url)  {{ $url  = 'WaterfoxURL' }}
+
+# Windows 11 hash-protects UserChoice, so the supported lever is this policy.
+$xml = 'C:\ProgramData\ManifestOS\default-apps.xml'
+New-Item -ItemType Directory -Path (Split-Path $xml) -Force | Out-Null
+@"
+<?xml version="1.0" encoding="UTF-8"?>
+<DefaultAssociations>
+  <Association Identifier=".htm"  ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier=".html" ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier="http"  ProgId="$url"  ApplicationName="Waterfox" />
+  <Association Identifier="https" ProgId="$url"  ApplicationName="Waterfox" />
+</DefaultAssociations>
+"@ | Set-Content -Path $xml -Encoding UTF8
+$key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+New-Item -Path $key -Force | Out-Null
+Set-ItemProperty -Path $key -Name 'DefaultAssociationsConfiguration' -Value $xml -Type String
+"#,
+        url = url,
+        policies = WATERFOX_POLICIES.trim_end(),
+    )
+}
+
+/// Where Waterfox comes from. Pinned rather than "latest" so a build is
+/// reproducible and a surprise upstream change can't break setup silently.
+const WATERFOX_URL: &str =
+    "https://cdn.waterfox.com/waterfox/releases/6.6.17/WINNT_x86_64/Waterfox%20Setup%206.6.17.exe";
+
 /// Registry policy for the guest, as `printf` lines for `install.bat`.
 ///
 /// `1806` — see [`setup_guest_policy_step`].
@@ -1852,6 +1975,7 @@ mod tests {
             ("fallback bat step", setup_fallback_bat_step()),
             ("autologon step", setup_autologon_step()),
             ("guest policy step", setup_guest_policy_step()),
+            ("browser bat step", setup_browser_bat_step()),
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
@@ -1917,6 +2041,35 @@ mod tests {
             let stopped = sh.wait().expect("run sh").success();
             assert_eq!(stopped, expect_stop, "{what}: expected stop={expect_stop}");
         }
+    }
+
+    /// Edge is Chromium, Chromium renders as a blank window under RemoteApp,
+    /// and Windows hands every https:// link to Edge — so a guest without a
+    /// Gecko browser cannot complete a single web sign-in. Verified on real
+    /// hardware: Edge blank with --disable-gpu, --disable-direct-composition
+    /// and the HardwareAccelerationModeEnabled policy; Waterfox renders the
+    /// same page perfectly.
+    #[test]
+    fn the_guest_gets_a_browser_that_can_actually_render() {
+        let ps = browser_setup_ps1(WATERFOX_URL);
+        assert!(ps.contains(WATERFOX_URL), "{ps}");
+        assert!(ps.contains("'/S'"), "silent install, setup is unattended: {ps}");
+        assert!(ps.contains("Test-Path $exe"), "don't redownload every run: {ps}");
+        // The popup that a sign-in is guaranteed to hit, and that RAIL renders
+        // as a blank full-screen window.
+        assert!(ps.contains("OfferToSaveLogins"), "{ps}");
+        // Windows 11 hash-protects UserChoice, so this is the supported lever —
+        // and the ProgIds carry a per-install hash, so they must be discovered
+        // in the guest rather than hardcoded here.
+        assert!(ps.contains("DefaultAssociationsConfiguration"), "{ps}");
+        assert!(ps.contains("Get-ChildItem HKLM:\\SOFTWARE\\Classes"), "discover ProgIds: {ps}");
+        assert!(!ps.contains("WaterfoxHTML-"), "a hardcoded install hash would be wrong: {ps}");
+        // Pinned, so a build is reproducible and upstream can't move under us.
+        assert!(WATERFOX_URL.contains("6.6.17"), "pin the version: {WATERFOX_URL}");
+        // Chained onto the OEM hook, never replacing it.
+        let bat = setup_browser_bat_step();
+        assert!(bat.contains(">> \"$b\""), "append: {bat}");
+        assert!(bat.contains("grep -qi 'manifest-browser.ps1'"), "idempotent: {bat}");
     }
 
     /// The size becomes the guest's partition layout at install time, so it is
