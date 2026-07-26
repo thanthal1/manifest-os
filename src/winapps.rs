@@ -264,14 +264,17 @@ cp -f "$f" "$HOME/Windows Transfer/$base" 2>/dev/null || true
 
 echo
 echo "Opening Windows. Your installer is available inside it at:"
-echo "    \host.lan\Data\Windows Transfer\$base"
-echo "(also in the shared drive as '$base')"
+echo '    \\host.lan\Data\Windows Transfer\'"$base"
+echo "(also in the shared drive, as '$base')"
 echo
-winapps windows || {{
-  echo "windows-vm-run: couldn't open the Windows desktop." >&2
-  echo "  Check it with: winapps check" >&2
-  exit 1
-}}
+# winapps runs docker itself, so it needs the same group bridge dk() gives us.
+winapps windows 2>/dev/null   || sg docker -c 'winapps windows' 2>/dev/null   || {{
+    echo "windows-vm-run: couldn't open the Windows desktop." >&2
+    echo "  If it mentions docker permissions, log out and back in once —" >&2
+    echo "  your user was added to the 'docker' group and the session needs to" >&2
+    echo "  pick it up. Then try again." >&2
+    exit 1
+  }}
 "####,
         docker = docker_fn(),
     )
@@ -573,6 +576,13 @@ mod tests {
         assert!(s.contains("Waiting for Windows to be ready"), "{s}");
         // Records activity so the idle watchdog can tell it's in use.
         assert!(s.contains("windows-vm-activity"), "{s}");
+        // The share path must interpolate the real filename: `\$base` inside
+        // double quotes prints a literal "$base", so the value is concatenated
+        // outside the quoted literal instead.
+        assert!(s.contains(r#"Transfer\'"$base""#), "filename must expand: {s}");
+        assert!(!s.contains(r#"Transfer\$base""#), "an escaped $ would print literally: {s}");
+        // winapps talks to docker itself, so it needs the group bridge too.
+        assert!(s.contains("sg docker -c 'winapps windows'"), "{s}");
     }
 
     #[test]
