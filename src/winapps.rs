@@ -94,6 +94,8 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
     );
     ctx.write_root("/usr/local/bin/windows-vm-idle", &vm_idle_script(idle))?;
     ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-vm-idle"])?;
+    ctx.write_root("/usr/local/bin/manifest-freerdp", freerdp_wrapper())?;
+    ctx.sudo("chmod", &["0755", "/usr/local/bin/manifest-freerdp"])?;
     ctx.write_root("/etc/systemd/user/windows-vm-idle.service", idle_service_unit())?;
     ctx.write_root("/etc/systemd/user/windows-vm-idle.timer", idle_timer_unit())?;
     ctx.shell("systemctl --user enable --now windows-vm-idle.timer >/dev/null 2>&1 || true", false)?;
@@ -110,11 +112,42 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}\""), false)?;
         // Debloat runs *during Windows setup* via dockur's /oem hook, so the junk
         // never gets a first run. Off only if the manifest says so.
+        // The guest MUST be told to allow arbitrary RemoteApp programs, or every
+        // launch is refused and FreeRDP exits instantly -- which looks exactly
+        // like "the window didn't open". WinApps ships the registry files that
+        // do it (oem/RDPApps.reg sets TSAppAllowList\fDisabledAllowList=1), and
+        // dockur runs C:\OEM\install.bat during Windows setup.
+        //
+        // Their files are GPL-3.0, so they are COPIED AT RUNTIME from the clone
+        // on the user's machine -- never into this tree. Same boundary as the
+        // rest of this module.
+        ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}/oem\""), false)?;
+        ctx.shell(
+            &format!(
+                "src=\"$HOME/.local/share/manifest-os/winapps/oem\";                  if [ -d \"$src\" ]; then                    cp -f \"$src\"/*.reg \"$src\"/*.ps1 \"$src\"/install.bat \"{COMPOSE_DIR}/oem/\" 2>/dev/null || true;                    echo '  · guest setup: enabling RemoteApp (WinApps oem/RDPApps.reg)';                  else                    echo '  ! WinApps oem files not found — RemoteApp may be refused by Windows' >&2;                  fi"
+            ),
+            false,
+        )?;
         if vm.debloat.unwrap_or(true) {
             println!("  · debloating: removing preinstalled Store apps, Cortana and telemetry");
-            ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}/oem\""), false)?;
-            ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/install.bat")), debloat_bat())?;
             ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/debloat.ps1")), debloat_ps1())?;
+            // Chain onto WinApps' install.bat rather than replacing it: dockur
+            // runs exactly one install.bat, and theirs is the one that enables
+            // RemoteApp. Ours must not be what overwrites it.
+            ctx.shell(
+                &format!(
+                    "b=\"{COMPOSE_DIR}/oem/install.bat\";                      if [ -f \"$b\" ] && ! grep -qi 'debloat.ps1' \"$b\"; then                        printf '%s\\r\\n' 'powershell -NoProfile -ExecutionPolicy Bypass -File %~dp0debloat.ps1 >%~dp0debloat.log 2>&1' >> \"$b\";                      elif [ ! -f \"$b\" ]; then                        :                      fi"
+                ),
+                false,
+            )?;
+            // No WinApps oem at all: our own bat is better than nothing.
+            ctx.shell(
+                &format!(
+                    "[ -f \"{COMPOSE_DIR}/oem/install.bat\" ] || printf '%s' \"$(cat <<'EOF'\n{bat}EOF\n)\" > \"{COMPOSE_DIR}/oem/install.bat\"",
+                    bat = debloat_bat()
+                ),
+                false,
+            )?;
         }
         let compose = compose_yaml(vm, &pass);
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
@@ -392,11 +425,44 @@ for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
   t0=$(date +%s)
   run_wa manual "$WINPATH"
   t1=$(date +%s)
-  # winapps exits 0 whether or not the window ever painted, so exit status
-  # proves nothing. A session you actually saw and closed lasts longer than a
-  # few seconds; an instant return means the path was wrong or RDP refused.
+  # winapps blocks on `wait $FREERDP_PID`, so a session you actually saw and
+  # closed lasts longer than a few seconds. An instant return means FreeRDP
+  # died on the spot -- and winapps launches it with `&>/dev/null`, so its
+  # reason never reaches us. Hence the alternate-shell attempt below.
   if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
 done
+
+# Tier 2. RemoteApp is refused unless the guest has
+# TSAppAllowList\fDisabledAllowList=1, which WinApps' oem/RDPApps.reg sets
+# during Windows *setup* -- so a Windows installed before we knew that can
+# never run one, and there is no re-running setup on it.
+#
+# RDP's "alternate shell" runs a single program as the session's shell: a
+# desktop session with no explorer, so no Windows taskbar and no browser --
+# and it is NOT gated by the RemoteApp allow-list. Slightly less seamless
+# than a true RemoteApp, but it works on the guest the user already has.
+if [ "$opened" != 1 ]; then
+  CONF="$HOME/.config/winapps/winapps.conf"
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+  FRDP=""
+  for c in xfreerdp3 xfreerdp sdl-freerdp3 wlfreerdp; do
+    command -v "$c" >/dev/null 2>&1 && {{ FRDP=$c; break; }}
+  done
+  if [ -n "$FRDP" ] && [ -n "${{RDP_USER:-}}" ]; then
+    echo "Opening it as a single-app session..."
+    for p in 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; do
+      WINPATH="$p$base"
+      t0=$(date +%s)
+      # Run FreeRDP ourselves, so unlike winapps we can see why it failed.
+      "$FRDP" /v:"${{RDP_IP:-127.0.0.1}}" /port:"${{RDP_PORT:-3389}}" \
+              /u:"$RDP_USER" /p:"${{RDP_PASS:-}}" /cert:ignore \
+              /dynamic-resolution +auto-reconnect \
+              /shell:"$WINPATH" >>"$WALOG" 2>&1
+      t1=$(date +%s)
+      if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
+    done
+  fi
+fi
 
 if [ "$opened" = 1 ]; then
   echo
@@ -444,7 +510,16 @@ fi
 # winapps actually said rather than guessing.
 rm -f "$APPSBEFORE" 2>/dev/null || true
 echo "Couldn't open it as its own window." >&2
-[ -s "$WALOG" ] && {{ echo "What winapps reported:" >&2; sed 's/^/    /' "$WALOG" >&2; }}
+[ -s "$WALOG" ] && {{ echo "What winapps reported:" >&2; tail -n 20 "$WALOG" | sed 's/^/    /' >&2; }}
+# winapps throws FreeRDP's own output away, so the wrapper's log is usually the
+# only place the real reason appears.
+FRLOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-freerdp.log"
+[ -s "$FRLOG" ] && {{ echo "What FreeRDP reported:" >&2; tail -n 20 "$FRLOG" | sed 's/^/    /' >&2; }}
+# The overwhelmingly likely cause, so name it instead of leaving them guessing.
+echo >&2
+echo "Most likely: this Windows was installed before ManifestOS knew to enable" >&2
+echo "RemoteApp in the guest, and that setting is applied during Windows setup." >&2
+echo "Single-window mode needs it; the full desktop below does not." >&2
 
 # Older WinApps (no `manual`), or the launch didn't take: fall back to the full
 # desktop so the file is still reachable by hand.
@@ -470,6 +545,36 @@ run_wa windows || {{
 "####,
         docker = docker_fn(),
     )
+}
+
+/// `manifest-freerdp` — what WinApps runs instead of FreeRDP directly.
+///
+/// WinApps launches FreeRDP as `$FREERDP_COMMAND … &>/dev/null &`, so when a
+/// launch fails there is nothing at all to read — the failure that cost us
+/// three rounds of guessing produced an empty log. This wrapper keeps stderr in
+/// a file, then execs the real binary. Pure — unit-tested.
+pub fn freerdp_wrapper() -> &'static str {
+    r####"#!/bin/sh
+# ManifestOS — FreeRDP wrapper (generated; do not edit).
+# Exists purely so FreeRDP's errors survive winapps' `&>/dev/null`.
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/windows-vm-freerdp.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+# Keep the log from growing without bound.
+[ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt 262144 ] && : > "$LOG"
+{
+  echo "--- $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "    args: $*"
+} >> "$LOG" 2>/dev/null || true
+
+for c in xfreerdp3 xfreerdp sdl-freerdp3 wlfreerdp; do
+    if command -v "$c" >/dev/null 2>&1; then
+        exec 2>>"$LOG"
+        exec "$c" "$@"
+    fi
+done
+echo "    no FreeRDP binary found (looked for xfreerdp3, xfreerdp, sdl-freerdp3, wlfreerdp)" >> "$LOG"
+exit 127
+"####
 }
 
 /// `windows-vm-idle` — the watchdog that stops the VM when nothing is using it,
@@ -606,7 +711,10 @@ pub fn winapps_conf(vm: &WindowsVm, password: &str) -> String {
          RDP_FLAGS_NON_WINDOWS=\"/dynamic-resolution /cert:ignore +auto-reconnect\"\n\
          MULTIMON=\"false\"\n\
          DEBUG=\"true\"\n\
-         FREERDP_COMMAND=\"xfreerdp3\"\n",
+         # A wrapper, not xfreerdp3 directly: winapps launches FreeRDP with\n\
+         # `&>/dev/null`, so when a launch fails there is nothing to read. The\n\
+         # wrapper keeps stderr in a log we can show the user.\n\
+         FREERDP_COMMAND=\"manifest-freerdp\"\n",
         user = vm.username(),
         password = password,
         flavor = flavor,
@@ -895,7 +1003,11 @@ mod tests {
         assert!(c.contains("RDP_USER=\"manifest\""), "{c}");
         assert!(c.contains("RDP_PASS=\"hunter2\""), "{c}");
         assert!(c.contains("RDP_IP=\"127.0.0.1\""), "{c}");
-        assert!(c.contains("FREERDP_COMMAND=\"xfreerdp3\""), "{c}");
+        // A wrapper, because winapps discards FreeRDP's output entirely.
+        assert!(c.contains("FREERDP_COMMAND=\"manifest-freerdp\""), "{c}");
+        let w = freerdp_wrapper();
+        assert!(w.contains("xfreerdp3"), "wrapper resolves a real binary: {w}");
+        assert!(w.contains("exec 2>>\"$LOG\""), "wrapper must keep stderr: {w}");
     }
 
     #[test]
