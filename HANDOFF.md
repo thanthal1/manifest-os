@@ -170,6 +170,41 @@ produces "the window didn't open", so none of them are guessable from a log.
    Exec, and a launcher has no TTY — the prompt hangs forever showing nothing
    (the same trap Waydroid's launchers hit). `sudo -n` + `notify-send`; a test
    walks the generated scripts and fails on any interactive sudo.
+10. **The same goes for `manifest windows-vm` itself.** `windows-vm-run` re-enters
+    it to heal a half-finished setup, from that same TTY-less launcher. It now
+    asks for root only when a package, service or group actually *changes* —
+    `pacman -S --needed` is a no-op but still prompts, and that alone aborted
+    the whole setup with "sudo: a terminal is required".
+11. **Nothing here is checked by `sh -n` unless you make it.** The release loop
+    pipes `manifest __script <name>` through `sh -n`, which only covers what
+    `__script` exposes — the inline `ctx.shell()` fragments in `setup()` were
+    checked by nothing, and one of them (`then : fi`, where `fi` parses as an
+    argument to `:`) was a **parse error that aborted setup for every user with
+    debloat on**, one step before `compose.yaml` is written. Every fragment is a
+    pure function with an `sh -n` test now. Keep it that way.
+12. **The guest's password cannot be changed from out here.** It is written into
+    Windows while it installs, so regenerating one on a re-run doesn't rotate
+    anything — it locks you out of the guest you have, and FreeRDP's only symptom
+    is `ERRCONNECT_CONNECT_TRANSPORT_FAILED` / connection reset, which reads like
+    a network fault. An existing compose's password is reused.
+13. **`storage/` is `root:root`** — dockur creates it. A plain `rm -rf` from the
+    user removes *nothing*, and with the error swallowed a "reinstall" boots the
+    very same Windows 40 minutes later. Wipe it with the privilege that made it
+    (`docker run -v …:/wipe`), and check the result before claiming anything.
+14. **A guest without `RDPApps.reg` does not refuse the launch — it serves the
+    console session.** Verified on real hardware, with a screenshot: you get a
+    full Windows desktop carrying an *"Another user is signed in"* prompt
+    (dockur is already signed in there), and it sits on screen indefinitely, so
+    the 5-second duration check reads it as a **successful launch**. This is the
+    alternate-shell trap (#5) arrived at from the other side. The attempt is
+    therefore *gated* on `.remoteapp-enabled` — never attempt what the guest
+    cannot do, or you get a false success, a stray desktop, and a launcher for
+    an app nobody installed.
+15. **dockur accepts a custom answer file** at `$STORAGE/custom.xml` (also
+    `/custom.xml`, `/run/assets/custom.xml` — see its `run/answer.sh`). Its stock
+    `win11x64.xml` autologons with `LogonCount 65432`. That is the supported
+    lever if RemoteApp still won't paint: a *new* session is what RemoteApp
+    wants, and `$STORAGE` is a directory we already own. No fork needed.
 
 Engine gate: strata/Android orchestration is unit + dry-run + (strata) VM-verified;
 **Android/Waydroid rendering is real-hardware-only** (VBox GL 2.1 can't run gralloc).
