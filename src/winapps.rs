@@ -118,8 +118,13 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 pub fn link_apps(ctx: &Ctx) -> Result<()> {
     // Windows has to be up for WinApps to enumerate what's installed.
     println!("  · checking the Windows container is running");
+    // Same group caveat as `up`: try the session, then `sg docker`, then root.
     ctx.shell(
-        "docker ps --filter name=manifest-windows --format '{{.Status}}' 2>/dev/null          || sg docker -c "docker ps --filter name=manifest-windows --format '{{.Status}}'" 2>/dev/null          || sudo docker ps --filter name=manifest-windows --format '{{.Status}}' 2>/dev/null          || echo '  · could not query docker — is the container running?' >&2",
+        "ps() { docker ps --filter name=manifest-windows --format '{{.Names}} {{.Status}}'; }; \
+         ps 2>/dev/null || sg docker -c \"docker ps --filter name=manifest-windows \
+         --format '{{.Names}} {{.Status}}'\" 2>/dev/null \
+         || sudo docker ps --filter name=manifest-windows --format '{{.Names}} {{.Status}}' 2>/dev/null \
+         || echo '  · could not query docker — is the container running?' >&2",
         false,
     )?;
     println!("  · asking WinApps to detect installed Windows apps");
