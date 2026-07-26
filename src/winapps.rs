@@ -313,26 +313,36 @@ run_wa() {{ "$WA" "$@" 2>/dev/null || sg docker -c "'$WA' $*" 2>/dev/null; }}
 
 # Run the installer as a RemoteApp: its own window on your desktop. No Windows
 # desktop, no Windows taskbar, no browser tab — which is the entire point of
-# this tier. The file lives on the share dockur exposes to the guest.
-WINPATH='\\host.lan\Data\Windows Transfer\'"$base"
+# this tier.
+#
+# Two ways your home reaches the guest, and which one is live depends on how
+# the session came up, so try both:
+#   \\tsclient\home  FreeRDP redirects $HOME into the session itself, so this
+#                    exists for the RemoteApp we are about to start.
+#   Z:               dockur mounts our /shared volume ($HOME) as a drive.
 echo
 echo "Opening $base in Windows..."
-if run_wa manual "$WINPATH"; then
-  echo
-  echo "Installer finished."
-  # Whatever it installed should now be in your launcher — re-detect so you
-  # never have to run anything yourself.
-  echo "Adding any newly installed Windows apps to your menu..."
-  manifest windows-vm --link >/dev/null 2>&1 || true
-  echo "Done — look for it in your app launcher."
-  exit 0
-fi
+WINPATH=
+for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
+  WINPATH="$p$base"
+  if run_wa manual "$WINPATH"; then
+    echo
+    echo "Installer finished."
+    # Whatever it installed should now be in your launcher — re-detect so you
+    # never have to run anything yourself.
+    echo "Adding any newly installed Windows apps to your menu..."
+    manifest windows-vm --link >/dev/null 2>&1 || true
+    echo "Done — look for it in your app launcher."
+    exit 0
+  fi
+done
 
 # Older WinApps (no `manual`), or the launch didn't take: fall back to the full
 # desktop so the file is still reachable by hand.
 echo "Couldn't open it as a single window — opening the Windows desktop instead." >&2
 echo "Your installer is inside Windows at:" >&2
 echo "    $WINPATH" >&2
+echo "    (also on the Shared folder on the desktop)" >&2
 run_wa windows || {{
     echo >&2
     echo "Couldn't open Windows yet. The usual reasons:" >&2
@@ -772,8 +782,12 @@ mod tests {
         // The share path must interpolate the real filename: `\$base` inside
         // double quotes prints a literal "$base", so the value is concatenated
         // outside the quoted literal instead.
-        assert!(s.contains(r#"Transfer\'"$base""#), "filename must expand: {s}");
+        assert!(s.contains(r#"WINPATH="$p$base""#), "filename must expand: {s}");
         assert!(!s.contains(r#"Transfer\$base""#), "an escaped $ would print literally: {s}");
+        // Both routes $HOME takes into the guest are tried: FreeRDP's own
+        // redirect, and the drive dockur maps our /shared volume to.
+        assert!(s.contains(r"'\\tsclient\home\Windows Transfer\'"), "{s}");
+        assert!(s.contains(r"'Z:\Windows Transfer\'"), "{s}");
         // winapps talks to docker itself, so it needs the group bridge too.
         assert!(s.contains("sg docker -c \"'$WA' $*\""), "{s}");
         // The installer must open as a RemoteApp — its own window — not as a
