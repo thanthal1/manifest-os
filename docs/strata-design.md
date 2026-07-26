@@ -711,10 +711,15 @@ shim.
 > scan.py flags it). Set up **on demand** — `manifest windows-vm` (never part of
 > `install`; it downloads and installs a whole Windows), then `manifest
 > windows-vm --link` after the install completes to create the app launchers.
-> 5 unit tests cover the generated compose + winapps.conf. **Verification gap:**
-> the container needs KVM and a real Windows licence/ISO, so this is
-> compile/dry-run verified only — real-hardware pending, like Waydroid rendering
-> was. **Still not built:** `vm-vfio` (GPU passthrough, §14.3) — the CAD path.
+> Opening an `.exe` runs it as a **RemoteApp** (`winapps manual <path>`) — its own
+> borderless window on the Linux desktop, no Windows shell, no taskbar, and no
+> browser viewer. The file is reached via `\\tsclient\home` (FreeRDP's redirect of
+> `$HOME` into the session) with `Z:` (dockur's `/shared` mount) as the fallback;
+> only if both fail does it open the full Windows desktop. When the installer
+> exits, `--link` re-runs automatically so whatever it installed lands in the
+> launcher without the user doing anything. **Verified on real hardware** through
+> the Windows download+install and app launch. **Still not built:** `vm-vfio`
+> (GPU passthrough, §14.3) — the CAD path.
 > Original design follows.
 >
 > Status (original): **idea / design.** The Linux strata (Phases 1–3) are the foundation
