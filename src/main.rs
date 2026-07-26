@@ -13,7 +13,7 @@ use manifest::manifest::Manifest;
 use manifest::probe::{Account, ExtraUser, InstallPlan, StaticIp};
 use manifest::{
     android, desktop, diff, export, history, install, installer, kernel, pacman, pkglock, strata,
-    survey, tui, update, wincompat, windows as winapps,
+    survey, tui, update, winapps, wincompat, windows as winapps_wine,
 };
 use std::path::PathBuf;
 
@@ -81,6 +81,20 @@ enum Command {
     /// Install Wine and the bits a Windows app needs. Run on demand the first
     /// time you open a Windows program — you don't need to run it yourself.
     WindowsSetup,
+    /// Set up the **Windows VM tier** for apps Wine can't run (CAD, kernel
+    /// anti-cheat, Store apps): a real Windows in a container, with individual
+    /// apps shown as normal windows via WinApps + FreeRDP. Long-running — it
+    /// installs Windows — so it's never part of `install`. Re-run with `--link`
+    /// once Windows has finished installing to add the app launchers.
+    WindowsVm {
+        /// Detect the installed Windows apps and create menu launchers. Run this
+        /// after the Windows install completes.
+        #[arg(long)]
+        link: bool,
+        /// Path to a manifest whose `windows.vm` settings to use (optional).
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// (internal) Compatibility hint for a Windows app, as `<verdict>|<reasons>`.
     /// Used by `windows-install` to decide whether to warn before installing;
     /// name matching is fuzzy, so it's advice, never a gate.
@@ -401,7 +415,26 @@ fn run() -> Result<()> {
         Command::WindowsSetup => {
             refuse_if_run_via_sudo("windows-setup")?;
             let ctx = Ctx::new(false);
-            winapps::setup(&ctx)
+            winapps_wine::setup(&ctx)
+        }
+        Command::WindowsVm { link, file } => {
+            refuse_if_run_via_sudo("windows-vm")?;
+            let ctx = Ctx::new(false);
+            if link {
+                return winapps::link_apps(&ctx);
+            }
+            // Take settings from a manifest when given one, else sensible defaults.
+            let vm = match &file {
+                Some(f) => {
+                    let (m, _) = load_manifest(f, None)?;
+                    m.windows
+                        .as_ref()
+                        .and_then(|w| w.vm.clone())
+                        .unwrap_or_default()
+                }
+                None => manifest::manifest::WindowsVm::default(),
+            };
+            winapps::setup(&vm, &ctx)
         }
         Command::WinCheck { app } => {
             let is_path = std::path::Path::new(&app).exists();
@@ -438,7 +471,7 @@ fn run() -> Result<()> {
                 "waydroid-arm-setup" => android::arm_setup_script().to_string(),
                 "manifest-install-gui" => android::gui_install_script().to_string(),
                 "strata-install" => strata::strata_install_script().to_string(),
-                "windows-install" => winapps::install_script().to_string(),
+                "windows-install" => winapps_wine::install_script().to_string(),
                 other => anyhow::bail!("unknown generated script: {other}"),
             };
             print!("{body}");

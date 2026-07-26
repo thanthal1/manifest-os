@@ -681,7 +681,7 @@ shim.
 
 ---
 
-## 14. Windows apps — the "windows stratum" (Phase 6a: wine tier implemented)
+## 14. Windows apps — the "windows stratum" (Phase 6a wine + 6b VM tier)
 
 > Status: **Phase 6a implemented — the `wine` tier + the compatibility oracle.**
 > [`src/wincompat.rs`](../src/wincompat.rs) answers "will this run under Wine?"
@@ -699,8 +699,23 @@ shim.
 > install, so a blocked app is reported with its reason rather than
 > half-installed (`"force": true` overrides). 15 unit tests. Example:
 > [`examples/reference/windows-wine.json`](../examples/reference/windows-wine.json).
-> **Not built:** the `vm-rdp`/`vm-vfio` tiers below — an app that needs one says
-> so clearly. Original design follows.
+> **Phase 6b — the VM tier** ([`src/winapps.rs`](../src/winapps.rs)): a real
+> Windows in a container (dockur/windows, unattended install) with individual
+> apps painted onto the desktop by **WinApps** over FreeRDP. **Licence boundary:
+> WinApps and dockur/windows are GPL-3.0 and this tree is MIT, so — exactly as
+> §1.3 rules out vendoring crossfs — we never copy their source here. We install
+> them as separate components (AUR `winapps-git`, else an upstream clone),
+> generate their config from the manifest, and drive their CLIs.** A `windows.vm`
+> block declares backend/version/RAM/CPUs/disk/user; the password is **generated**
+> unless declared (a password in a shared manifest is a credential leak, and
+> scan.py flags it). Set up **on demand** — `manifest windows-vm` (never part of
+> `install`; it downloads and installs a whole Windows), then `manifest
+> windows-vm --link` after the install completes to create the app launchers.
+> 5 unit tests cover the generated compose + winapps.conf. **Verification gap:**
+> the container needs KVM and a real Windows licence/ISO, so this is
+> compile/dry-run verified only — real-hardware pending, like Waydroid rendering
+> was. **Still not built:** `vm-vfio` (GPU passthrough, §14.3) — the CAD path.
+> Original design follows.
 >
 > Status (original): **idea / design.** The Linux strata (Phases 1–3) are the foundation
 > this reuses conceptually. This section is a plan, not a commitment; nothing here

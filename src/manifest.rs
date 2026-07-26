@@ -471,11 +471,64 @@ pub struct Windows {
     /// `dotnet48`). Per-app `winetricks` are added on top.
     #[serde(default)]
     pub winetricks: Vec<String>,
+
+    /// The **VM tier** (Phase 6b): a real Windows VM with individual apps painted
+    /// onto the Linux desktop over RDP. For everything Wine can't run. Set up on
+    /// demand (`manifest windows-vm`), never at install time — it's a multi-GB,
+    /// multi-minute Windows installation. See [`crate::winapps`].
+    pub vm: Option<WindowsVm>,
+}
+
+/// The Windows-VM tier's settings. Orchestrates **WinApps** (GPL, installed
+/// separately — never vendored into this MIT tree) over a container-hosted
+/// Windows, so individual apps appear as normal windows.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct WindowsVm {
+    /// How the VM is hosted: `docker` (default — dockur/windows automates the
+    /// Windows install), `podman`, or `libvirt` (you provide the VM).
+    #[serde(default)]
+    pub backend: Option<String>,
+
+    /// Windows edition for the automated install: `11`, `10`, `11e`/`10e` (LTSC),
+    /// `2022`/`2025` (Server). Defaults to `11`.
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// RAM for the VM (`8G`). Defaults to `4G`.
+    #[serde(default)]
+    pub ram: Option<String>,
+
+    /// vCPUs. Defaults to 4.
+    #[serde(default)]
+    pub cpus: Option<u32>,
+
+    /// Virtual disk size (`64G`). Defaults to `64G`.
+    #[serde(default)]
+    pub disk: Option<String>,
+
+    /// Windows account WinApps signs in with. Defaults to `manifest`.
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Its password. **Prefer leaving this out** — one is generated and stored
+    /// with 0600 perms in the user's WinApps config. A password written into a
+    /// shared manifest is a credential leak (the marketplace scanner flags it).
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl WindowsVm {
+    pub fn backend(&self) -> &str { self.backend.as_deref().unwrap_or("docker") }
+    pub fn version(&self) -> &str { self.version.as_deref().unwrap_or("11") }
+    pub fn ram(&self) -> &str { self.ram.as_deref().unwrap_or("4G") }
+    pub fn cpus(&self) -> u32 { self.cpus.unwrap_or(4) }
+    pub fn disk(&self) -> &str { self.disk.as_deref().unwrap_or("64G") }
+    pub fn username(&self) -> &str { self.username.as_deref().unwrap_or("manifest") }
 }
 
 impl Windows {
     pub fn is_empty(&self) -> bool {
-        self.apps.is_empty() && self.winetricks.is_empty()
+        self.apps.is_empty() && self.winetricks.is_empty() && self.vm.is_none()
     }
 }
 

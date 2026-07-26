@@ -376,6 +376,7 @@ mod tests {
                 app("Notepad++", None, Some("np/np.exe"), false),
             ],
             winetricks: vec![],
+            vm: None,
         };
         let plan = plan_apps(&w);
         assert_eq!(plan.len(), 2);
@@ -383,7 +384,7 @@ mod tests {
         assert_eq!(blocked.len(), 1, "only SolidWorks is blocked");
         assert_eq!(blocked[0].0.name, "SolidWorks");
         // force lets it through the gate.
-        let w2 = Windows { apps: vec![app("SolidWorks", None, None, true)], winetricks: vec![] };
+        let w2 = Windows { apps: vec![app("SolidWorks", None, None, true)], winetricks: vec![], vm: None };
         let plan2 = plan_apps(&w2);
         assert!(plan2[0].0.force, "forced app is still assessed but installable");
     }
