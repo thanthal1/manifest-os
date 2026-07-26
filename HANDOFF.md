@@ -217,7 +217,30 @@ produces "the window didn't open", so none of them are guessable from a log.
     `markWindowsBooted`, called only out of `finish()` — i.e. on container
     **shutdown**. It is absent for the entire life of a guest that has never
     been stopped, so gating anything on it (the idle watchdog, say) disables
-    that thing permanently. Ask RDP instead: `nc -z 127.0.0.1 3389`.
+    that thing permanently.
+18. **There is no cheap "is Windows installing?" signal — stop looking for one.**
+    Three were tried for the idle watchdog and two shipped broken in opposite
+    directions: the activity file alone (killed an install 16 min in),
+    `windows.boot` (§17, always absent → watchdog disabled for good), and
+    `nc -z 127.0.0.1 3389` (**always true** — docker publishes the port when the
+    *container* starts, so it answers for the whole 40 min Windows installs).
+    The answerable question is *"has anything **used** this VM since it
+    started?"* — local, always knowable, and false during an install by
+    construction. `should_stop()` is a shell function precisely so a test can
+    drive it with fabricated clocks; both broken versions pass every structural
+    assertion and fail that table.
+19. **To know whether Windows is really serving RDP, make it prove it.** Send an
+    X.224 Connection Request; a real RDP server replies with a Connection
+    Confirm (`03 00 …`), docker's proxy accepts and returns nothing. That is the
+    only dependable readiness check here — the image may report no healthcheck
+    at all. `windows-vm-run`'s `rdp_ready()` does this.
+20. **Windows' automatic sign-in has to be off** (§16). Appended to the
+    `C:\OEM\install.bat` we already write — `AutoAdminLogon=0`, and delete
+    `DefaultPassword` + `AutoLogonCount` (dockur sets `LogonCount` 65432). It
+    runs as a **FirstLogonCommand**, i.e. inside the session it disables, so it
+    takes effect on the guest's *next* boot: the first restart after
+    installation is what frees the console. Cost: `http://localhost:8006` lands
+    on a lock screen, so setup says why.
 
 Engine gate: strata/Android orchestration is unit + dry-run + (strata) VM-verified;
 **Android/Waydroid rendering is real-hardware-only** (VBox GL 2.1 can't run gralloc).
