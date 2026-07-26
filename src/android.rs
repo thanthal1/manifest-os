@@ -391,6 +391,8 @@ done
 /// file manager (or `xdg-open`) installs it into Waydroid via `android-install`,
 /// and make that handler the **default** for those types (merged into the XDG
 /// system defaults so double-click Just Works in any compliant file manager).
+pub fn refresh_file_handlers(ctx: &Ctx) -> Result<()> { write_mime(ctx) }
+
 fn write_mime(ctx: &Ctx) -> Result<()> {
     println!("  · registering .apk/.apkm/.apks/.xapk → open with Waydroid");
     ctx.write_root(MIME_XML, mime_xml())?;

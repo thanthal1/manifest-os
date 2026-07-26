@@ -95,6 +95,12 @@ enum Command {
         /// Which script: android-install | waydroid-launch | strata-install.
         name: String,
     },
+    /// (internal) Regenerate the shell integration (command-not-found) and the
+    /// file-manager handlers/defaults. Run by a pacman PostTransaction hook on
+    /// every `manifest-os` upgrade, so these track the installed binary without
+    /// a manual `manifest strata add` / `manifest android` re-run.
+    #[command(name = "__refresh-integration", hide = true)]
+    RefreshIntegration,
     /// Re-apply an edited manifest to the running system. Installs whatever the
     /// edit added — packages, a desktop, a theme, keybindings — and switches the
     /// default desktop if `desktop` changed. Idempotent; safe to re-run.
@@ -371,6 +377,17 @@ fn run() -> Result<()> {
             }
             let ctx = Ctx::new(dry_run);
             update::run(&ctx)
+        }
+        Command::RefreshIntegration => {
+            let ctx = Ctx::new(false);
+            // Shell integration + .deb/.rpm handler + the GUI wrapper + defaults.
+            strata::write_cnf_handler(&ctx)?;
+            // Android file handlers too, but only where Waydroid is actually set
+            // up (otherwise we'd claim .apk types on a system with no Android).
+            if std::path::Path::new("/var/lib/waydroid/waydroid.cfg").exists() {
+                android::refresh_file_handlers(&ctx)?;
+            }
+            Ok(())
         }
         Command::Script { name } => {
             let body = match name.as_str() {

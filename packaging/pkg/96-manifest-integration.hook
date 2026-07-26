@@ -1,0 +1,14 @@
+# Managed by the manifest-os package — regenerate the shell integration and
+# file-manager handlers whenever the engine is upgraded, so `pacman -Syu` alone
+# keeps them current (they used to need a manual `manifest strata add` /
+# `manifest android` re-run). PostTransaction: it can never abort a transaction.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = manifest-os
+
+[Action]
+Description = Refreshing Manifest OS shell + file-manager integration...
+When = PostTransaction
+Exec = /usr/bin/manifest __refresh-integration
