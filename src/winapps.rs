@@ -399,6 +399,12 @@ fn wipe_storage_fn() -> &'static str {
              sudo -n rm -rf \"$1\" >/dev/null 2>&1 || true
          fi
          rmdir \"$1\" 2>/dev/null || true
+         # A reinstalled Windows generates a NEW RDP certificate, and FreeRDP
+         # pins the old one. Our own launches pass /cert:ignore, but WinApps'
+         # connection test uses /cert:tofu, which refuses a *changed* key --
+         # \"NEW HOST IDENTIFICATION\" then ERRCONNECT_TLS_CONNECT_FAILED, with
+         # nothing pointing at the stale pin as the cause.
+         rm -f \"${XDG_CONFIG_HOME:-$HOME/.config}\"/freerdp/server/127.0.0.1_3389.pem 2>/dev/null || true
          # Empty is as good as gone: docker recreates the bind-mount directory.
          [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]
      }
@@ -518,11 +524,19 @@ list_apps() {{
 # desktop, no Windows taskbar, no browser tab — which is the entire point of
 # this tier.
 #
-# Two ways your home reaches the guest, and which one is live depends on how
-# the session came up, so try both:
-#   \\tsclient\home  FreeRDP redirects $HOME into the session itself, so this
-#                    exists for the RemoteApp we are about to start.
-#   Z:               dockur mounts our /shared volume ($HOME) as a drive.
+# Two ways your home reaches the guest. Z: FIRST, and the order matters:
+#   Z:               dockur mounts our /shared volume ($HOME) as a drive inside
+#                    the guest. Always there, needs nothing from the client.
+#                    This is the one that works -- verified painting a real
+#                    RAIL window on real hardware.
+#   \\tsclient\home  FreeRDP's own redirection of $HOME into the session. Only
+#                    exists if the client enables drive redirection, and we do
+#                    not pass `+home-drive`, so the path does not resolve, the
+#                    RemoteApp never starts, and no window is ever created.
+#                    Kept as a fallback for a guest without the /shared mount.
+# Getting this order wrong is invisible: the failing attempt still holds the
+# connection open for ~20s, which the duration check below reads as success, so
+# the working path is never reached.
 echo
 echo "Opening $base in Windows..."
 : > "$WALOG" 2>/dev/null || true
@@ -541,7 +555,7 @@ opened=0
 # Windows desktop, and a launcher for an app nobody installed. Don't attempt
 # what the guest cannot do -- the reinstall offer below is the actual fix.
 if [ -f "$VMDIR/.remoteapp-enabled" ]; then
-  for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
+  for p in 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; do
     WINPATH="$p$base"
     t0=$(date +%s)
     run_wa manual "$WINPATH"
@@ -1400,10 +1414,19 @@ mod tests {
         // outside the quoted literal instead.
         assert!(s.contains(r#"WINPATH="$p$base""#), "filename must expand: {s}");
         assert!(!s.contains(r#"Transfer\$base""#), "an escaped $ would print literally: {s}");
-        // Both routes $HOME takes into the guest are tried: FreeRDP's own
-        // redirect, and the drive dockur maps our /shared volume to.
-        assert!(s.contains(r"'\\tsclient\home\Windows Transfer\'"), "{s}");
-        assert!(s.contains(r"'Z:\Windows Transfer\'"), "{s}");
+        // Both routes $HOME takes into the guest are tried, and Z: goes FIRST.
+        // It is dockur's /shared mount: always present, needs nothing from the
+        // client, and verified painting a real RAIL window on real hardware.
+        // \\tsclient\home needs drive redirection we don't ask for, so the path
+        // doesn't resolve and no window is ever created -- but that attempt
+        // still holds the connection ~20s, which the duration check reads as
+        // success, so with the order reversed the working path is never tried.
+        let z = s.find(r"'Z:\Windows Transfer\'").expect("Z: path");
+        let tsclient = s.find(r"'\\tsclient\home\Windows Transfer\'").expect("tsclient path");
+        assert!(z < tsclient, "the share that works must be tried first:\n{s}");
+        // A reinstall regenerates the guest's RDP certificate; WinApps' own
+        // connection test uses /cert:tofu, which refuses a CHANGED key.
+        assert!(s.contains("freerdp/server/127.0.0.1_3389.pem"), "clear the stale pin: {s}");
         // winapps talks to docker itself, so it needs the group bridge too.
         assert!(s.contains("sg docker -c \"'$WA' $*\""), "{s}");
         // The installer must open as a RemoteApp — its own window — not as a
