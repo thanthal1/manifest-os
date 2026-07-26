@@ -135,22 +135,29 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 /// Second phase, after Windows has finished installing: ask WinApps to detect
 /// the installed applications and write a `.desktop` for each.
 pub fn link_apps(ctx: &Ctx) -> Result<()> {
-    // Windows has to be up for WinApps to enumerate what's installed.
+    // WinApps' wizard needs `dialog`; installing it here means `--link` works
+    // even if the VM was set up by an older version that didn't pull it in.
+    println!("  · checking WinApps' dependencies");
+    ctx.sudo(
+        "pacman",
+        &["-S", "--needed", "--noconfirm", "dialog", "gawk", "curl", "openbsd-netcat", "freerdp"],
+    )?;
+
     println!("  · checking the Windows container is running");
-    // Same group caveat as `up`: try the session, then `sg docker`, then root.
     ctx.shell(
-        "ps() { docker ps --filter name=manifest-windows --format '{{.Names}} {{.Status}}'; }; \
-         ps 2>/dev/null || sg docker -c \"docker ps --filter name=manifest-windows \
-         --format '{{.Names}} {{.Status}}'\" 2>/dev/null \
-         || sudo docker ps --filter name=manifest-windows --format '{{.Names}} {{.Status}}' 2>/dev/null \
-         || echo '  · could not query docker — is the container running?' >&2",
+        &format!(
+            "{docker}             st=$(dk ps --filter name=manifest-windows --format '{{{{.Names}}}} {{{{.Status}}}}' 2>/dev/null)
+             if [ -n \"$st\" ]; then echo \"  · container: $st\"; 
+             else echo '  ! the Windows container is not running — start it with: manifest windows-vm' >&2; fi
+",
+            docker = docker_fn()
+        ),
         false,
     )?;
+
     println!("  · asking WinApps to detect installed Windows apps");
-    // WinApps' installer generates the per-app launchers; `--user` keeps them in
-    // the user's own applications dir. Same group caveat as `up`.
     ctx.shell(
-        "winapps-setup --user 2>/dev/null || sg docker -c 'winapps-setup --user' 2>/dev/null          || winapps-setup || true",
+        "winapps-setup 2>/dev/null || sg docker -c 'winapps-setup' || {            echo '  ! winapps-setup failed. If it mentions docker permissions, log out' >&2;            echo '    and back in once, then re-run: manifest windows-vm --link' >&2; }",
         false,
     )?;
     println!("  · done — installed Windows apps should now appear in your menu");
@@ -159,7 +166,11 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
 
 /// Host packages the tier needs. FreeRDP is the actual window transport.
 fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
-    let mut pkgs = vec!["freerdp", "iproute2", "libnotify", "git"];
+    // `dialog` drives WinApps' setup wizard; gawk/curl/netcat are used by its
+    // scripts. Missing any of them fails only at `--link`, long after setup.
+    let mut pkgs = vec![
+        "freerdp", "iproute2", "libnotify", "git", "dialog", "gawk", "curl", "openbsd-netcat",
+    ];
     match vm.backend() {
         "podman" => pkgs.extend(["podman", "podman-compose"]),
         "libvirt" => pkgs.extend(["libvirt", "qemu-full", "virt-manager"]),
