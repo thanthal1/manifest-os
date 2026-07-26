@@ -456,25 +456,27 @@ if [ "$state" != "true" ]; then
     echo "windows-vm-run: could not start the Windows container" >&2; exit 1; }}
 fi
 
-# 3. Give Windows a moment to be ready — but never insist. The image may not
-#    define a healthcheck at all (the field comes back empty), and a TCP probe of
-#    3389 is useless because docker publishes that port before Windows listens on
-#    it. So: wait *if* health is reported, otherwise just get on with it and let
-#    the actual launch be the test.
-health() {{ dk inspect -f '{{{{.State.Health.Status}}}}' WinApps 2>/dev/null | tr -d '
-'; }}
-h=$(health)
-case "$h" in
-  healthy) ;;                       # ready
-  ""|"<no value>") ;;               # image reports no health — don't block on it
-  *)
-    echo "Waiting for Windows to be ready..."
-    i=0
-    while [ $i -lt 60 ]; do          # ~2 minutes, then try anyway
-      [ "$(health)" = "healthy" ] && break
-      i=$((i+1)); sleep 2
-    done ;;
-esac
+# 3. Wait until Windows is actually serving RDP.
+#
+#    A plain TCP connect to 3389 proves nothing: docker publishes that port when
+#    the CONTAINER starts, so it answers throughout the ~40 minutes Windows is
+#    installing. Ask the RDP server to identify itself instead -- an X.224
+#    Connection Request gets a Connection Confirm (starts 03 00) only from a real
+#    RDP server, and nothing at all from docker's proxy. The image may not define
+#    a healthcheck at all, so this is the only dependable readiness signal here.
+rdp_ready() {{
+  printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' \
+    | timeout 5 nc 127.0.0.1 3389 2>/dev/null | head -c 2 | od -An -tx1 | tr -d ' \n' \
+    | grep -q '^0300'
+}}
+if ! rdp_ready; then
+  echo "Waiting for Windows to be ready..."
+  i=0
+  while [ $i -lt 60 ]; do            # ~2 minutes, then try anyway
+    rdp_ready && break
+    i=$((i+1)); sleep 2
+  done
+fi
 
 # 3b. First time Windows is ready: finish WinApps setup ourselves. You should
 #     never have to run a command to make this work.
@@ -1375,14 +1377,18 @@ mod tests {
         assert!(s.contains("isn't set up yet"), "{s}");
         assert!(s.contains("manifest windows-vm"), "first-run setup: {s}");
         assert!(s.contains("dk start WinApps"), "lazy start: {s}");
-        // Readiness uses the image's healthcheck, NOT a TCP probe of 3389 —
-        // docker publishes that port before Windows is listening on it.
+        // Readiness asks the RDP server to identify itself. A plain TCP connect
+        // proves nothing — docker publishes 3389 when the CONTAINER starts, so
+        // it answers for the whole ~40 minutes Windows is installing (measured:
+        // "connection succeeded" while the log still read "Downloading Windows
+        // 11"). An X.224 Connection Request gets a Confirm, starting 03 00, only
+        // from a real RDP server. The image's healthcheck isn't usable either —
+        // it may report nothing at all.
         assert!(s.contains("Waiting for Windows to be ready"), "{s}");
-        assert!(s.contains(".State.Health.Status"), "health-based readiness: {s}");
+        assert!(s.contains("rdp_ready"), "readiness must probe the RDP server: {s}");
+        assert!(s.contains("'^0300'"), "an X.224 Connection Confirm, not a bare connect: {s}");
         assert!(!s.contains("/dev/tcp/127.0.0.1/3389"), "TCP probe is a false positive: {s}");
-        // An image that reports NO health must not block us — that produced a
-        // "still installing" message while Windows was visibly running.
-        assert!(s.contains(r#""<no value>") ;;"#), "empty health must not block: {s}");
+        assert!(!s.contains("nc -z"), "a bare connect answers while Windows installs: {s}");
         // If the launch does fail, explain the real causes (install still
         // running, RDP not up yet, docker group) rather than one guess.
         assert!(s.contains("still installing"), "{s}");
