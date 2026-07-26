@@ -401,7 +401,7 @@ CORE_KEYS = {
     "schema_version", "meta", "system", "repos", "packages", "services",
     "dotfiles", "desktop", "display_manager", "boot", "variables", "survey",
     "settings", "conditional_packages", "conditional", "detect", "users",
-    "files", "snippets", "flatpak", "strata", "android", "defaults", "wallpaper", "keybindings",
+    "files", "snippets", "flatpak", "strata", "android", "windows", "defaults", "wallpaper", "keybindings",
     "gestures", "theme", "display", "login", "pre_install", "post_install", "plugins",
 }
 
@@ -594,6 +594,53 @@ def scan_android(m, rep):
                     "APK/APKM path.", where)
 
 
+def scan_windows(m, rep):
+    w = m.get("windows")
+    if not w or not isinstance(w, dict):
+        return
+    # Wine runs unsandboxed Windows binaries as your user — worth surfacing.
+    if w.get("apps"):
+        rep.add("MEDIUM", "windows", "installs Windows applications",
+                "Windows programs run under Wine with your user's permissions "
+                "and full access to your files. Confirm the sources are trusted.",
+                "windows.apps")
+    for i, a in enumerate(w.get("apps", []) or []):
+        if not isinstance(a, dict):
+            continue
+        src = str(a.get("installer", ""))
+        where = f"windows.apps[{i}]"
+        if src.startswith("http://"):
+            rep.add("HIGH", "insecure URL", f"plain-HTTP Windows installer `{src}`",
+                    "An executable fetched over unencrypted HTTP can be swapped "
+                    "in transit.", where)
+        elif src.startswith("http"):
+            rep.add("MEDIUM", "windows", f"downloads an installer from `{src}`",
+                    "A downloaded .exe is unreviewed third-party code. Confirm "
+                    "the vendor and URL.", where)
+        if a.get("force"):
+            rep.add("LOW", "windows", f"`force` overrides the compatibility check for `{a.get('name','?')}`",
+                    "The installer was flagged as unlikely to work (or as "
+                    "bundling a kernel driver) and the check was overridden.",
+                    where)
+
+    vm = w.get("vm")
+    if isinstance(vm, dict):
+        rep.add("MEDIUM", "windows", "sets up a Windows VM (WinApps)",
+                "Downloads and runs a full Windows in a container with your home "
+                "directory shared into it, and installs GPL third-party tooling "
+                "(WinApps, dockur/windows). Confirm this is intended.", "windows.vm")
+        # Credentials must not travel in a shared manifest.
+        if vm.get("password"):
+            rep.add("HIGH", "credentials", "Windows VM password in the manifest",
+                    "Anyone with this manifest gets the VM's password. Omit it — "
+                    "one is generated and stored with 0600 perms.", "windows.vm.password")
+        if vm.get("product_key"):
+            rep.add("HIGH", "credentials", "Windows product key in the manifest",
+                    "A product key is a licence credential; sharing this manifest "
+                    "shares your key. Omit it and enter it when prompted.",
+                    "windows.vm.product_key")
+
+
 def scan(manifest, check_packages=False):
     rep = Report()
     if not isinstance(manifest, dict):
@@ -608,6 +655,7 @@ def scan(manifest, check_packages=False):
     scan_repos_boot(manifest, rep)
     scan_strata(manifest, rep)
     scan_android(manifest, rep)
+    scan_windows(manifest, rep)
     scan_packages(manifest, rep, check=check_packages)
     return rep
 

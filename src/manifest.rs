@@ -515,6 +515,18 @@ pub struct WindowsVm {
     /// shared manifest is a credential leak (the marketplace scanner flags it).
     #[serde(default)]
     pub password: Option<String>,
+
+    /// Your Windows **product key**. Optional: Windows installs and runs without
+    /// one, just with the "Activate Windows" watermark and personalisation
+    /// locked. Supply a key you own to clear that. **Prefer leaving it out of a
+    /// shared manifest** — it's a licence credential (the scanner flags it); the
+    /// setup command asks for it interactively instead.
+    #[serde(default)]
+    pub product_key: Option<String>,
+
+    /// Install language, e.g. `English`, `German`, `French`. Defaults to English.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl WindowsVm {
