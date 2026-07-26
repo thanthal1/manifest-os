@@ -116,7 +116,28 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
             ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/install.bat")), debloat_bat())?;
             ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/debloat.ps1")), debloat_ps1())?;
         }
-        ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose_yaml(vm, &pass))?;
+        let compose = compose_yaml(vm, &pass);
+        ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
+        // WinApps reads ~/.config/winapps/compose.yaml — the path is hardcoded in
+        // its script, not configurable — and it inspects a container hardcoded to
+        // the name "WinApps". Without both, it exits "no such object: WinApps"
+        // before it ever tries RDP. Same file, same absolute volumes, so the two
+        // copies describe one container over one disk.
+        ctx.write_user(&expand(&format!("{WINAPPS_CONF_DIR}/compose.yaml")), &compose)?;
+
+        // An earlier setup named the container manifest-windows. Retire it, or it
+        // holds ports 3389/8006 and WinApps still can't find what it's looking
+        // for. The Windows disk lives in the storage volume, so nothing is lost.
+        ctx.shell(
+            &format!(
+                "{docker}                 if dk inspect manifest-windows >/dev/null 2>&1; then                   echo '  · renaming the Windows container to what WinApps expects (your Windows install is kept)'
+                   dk stop manifest-windows >/dev/null 2>&1 || true
+                   dk rm manifest-windows >/dev/null 2>&1 || true
+                 fi",
+                docker = docker_fn()
+            ),
+            false,
+        )?;
         println!("  · starting the Windows container (first run installs Windows)");
         let up = if backend == "podman" {
             format!("cd \"{COMPOSE_DIR}\" && podman compose up -d")
@@ -158,7 +179,7 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
     println!("  · checking the Windows container is running");
     ctx.shell(
         &format!(
-            "{docker}             st=$(dk ps --filter name=manifest-windows --format '{{{{.Names}}}} {{{{.Status}}}}' 2>/dev/null)
+            "{docker}             st=$(dk ps --filter name=WinApps --format '{{{{.Names}}}} {{{{.Status}}}}' 2>/dev/null)
              if [ -n \"$st\" ]; then echo \"  · container: $st\"; 
              else echo '  ! the Windows container is not running — start it with: manifest windows-vm' >&2; fi
 ",
@@ -269,11 +290,29 @@ if [ ! -f "$VMDIR/compose.yaml" ]; then
   esac
 fi
 
+# 1b. Migrate a setup made before we knew what WinApps requires. Two things are
+#     hardcoded in its script and not configurable: the container must be named
+#     "WinApps", and it reads its OWN ~/.config/winapps/compose.yaml. An older
+#     compose satisfies neither, so winapps quits with "no such object: WinApps"
+#     without ever reaching RDP. compose.yaml is a file written at setup time,
+#     so a package upgrade cannot fix it -- do it here, where it is noticed.
+if [ -f "$VMDIR/compose.yaml" ] && ! grep -q 'container_name: WinApps' "$VMDIR/compose.yaml" 2>/dev/null; then
+  echo "Updating the Windows VM to work with WinApps (your Windows install is kept)..."
+  # Volumes become absolute at the same time: the file now lives in two
+  # directories, and a relative path would mean a different disk in each.
+  sed -i "s|container_name: manifest-windows|container_name: WinApps|; s|- \./storage:/storage|- $VMDIR/storage:/storage|; s|- \./oem:/oem|- $VMDIR/oem:/oem|" "$VMDIR/compose.yaml" 2>/dev/null || true
+  # The old container still holds 3389/8006, and the disk is in the volume.
+  dk stop manifest-windows >/dev/null 2>&1 || true
+  dk rm manifest-windows >/dev/null 2>&1 || true
+fi
+mkdir -p "$HOME/.config/winapps" 2>/dev/null || true
+cp -f "$VMDIR/compose.yaml" "$HOME/.config/winapps/compose.yaml" 2>/dev/null || true
+
 # 2. Lazy start: the VM is not kept running, so bring it up on demand.
-state=$(dk inspect -f '{{{{.State.Running}}}}' manifest-windows 2>/dev/null || echo missing)
+state=$(dk inspect -f '{{{{.State.Running}}}}' WinApps 2>/dev/null || echo missing)
 if [ "$state" != "true" ]; then
   echo "Starting Windows (this takes a moment)..."
-  dk start manifest-windows >/dev/null 2>&1 || (cd "$VMDIR" && dk compose up -d) || {{
+  dk start WinApps >/dev/null 2>&1 || (cd "$VMDIR" && dk compose up -d) || {{
     echo "windows-vm-run: could not start the Windows container" >&2; exit 1; }}
 fi
 
@@ -282,7 +321,7 @@ fi
 #    3389 is useless because docker publishes that port before Windows listens on
 #    it. So: wait *if* health is reported, otherwise just get on with it and let
 #    the actual launch be the test.
-health() {{ dk inspect -f '{{{{.State.Health.Status}}}}' manifest-windows 2>/dev/null | tr -d '
+health() {{ dk inspect -f '{{{{.State.Health.Status}}}}' WinApps 2>/dev/null | tr -d '
 '; }}
 h=$(health)
 case "$h" in
@@ -443,7 +482,7 @@ pub fn vm_idle_script(minutes: u32) -> String {
 IDLE={secs}
 [ "$IDLE" -eq 0 ] && exit 0   # 0 = never auto-stop
 {docker}
-state=$(dk inspect -f '{{{{.State.Running}}}}' manifest-windows 2>/dev/null || echo missing)
+state=$(dk inspect -f '{{{{.State.Running}}}}' WinApps 2>/dev/null || echo missing)
 [ "$state" = "true" ] || exit 0    # not running, nothing to do
 # A live FreeRDP client means an app is on screen — keep it up.
 if pgrep -x xfreerdp >/dev/null 2>&1 || pgrep -x xfreerdp3 >/dev/null 2>&1; then
@@ -456,7 +495,7 @@ last=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
 [ "$last" -eq 0 ] && {{ mkdir -p "$(dirname "$ACT")"; : > "$ACT"; exit 0; }}
 if [ $((now - last)) -ge "$IDLE" ]; then
   echo "windows-vm-idle: stopping the idle Windows VM"
-  dk stop manifest-windows >/dev/null 2>&1 || true
+  dk stop WinApps >/dev/null 2>&1 || true
 fi
 "####,
         secs = secs,
@@ -480,9 +519,13 @@ pub fn compose_yaml(vm: &WindowsVm, password: &str) -> String {
         .unwrap_or_default();
     // dockur copies /oem into the guest and runs install.bat during setup — the
     // supported hook for post-install tweaks like debloating.
+    // Absolute, not `./oem`: WinApps insists on reading a compose file from its
+    // own directory (~/.config/winapps/compose.yaml, hardcoded), so the same
+    // file is written in two places. Relative volumes would resolve against
+    // whichever directory the file happens to sit in and silently split the
+    // Windows disk across two locations.
     let oem_line = if vm.debloat.unwrap_or(true) {
-        "      - ./oem:/oem
-".to_string()
+        format!("      - {COMPOSE_DIR}/oem:/oem\n")
     } else {
         String::new()
     };
@@ -500,7 +543,7 @@ pub fn compose_yaml(vm: &WindowsVm, password: &str) -> String {
          services:\n  \
            windows:\n    \
              image: dockurr/windows\n    \
-             container_name: manifest-windows\n    \
+             container_name: WinApps\n    \
              environment:\n      \
                VERSION: \"{version}\"\n      \
                RAM_SIZE: \"{ram}\"\n      \
@@ -520,7 +563,7 @@ pub fn compose_yaml(vm: &WindowsVm, password: &str) -> String {
                - 3389:3389/tcp   # RDP — how apps are painted onto your desktop\n      \
                - 3389:3389/udp\n    \
              volumes:\n      \
-               - ./storage:/storage\n      \
+               - {COMPOSE_DIR}/storage:/storage\n      \
                - ${{HOME}}:/shared\n\
          {oem_line}    \
              restart: on-failure\n    \
@@ -557,6 +600,10 @@ pub fn winapps_conf(vm: &WindowsVm, password: &str) -> String {
          # own loopback VM, reconnect quietly, and full-screen if a desktop is\n\
          # ever opened. RemoteApp windows are borderless regardless.\n\
          RDP_FLAGS=\"/dynamic-resolution /cert:ignore +auto-reconnect\"\n\
+         # A RemoteApp window is already borderless and should size itself, so\n\
+         # only the full-desktop fallback goes full-screen.\n\
+         RDP_FLAGS_WINDOWS=\"/cert:ignore +auto-reconnect /f\"\n\
+         RDP_FLAGS_NON_WINDOWS=\"/dynamic-resolution /cert:ignore +auto-reconnect\"\n\
          MULTIMON=\"false\"\n\
          DEBUG=\"true\"\n\
          FREERDP_COMMAND=\"xfreerdp3\"\n",
@@ -785,13 +832,36 @@ mod tests {
 {c}");
     }
 
+    /// WinApps hardcodes BOTH of these -- `readonly CONTAINER_NAME="WinApps"`
+    /// and `readonly COMPOSE_PATH="${HOME}/.config/winapps/compose.yaml"`.
+    /// Neither is configurable, and getting either wrong makes it exit
+    /// "no such object: WinApps" before it ever attempts RDP.
+    #[test]
+    fn container_and_compose_match_what_winapps_hardcodes() {
+        let c = compose_yaml(&vm(), "p");
+        assert!(c.contains("container_name: WinApps"), "winapps only inspects this name: {c}");
+        let s = vm_run_script();
+        // A setup made before we knew this must repair itself -- compose.yaml is
+        // written once at setup time, so a package upgrade never touches it.
+        assert!(s.contains("container_name: WinApps"), "detects the stale compose: {s}");
+        assert!(s.contains("dk rm manifest-windows"), "retires the old container: {s}");
+        assert!(s.contains(".config/winapps/compose.yaml"), "puts compose where winapps looks: {s}");
+    }
+
     #[test]
     fn debloat_is_on_by_default_and_optional() {
         // Default on: this VM runs one app, so the consumer extras are overhead.
-        assert!(compose_yaml(&vm(), "p").contains("./oem:/oem"), "oem hook mounted by default");
+        assert!(compose_yaml(&vm(), "p").contains("/oem:/oem"), "oem hook mounted by default");
         let mut v = vm();
         v.debloat = Some(false);
-        assert!(!compose_yaml(&v, "p").contains("./oem:/oem"), "opt-out leaves Windows stock");
+        assert!(!compose_yaml(&v, "p").contains("/oem:/oem"), "opt-out leaves Windows stock");
+        // Volumes must be ABSOLUTE: the same compose file is written to two
+        // directories (ours and the one WinApps hardcodes), and a relative path
+        // would resolve differently in each -- two storage dirs, two Windows
+        // installs, neither of them the one the user set up.
+        let c = compose_yaml(&vm(), "p");
+        assert!(!c.contains("- ./"), "relative volumes split the disk in two: {c}");
+        assert!(c.contains("$HOME/.local/share/manifest-os/windows-vm/storage:/storage"), "{c}");
     }
 
     #[test]
@@ -834,7 +904,7 @@ mod tests {
         // First use sets the VM up; after that it only STARTS it on demand.
         assert!(s.contains("isn't set up yet"), "{s}");
         assert!(s.contains("manifest windows-vm"), "first-run setup: {s}");
-        assert!(s.contains("dk start manifest-windows"), "lazy start: {s}");
+        assert!(s.contains("dk start WinApps"), "lazy start: {s}");
         // Readiness uses the image's healthcheck, NOT a TCP probe of 3389 —
         // docker publishes that port before Windows is listening on it.
         assert!(s.contains("Waiting for Windows to be ready"), "{s}");
@@ -916,7 +986,7 @@ mod tests {
         assert!(s.contains("IDLE=1800"), "30 min: {s}");
         // A live FreeRDP client means an app is on screen — must not stop.
         assert!(s.contains("pgrep -x xfreerdp"), "{s}");
-        assert!(s.contains("dk stop manifest-windows"), "{s}");
+        assert!(s.contains("dk stop WinApps"), "{s}");
         // 0 disables auto-stop entirely.
         let z = vm_idle_script(0);
         assert!(z.contains("IDLE=0") && z.contains("[ \"$IDLE\" -eq 0 ] && exit 0"), "{z}");
