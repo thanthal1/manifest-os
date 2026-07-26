@@ -281,8 +281,108 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
     // machines where the system-wide path isn't available.
     println!("  · installing WinApps and detecting your Windows apps");
     ctx.shell(link_install_step(), false)?;
+    // WinApps only writes launchers for apps in its own hardcoded catalog, so
+    // anything it has never heard of — Inventor, and most things — gets no menu
+    // entry at all. Enumerate the guest's Start Menu ourselves.
+    println!("  · finding the apps installed in Windows");
+    ctx.write_user(&expand("$HOME/Windows Transfer/.manifest-enum-apps.ps1"), ENUM_APPS_PS1)?;
+    ctx.shell(&enum_apps_step(), false)?;
+    match write_app_launchers() {
+        Ok(0) => println!("  · no Windows apps found yet — install one, then re-run --link"),
+        Ok(n) => println!("  · {n} Windows apps added to your menu"),
+        Err(e) => println!("  ! couldn't read the app list from Windows: {e}"),
+    }
     println!("  · done — installed Windows apps should now appear in your menu");
     Ok(())
+}
+
+/// Enumerate the guest's Start Menu. Runs *in* Windows and writes a TSV onto
+/// the shared drive, which is the user's own home — so the Linux side reads a
+/// local file rather than paying an RDP round trip per app.
+const ENUM_APPS_PS1: &str = r#"$out = 'Z:\.manifest-apps.tsv'
+$dirs = @(
+  "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+)
+$sh = New-Object -ComObject WScript.Shell
+$rows = foreach ($d in $dirs) {
+  Get-ChildItem -Path $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $t = $sh.CreateShortcut($_.FullName).TargetPath
+      if ($t -and $t -match '\.exe$' -and (Test-Path $t)) {
+        if ($_.BaseName -notmatch 'uninstall|readme|help|licen|documentation|release notes|repair|modify') {
+          "{0}`t{1}" -f $_.BaseName, $t
+        }
+      }
+    } catch { }
+  }
+}
+$rows | Sort-Object -Unique | Set-Content -Path $out -Encoding UTF8
+"#;
+
+/// Run the enumerator in the guest. Pure — unit-tested.
+fn enum_apps_step() -> String {
+    // Ends in tsdiscon: a RemoteApp session does not close when its program
+    // exits, so without it this sits until the timeout.
+    r#"CONF="$HOME/.config/winapps/winapps.conf"
+       [ -r "$CONF" ] || exit 0
+       RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
+       . "$CONF" 2>/dev/null || true
+       [ -n "$RDP_USER" ] || exit 0
+       rm -f "$HOME/.manifest-apps.tsv"
+       timeout 120 "${FREERDP_COMMAND:-xfreerdp3}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+         /v:127.0.0.1:3389 \
+         '/app:program:C:\Windows\System32\cmd.exe,cmd:/C copy /Y "Z:\Windows Transfer\.manifest-enum-apps.ps1" "%TEMP%\ea.ps1" >nul && powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\ea.ps1" & tsdiscon' \
+         >/dev/null 2>&1 || true
+       true"#
+        .to_string()
+}
+
+/// Turn the guest's app list into `.desktop` launchers. Returns how many.
+fn write_app_launchers() -> Result<usize> {
+    let tsv = std::fs::read_to_string(expand("$HOME/.manifest-apps.tsv"))?;
+    let dir = expand("$HOME/.local/share/applications");
+    std::fs::create_dir_all(&dir)?;
+    let mut n = 0;
+    for line in tsv.trim_start_matches('\u{feff}').lines() {
+        let Some((name, target)) = line.split_once('\t') else { continue };
+        let (name, target) = (name.trim(), target.trim());
+        if name.is_empty() || target.is_empty() || !is_user_app(target) {
+            continue;
+        }
+        let slug = slugify(name);
+        let entry = format!(
+            "[Desktop Entry]\nType=Application\nName={name}\n\
+             Comment=Windows app (Manifest OS Windows VM)\n\
+             Exec=windows-vm-run '{target}'\nTryExec=/usr/local/bin/windows-vm-run\n\
+             Icon=applications-other\nTerminal=false\nCategories=Windows;\n"
+        );
+        std::fs::write(format!("{dir}/manifest-winvm-app-{slug}.desktop"), entry)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Whether a Start Menu target is something the user installed, rather than a
+/// Windows accessory. Nobody sets up a Windows VM to get Character Map.
+/// Pure — unit-tested.
+fn is_user_app(target: &str) -> bool {
+    let t = target.to_ascii_lowercase().replace('/', "\\");
+    !(t.contains("\\windows\\") || t.contains("\\system32\\") || t.contains("\\syswow64\\"))
+}
+
+/// A filename-safe slug for a `.desktop` name. Pure — unit-tested.
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let s = out.trim_matches('-').to_string();
+    if s.is_empty() { "app".into() } else { s }
 }
 
 /// Host packages the tier needs. FreeRDP is the actual window transport.
@@ -465,9 +565,20 @@ pub fn vm_run_script() -> String {
     format!(
         r####"#!/bin/sh
 # ManifestOS — run a Windows program in the Windows VM (generated; do not edit).
-# usage: windows-vm-run <file.exe|file.msi>
+# usage: windows-vm-run <file.exe|file.msi>          open a file from this machine
+#        windows-vm-run 'C:\...\App.exe'             launch something already installed
 [ $# -ge 1 ] || {{ echo 'usage: windows-vm-run <file.exe|file.msi>' >&2; exit 2; }}
 f=$1
+# A Windows path means the program is already inside the guest -- a menu entry
+# for an installed app rather than an installer being handed across. Nothing
+# needs copying, and there is no "did it install anything?" question to ask
+# afterwards. WinApps only writes launchers for apps in its own hardcoded
+# catalog, so anything it has never heard of (which is most things) reaches us
+# this way or not at all.
+case "$f" in
+  [A-Za-z]:\\*) INGUEST=1 ;;
+  *) INGUEST=0 ;;
+esac
 VMDIR="$HOME/.local/share/manifest-os/windows-vm"
 {docker}{wipe}
 # 1. First use? Set the VM up (downloads and installs Windows — one time).
@@ -541,8 +652,10 @@ fi
 # 4. The installer has to be reachable from inside Windows. dockur shares your
 #    home as a network drive, so copy it there and say where it landed.
 base=$(basename "$f")
-mkdir -p "$HOME/Windows Transfer"
-cp -f "$f" "$HOME/Windows Transfer/$base" 2>/dev/null || true
+if [ "$INGUEST" = 0 ]; then
+  mkdir -p "$HOME/Windows Transfer"
+  cp -f "$f" "$HOME/Windows Transfer/$base" 2>/dev/null || true
+fi
 : > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
 
 # Resolve winapps: its own installer puts it on PATH, but fall back to the
@@ -592,6 +705,7 @@ APPSBEFORE=$(mktemp) && list_apps > "$APPSBEFORE"
 # the loop is skipped on a guest that can't do RemoteApp, and the desktop
 # fallback still has to tell the user where to find their installer.
 WINPATH='Z:\Windows Transfer\'"$base"
+[ "$INGUEST" = 1 ] && WINPATH="$f"
 opened=0
 
 # Z: is a network location to Windows, so launching an .exe from it raises
@@ -666,8 +780,11 @@ fi
 # Windows desktop, and a launcher for an app nobody installed. Don't attempt
 # what the guest cannot do -- the reinstall offer below is the actual fix.
 if [ -f "$VMDIR/.remoteapp-enabled" ]; then
-  for p in 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; do
-    WINPATH="$p$base"
+  # An in-guest path is already exact -- the share-prefix search below only
+  # applies to a file we copied across.
+  if [ "$INGUEST" = 1 ]; then set -- "$f"; else set -- 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; fi
+  for p in "$@"; do
+    [ "$INGUEST" = 1 ] && WINPATH="$p" || WINPATH="$p$base"
     t0=$(date +%s)
     run_wa manual "$WINPATH"
     t1=$(date +%s)
@@ -1548,8 +1665,16 @@ while ($true) {{
     Start-Sleep -Seconds 2
 }}
 '@ | Set-Content -Path $watch -Encoding UTF8
-$run = "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watch`""
-schtasks /Create /TN 'ManifestOS Browser Watch' /SC ONLOGON /RL HIGHEST /F /TR $run | Out-Null
+# NOT /RL HIGHEST, and not powershell.exe directly. An elevated process cannot
+# surface into a non-elevated RAIL session, and a console host shows up as a
+# stray "Administrator: ...powershell.exe" window that renders blank and
+# clutters every launch. Writing a flag to Z: needs no privilege at all, and
+# wscript runs it with no console.
+$vbs = 'C:\ProgramData\ManifestOS\browser-watch.vbs'
+Set-Content -Path $vbs -Encoding ASCII -Value @"
+CreateObject("WScript.Shell").Run "powershell -NoProfile -ExecutionPolicy Bypass -File ""$watch""", 0, False
+"@
+schtasks /Create /TN 'ManifestOS Browser Watch' /SC ONLOGON /F /TR "wscript.exe `"$vbs`"" | Out-Null
 "#,
         url = url,
         policies = WATERFOX_POLICIES.trim_end(),
@@ -2021,6 +2146,7 @@ mod tests {
             ("autologon step", setup_autologon_step()),
             ("guest policy step", setup_guest_policy_step()),
             ("browser bat step", setup_browser_bat_step()),
+            ("enum apps step", enum_apps_step()),
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
@@ -2129,6 +2255,14 @@ mod tests {
         assert!(ps.contains(r"Z:\.manifest-browser-active"), "signal via the share: {ps}");
         assert!(ps.contains("Get-Process waterfox"), "watch only waterfox: {ps}");
         assert!(ps.contains("schtasks /Create"), "watcher must survive a reboot: {ps}");
+        // An elevated process cannot surface into a non-elevated RAIL session,
+        // and a console host shows up as a stray blank "Administrator:
+        // ...powershell.exe" window on every launch. Writing a flag to Z: needs
+        // no privilege, so it must not ask for one.
+        let code: String =
+            ps.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
+        assert!(!code.contains("/RL HIGHEST"), "the watcher must not be elevated: {code}");
+        assert!(ps.contains("wscript.exe"), "and must run without a console: {ps}");
         // PowerShell continues lines with a backtick; `^` is cmd's and would
         // silently truncate the command.
         assert!(!ps.contains(" ^\n"), "cmd continuation in a PowerShell script: {ps}");
@@ -2136,6 +2270,30 @@ mod tests {
         let bat = setup_browser_bat_step();
         assert!(bat.contains(">> \"$b\""), "append: {bat}");
         assert!(bat.contains("grep -qi 'manifest-browser.ps1'"), "idempotent: {bat}");
+    }
+
+    /// WinApps only writes launchers for apps in its own hardcoded catalog, so
+    /// Inventor — and most things — got no menu entry at all. Measured on the
+    /// guest: 44 Start Menu shortcuts, of which 18 are actually installed apps.
+    #[test]
+    fn installed_windows_apps_become_launchers() {
+        // Windows' own accessories are not why anyone set up a Windows VM.
+        assert!(!is_user_app(r"C:\WINDOWS\system32\charmap.exe"));
+        assert!(!is_user_app(r"C:\Windows\System32\cmd.exe"));
+        assert!(!is_user_app(r"C:\WINDOWS\SysWOW64\foo.exe"));
+        assert!(is_user_app(r"C:\Program Files\Autodesk\Inventor 2027\Bin\Inventor.exe"));
+        assert!(is_user_app(r"C:\Program Files\Waterfox\waterfox.exe"));
+        // Slugs land in a filename, so they must be safe and stable.
+        assert_eq!(slugify("Autodesk Inventor Professional 2027 - English"),
+                   "autodesk-inventor-professional-2027-english");
+        assert_eq!(slugify("DWG TrueView 2027"), "dwg-trueview-2027");
+        assert_eq!(slugify("!!!"), "app", "never an empty filename");
+        // The enumerator writes onto the share, so Linux reads a local file
+        // rather than paying an RDP round trip per app.
+        assert!(ENUM_APPS_PS1.contains(r"Z:\.manifest-apps.tsv"), "{ENUM_APPS_PS1}");
+        assert!(ENUM_APPS_PS1.contains("uninstall|readme"), "skip the noise entries");
+        // A RemoteApp session does not close when its program exits.
+        assert!(enum_apps_step().contains("tsdiscon"), "or it hangs until timeout");
     }
 
     /// The size becomes the guest's partition layout at install time, so it is
