@@ -167,9 +167,10 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
         false,
     )?;
 
-    println!("  · asking WinApps to detect installed Windows apps");
+    println!("  · running WinApps' installer (it will ask a few questions)");
+    println!("    choose: Install → System (or User) → Automatic");
     ctx.shell(
-        "SETUP=$(command -v winapps-setup 2>/dev/null);          [ -n \"$SETUP\" ] || SETUP=\"$HOME/.local/bin/winapps-setup\";          [ -x \"$SETUP\" ] || SETUP=\"$HOME/.local/share/manifest-os/winapps/setup.sh\";          [ -x \"$SETUP\" ] || { echo '  ! could not find winapps-setup — re-run: manifest windows-vm' >&2; exit 1; };          \"$SETUP\" 2>/dev/null || sg docker -c \"'$SETUP'\" || {            echo '  ! winapps-setup failed. If it mentions docker permissions, log out' >&2;            echo '    and back in once, then re-run: manifest windows-vm --link' >&2; }",
+        "SETUP=\"$HOME/.local/share/manifest-os/winapps/setup.sh\";          [ -x \"$SETUP\" ] || { echo '  ! WinApps source missing — re-run: manifest windows-vm' >&2; exit 1; };          \"$SETUP\" || sg docker -c \"'$SETUP'\" || {            echo >&2;            echo '  ! WinApps setup did not complete.' >&2;            echo '    · docker permission errors: log out and back in once, then retry.' >&2;            echo \"    · 'existing installation' errors: remove it with  '$SETUP' --uninstall\" >&2;            echo '      (or answer Uninstall in the wizard), then re-run this command.' >&2; }",
         false,
     )?;
     println!("  · done — installed Windows apps should now appear in your menu");
@@ -208,22 +209,15 @@ fn ensure_deps(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 /// Install WinApps itself — **as a separate component**, never vendored. Prefers
 /// the AUR package; falls back to an upstream clone into the user's data dir.
 fn ensure_winapps(ctx: &Ctx) -> Result<()> {
-    // BOTH commands must be present: an earlier version linked only into
-    // ~/.local/bin, which left `winapps-setup` off PATH and broke `--link`.
-    if ctx.check("sh", &["-c", "command -v winapps && command -v winapps-setup"]) {
-        println!("  · winapps already installed");
-        return Ok(());
-    }
-    println!("  · installing WinApps (GPL-3.0, installed separately — not part of ManifestOS)");
-    // There is no AUR package, so clone upstream. Link into /usr/local/bin rather
-    // than ~/.local/bin: the latter frequently isn't on PATH, and the launchers
-    // WinApps generates need to find these.
+    // Only fetch the source. WinApps' own `setup.sh` is a real installer that
+    // manages /usr/local/bin/winapps-src — symlinking our own `winapps` next to
+    // it makes its conflict check fail with "EXISTING 'SYSTEM' WINAPPS
+    // INSTALLATION", so we deliberately install nothing ourselves.
+    println!("  · fetching WinApps (GPL-3.0, installed separately — not part of ManifestOS)");
     ctx.shell(
-        "d=\"$HOME/.local/share/manifest-os/winapps\";          mkdir -p \"$(dirname \"$d\")\";          if [ -d \"$d/.git\" ]; then git -C \"$d\" pull --ff-only >/dev/null 2>&1 || true;          else git clone --depth 1 https://github.com/winapps-org/winapps \"$d\" || exit 1; fi;          sudo ln -sf \"$d/bin/winapps\" /usr/local/bin/winapps;          sudo ln -sf \"$d/setup.sh\" /usr/local/bin/winapps-setup;          sudo chmod +x \"$d/bin/winapps\" \"$d/setup.sh\" 2>/dev/null || true",
+        "d=\"$HOME/.local/share/manifest-os/winapps\";          mkdir -p \"$(dirname \"$d\")\";          if [ -d \"$d/.git\" ]; then git -C \"$d\" pull --ff-only >/dev/null 2>&1 || true;          else git clone --depth 1 https://github.com/winapps-org/winapps \"$d\" || exit 1; fi;          chmod +x \"$d/setup.sh\" \"$d/bin/winapps\" 2>/dev/null || true;          # Remove symlinks an earlier version of ManifestOS created — they are          # what WinApps' installer trips over. Only ours (symlinks into our          # checkout) are touched; a real WinApps install is left alone.          for l in /usr/local/bin/winapps /usr/local/bin/winapps-setup; do            if [ -L \"$l\" ] && readlink \"$l\" | grep -q 'manifest-os/winapps'; then              echo \"  · removing our old symlink $l (it conflicts with WinApps' installer)\";              sudo rm -f \"$l\";            fi;          done;          for l in \"$HOME/.local/bin/winapps\" \"$HOME/.local/bin/winapps-setup\"; do            [ -L \"$l\" ] && readlink \"$l\" | grep -q 'manifest-os/winapps' && rm -f \"$l\";          done; true",
         false,
-    )?;
-    println!("  · winapps + winapps-setup are on your PATH");
-    Ok(())
+    )
 }
 
 /// Shell helper used by every generated script: run a docker command through
@@ -312,8 +306,13 @@ echo "Opening Windows. Your installer is available inside it at:"
 echo '    \\host.lan\Data\Windows Transfer\'"$base"
 echo "(also in the shared drive, as '$base')"
 echo
+# Resolve winapps: its own installer puts it on PATH, but fall back to the
+# checkout if `--link` hasn't been run yet.
+WA=$(command -v winapps 2>/dev/null)
+[ -n "$WA" ] || WA="$HOME/.local/share/manifest-os/winapps/bin/winapps"
+[ -x "$WA" ] || {{ echo "windows-vm-run: winapps isn't set up — run: manifest windows-vm --link" >&2; exit 1; }}
 # winapps runs docker itself, so it needs the same group bridge dk() gives us.
-winapps windows 2>/dev/null   || sg docker -c 'winapps windows' 2>/dev/null   || {{
+"$WA" windows 2>/dev/null   || sg docker -c "'$WA' windows" 2>/dev/null   || {{
     echo "windows-vm-run: couldn't open the Windows desktop." >&2
     echo "  If it mentions docker permissions, log out and back in once —" >&2
     echo "  your user was added to the 'docker' group and the session needs to" >&2
@@ -740,7 +739,7 @@ mod tests {
         assert!(s.contains(r#"Transfer\'"$base""#), "filename must expand: {s}");
         assert!(!s.contains(r#"Transfer\$base""#), "an escaped $ would print literally: {s}");
         // winapps talks to docker itself, so it needs the group bridge too.
-        assert!(s.contains("sg docker -c 'winapps windows'"), "{s}");
+        assert!(s.contains("sg docker -c \"'$WA' windows\""), "{s}");
     }
 
     #[test]
