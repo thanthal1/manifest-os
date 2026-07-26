@@ -199,14 +199,10 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
             )
         };
         ctx.shell(&up, false)?;
-        // Start the idle clock now. Otherwise the watchdog inherits whenever an
-        // app was last used -- possibly hours ago -- and a container we just
-        // started is already past its deadline.
-        ctx.shell(
-            "a=\"${XDG_STATE_HOME:-$HOME/.local/state}/windows-vm-activity\"; \
-             mkdir -p \"$(dirname \"$a\")\" 2>/dev/null || true; : > \"$a\" 2>/dev/null || true",
-            false,
-        )?;
+        // Deliberately does NOT touch the activity file. The watchdog already
+        // counts from the container's start, and an activity file newer than
+        // that start is exactly how it knows something has *used* the VM --
+        // which is what tells an install apart from an idle desktop.
         println!();
         println!("  Windows is installing inside the container. Watch it at:");
         println!("      http://localhost:8006");
@@ -738,37 +734,57 @@ if pgrep -x xfreerdp >/dev/null 2>&1 || pgrep -x xfreerdp3 >/dev/null 2>&1; then
 fi
 ACT="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity"
 now=$(date +%s)
-last=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
-[ "$last" -eq 0 ] && {{ mkdir -p "$(dirname "$ACT")"; : > "$ACT"; exit 0; }}
+act=$([ -e "$ACT" ] && stat -c %Y "$ACT" 2>/dev/null || echo 0)
+[ "$act" -eq 0 ] && {{ mkdir -p "$(dirname "$ACT")"; : > "$ACT"; exit 0; }}
 # Idle means "up and unused for IDLE", not "the last app closed a while ago".
 # A container started just now after a long gap is brand new, not stale: count
 # from whichever is later, or a fresh start is instantly eligible to be killed.
 started=$(dk inspect -f '{{{{.State.StartedAt}}}}' WinApps 2>/dev/null)
 started=$(date -d "$started" +%s 2>/dev/null || echo 0)
-[ "$started" -gt "$last" ] && last=$started
-# Never stop a guest that isn't usable yet. Installing Windows takes 20-40
-# minutes with no client attached and nothing touching the activity file --
-# this watchdog's exact definition of idle -- and it stopped a running install
-# once. `manifest windows-vm` promises that install "needs no input"; it must
-# not need babysitting either. RDP answering is the signal, because serving RDP
-# is the only thing this VM exists to do.
-#
-# NOT dockur's windows.boot: it writes that from finish(), i.e. on container
-# shutdown, so it is absent for the entire life of a guest that has never been
-# stopped -- guarding on it would disable this watchdog permanently.
-if ! nc -z -w 2 127.0.0.1 3389 >/dev/null 2>&1; then
-  # Generous ceiling, so a guest that never comes up at all can't pin the VM
-  # on forever -- but far beyond any real install.
-  {{ [ "$started" -eq 0 ] || [ $((now - started)) -lt 7200 ]; }} && exit 0
-fi
-if [ $((now - last)) -ge "$IDLE" ]; then
+{decide}
+if should_stop "$now" "$act" "$started" "$IDLE"; then
   echo "windows-vm-idle: stopping the idle Windows VM"
   dk stop WinApps >/dev/null 2>&1 || true
 fi
 "####,
         secs = secs,
         docker = docker_fn(),
+        decide = idle_decision_fn(),
     )
+}
+
+/// The idle watchdog's whole decision, as a shell function — kept separate so a
+/// test can drive it with made-up clocks instead of a real container.
+///
+/// This has been got wrong twice, in both directions, and each mistake is
+/// invisible until it costs someone 40 minutes:
+///   * counting only from the activity file killed a Windows install 16 minutes
+///     in, because an install touches nothing and looks exactly like idle;
+///   * then guarding on a "still installing" signal that was always true
+///     disabled the watchdog entirely.
+///
+/// So the rule is about *use*, not about installing: a VM that nothing has
+/// touched since it started is either installing or freshly up, and either way
+/// stopping it is wrong. `windows-vm-run` touches the activity file when it
+/// launches something, so the moment the VM is genuinely used the normal idle
+/// timeout takes over again. The ceiling stops a guest that never comes up from
+/// pinning the VM on for good, while staying far beyond any real install.
+fn idle_decision_fn() -> &'static str {
+    "# should_stop <now> <activity> <container-started> <idle-secs>
+should_stop() {
+    _now=$1; _act=$2; _started=$3; _idle=$4
+    # Idle means \"up and unused for IDLE\", not \"the last app closed a while
+    # ago\": a container started just now after a long gap is brand new, not
+    # stale, so count from whichever is later.
+    _last=$_act
+    [ \"$_started\" -gt \"$_last\" ] && _last=$_started
+    # Nothing has used it since it started -> installing, or only just up.
+    if [ \"$_act\" -lt \"$_started\" ] && [ $((_now - _started)) -lt 7200 ]; then
+        return 1
+    fi
+    [ $((_now - _last)) -ge \"$_idle\" ]
+}
+"
 }
 
 /// The compose file for the container-hosted Windows (dockur/windows). Pure —
@@ -1478,19 +1494,23 @@ mod tests {
         // idle. It killed a running install once, 16 minutes in. `manifest
         // windows-vm` promises the install "needs no input"; it must not need
         // babysitting either.
-        let guard = s.find("nc -z -w 2 127.0.0.1 3389").expect("install guard");
-        let stop = s.find("dk stop WinApps").expect("stop");
+        let guard = s.find("should_stop() {").expect("install guard");
+        let stop = s.find("if should_stop ").expect("stop");
         assert!(guard < stop, "must not stop mid-install:\n{s}");
-        // dockur's windows.boot is NOT that signal: markWindowsBooted runs from
-        // finish(), on container SHUTDOWN, so it is absent for the whole life of
-        // a guest that has never been stopped. Guarding on it would disable this
-        // watchdog permanently -- which is how it was first written.
+        // Two signals that look right and are not. Both were tried here.
+        //   · windows.boot: dockur writes it from finish(), on container
+        //     SHUTDOWN, so it is absent for the whole life of a guest that has
+        //     never been stopped -- guarding on it disables this permanently.
+        //   · a TCP probe of 3389: docker publishes that port when the CONTAINER
+        //     starts, so it answers while Windows is still downloading and says
+        //     nothing whatsoever about the guest.
         assert!(!s.contains("storage/windows.boot"), "windows.boot only exists after a stop: {s}");
-        // And idle means "up and unused for IDLE", not "the last app closed a
-        // while ago" -- a container started just now is new, however stale the
-        // activity file is, or a fresh start is instantly eligible to be killed.
+        assert!(!s.contains("3389"), "docker publishes 3389 before Windows listens: {s}");
+        // The container's own start time has to reach the decision — the rest
+        // of the rule is exercised against a clock in
+        // `the_idle_decision_holds_up_against_a_clock`.
         assert!(s.contains("{{.State.StartedAt}}"), "count from the container start too: {s}");
-        assert!(s.contains("[ \"$started\" -gt \"$last\" ] && last=$started"), "{s}");
+        assert!(s.contains("should_stop \"$now\" \"$act\" \"$started\" \"$IDLE\""), "{s}");
     }
 
     #[test]
@@ -1567,6 +1587,47 @@ mod tests {
                 "{what} is not valid sh:\n{}\n--- fragment ---\n{fragment}",
                 String::from_utf8_lossy(&out.stderr)
             );
+        }
+    }
+
+    /// The watchdog's decision, driven with made-up clocks. Both directions of
+    /// this have already shipped wrong: counting only from the activity file
+    /// killed a Windows install 16 minutes in, and the "still installing" guard
+    /// that replaced it was always true, which disabled the watchdog outright.
+    /// Neither shows up anywhere until someone loses 40 minutes.
+    #[test]
+    fn the_idle_decision_holds_up_against_a_clock() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        // ago_used, ago_started, expect_stop
+        let cases = [
+            // Mid-install: nothing touches the activity file for 20-90 minutes,
+            // and the file itself is stale from whenever an app last ran.
+            (10800, 2400, false, "installing 40 min, activity 3 h stale"),
+            (10800, 5400, false, "installing 90 min, activity 3 h stale"),
+            // Freshly started for a launch that hasn't happened yet.
+            (10800, 30, false, "just started, activity 3 h stale"),
+            // Genuinely in use.
+            (300, 7200, false, "used 5 min ago, up 2 h"),
+            // Genuinely idle -- the case this watchdog exists for.
+            (2400, 7200, true, "used 40 min ago, up 2 h"),
+            // Never came up at all: the ceiling has to release it eventually.
+            (14400, 10800, true, "never used, up 3 h (past the ceiling)"),
+        ];
+        for (ago_used, ago_started, expect_stop, what) in cases {
+            let script = format!(
+                "{}\nnow=1000000\nshould_stop \"$now\" $((now-{ago_used})) $((now-{ago_started})) 1800",
+                idle_decision_fn()
+            );
+            let mut sh = Command::new("sh")
+                .arg("-s")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("spawn sh");
+            sh.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+            let stopped = sh.wait().expect("run sh").success();
+            assert_eq!(stopped, expect_stop, "{what}: expected stop={expect_stop}");
         }
     }
 
