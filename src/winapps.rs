@@ -91,10 +91,17 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         ctx.shell(&format!("mkdir -p \"{COMPOSE_DIR}\""), false)?;
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose_yaml(vm, &pass))?;
         println!("  · starting the Windows container (first run installs Windows)");
-        let up = format!(
-            "cd \"{COMPOSE_DIR}\" && {cmd} compose up -d",
-            cmd = if backend == "podman" { "podman" } else { "docker" }
-        );
+        let up = if backend == "podman" {
+            format!("cd \"{COMPOSE_DIR}\" && podman compose up -d")
+        } else {
+            // `usermod -aG docker` does NOT affect the session already running, so
+            // the socket is unreachable until re-login. Try the current session,
+            // then `sg docker` (picks up the new membership without logging out),
+            // then root. Whichever works, the container comes up now.
+            format!(
+                "cd \"{COMPOSE_DIR}\" && {{                    docker compose up -d 2>/dev/null                    || {{ echo '  · using the newly-added docker group (no re-login needed)';                          sg docker -c 'docker compose up -d'; }} 2>/dev/null                    || {{ echo '  · falling back to running docker as root';                          sudo docker compose up -d; }}; }}"
+            )
+        };
         ctx.shell(&up, false)?;
         println!();
         println!("  Windows is installing inside the container. Watch it at:");
@@ -109,10 +116,19 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
 /// Second phase, after Windows has finished installing: ask WinApps to detect
 /// the installed applications and write a `.desktop` for each.
 pub fn link_apps(ctx: &Ctx) -> Result<()> {
+    // Windows has to be up for WinApps to enumerate what's installed.
+    println!("  · checking the Windows container is running");
+    ctx.shell(
+        "docker ps --filter name=manifest-windows --format '{{.Status}}' 2>/dev/null          || sg docker -c "docker ps --filter name=manifest-windows --format '{{.Status}}'" 2>/dev/null          || sudo docker ps --filter name=manifest-windows --format '{{.Status}}' 2>/dev/null          || echo '  · could not query docker — is the container running?' >&2",
+        false,
+    )?;
     println!("  · asking WinApps to detect installed Windows apps");
     // WinApps' installer generates the per-app launchers; `--user` keeps them in
-    // the user's own applications dir.
-    ctx.shell("winapps-setup --user || winapps-setup || true", false)?;
+    // the user's own applications dir. Same group caveat as `up`.
+    ctx.shell(
+        "winapps-setup --user 2>/dev/null || sg docker -c 'winapps-setup --user' 2>/dev/null          || winapps-setup || true",
+        false,
+    )?;
     println!("  · done — installed Windows apps should now appear in your menu");
     Ok(())
 }
@@ -150,20 +166,15 @@ fn ensure_winapps(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     println!("  · installing WinApps (GPL-3.0, installed separately — not part of ManifestOS)");
+    // There is no AUR package, so clone upstream. Link into /usr/local/bin rather
+    // than ~/.local/bin: the latter frequently isn't on PATH, and the launchers
+    // WinApps generates need to find these.
     ctx.shell(
-        "paru -S --needed --noconfirm winapps-git || { \
-           echo '  · AUR install failed — cloning upstream instead' >&2; \
-           d=\"$HOME/.local/share/manifest-os/winapps\"; \
-           mkdir -p \"$(dirname \"$d\")\"; \
-           { [ -d \"$d/.git\" ] && git -C \"$d\" pull --ff-only; } || \
-             git clone --depth 1 https://github.com/winapps-org/winapps \"$d\"; \
-           mkdir -p \"$HOME/.local/bin\"; \
-           ln -sf \"$d/bin/winapps\" \"$HOME/.local/bin/winapps\"; \
-           ln -sf \"$d/setup.sh\" \"$HOME/.local/bin/winapps-setup\"; \
-           echo '  · installed to ~/.local/bin (ensure it is on your PATH)'; \
-         }",
+        "d=\"$HOME/.local/share/manifest-os/winapps\";          mkdir -p \"$(dirname \"$d\")\";          if [ -d \"$d/.git\" ]; then git -C \"$d\" pull --ff-only >/dev/null 2>&1 || true;          else git clone --depth 1 https://github.com/winapps-org/winapps \"$d\" || exit 1; fi;          sudo ln -sf \"$d/bin/winapps\" /usr/local/bin/winapps;          sudo ln -sf \"$d/setup.sh\" /usr/local/bin/winapps-setup;          sudo chmod +x \"$d/bin/winapps\" \"$d/setup.sh\" 2>/dev/null || true",
         false,
-    )
+    )?;
+    println!("  · winapps + winapps-setup are on your PATH");
+    Ok(())
 }
 
 /// The compose file for the container-hosted Windows (dockur/windows). Pure —
