@@ -207,59 +207,85 @@ pub fn install_script() -> &'static str {
 f=$1
 [ -f "$f" ] || { echo "windows-install: no such file: $f" >&2; exit 1; }
 
-# 1. Wine, only when it's actually needed.
-if ! command -v wine >/dev/null 2>&1; then
-  echo "Windows app support (Wine) isn't installed yet."
-  printf 'Install it now? (a few hundred MB) [y/N] '
-  read r
-  case "$r" in
-    [yY]|[yY][eE][sS]) manifest windows-setup || exit 1 ;;
-    *) echo "Cancelled."; exit 1 ;;
-  esac
-fi
-
-# 2. Ask the compatibility oracle — quietly. It's a hint, not a gate: a name
+# 1. Ask the compatibility oracle — quietly. It's a hint, not a gate: a name
 #    match is a guess, so we only *warn* and let you decide. Machine-readable
 #    output: "<verdict>|<reasons>".
 info=$(manifest __wincheck "$f" 2>/dev/null)
 verdict=${info%%|*}
 reasons=${info#*|}
-# Declining Wine isn't a dead end: the VM tier runs anything Wine can't. Offer
-# it rather than just giving up.
-offer_vm() {
-  echo
-  echo "You can run it in a Windows VM instead — a real Windows, set up once,"
-  echo "with apps opening as normal windows. It's heavier (a few GB) but works"
-  echo "for things Wine can't handle."
-  printf 'Use the Windows VM for this? [y/N] '
-  read r2
-  case "$r2" in
-    [yY]|[yY][eE][sS])
-      # Use the installed command if present, else run the logic straight from
-      # the binary — so this works right after `pacman -Syu`, before the command
-      # file has been written.
-      if command -v windows-vm-run >/dev/null 2>&1; then exec windows-vm-run "$f"; fi
-      exec sh -c "$(manifest __script windows-vm-run)" manifest "$f" ;;
-    *) echo "Cancelled."; exit 1 ;;
-  esac
+name=$(basename "$f")
+
+# The VM tier runs anything Wine can't, so declining Wine is never a dead end.
+run_vm() {
+  # Use the installed command if present, else run the logic straight from the
+  # binary — so this works right after `pacman -Syu`, before the command file
+  # has been written.
+  if command -v windows-vm-run >/dev/null 2>&1; then exec windows-vm-run "$f"; fi
+  exec sh -c "$(manifest __script windows-vm-run)" manifest "$f"
 }
+need_wine() {
+  command -v wine >/dev/null 2>&1 || manifest windows-setup || exit 1
+}
+
+# 2. One question, not a chain of them. This is reached by double-clicking a
+#    file in a file manager, where "[y/N]" is the wrong shape entirely: there
+#    are three real answers -- Wine, the VM, or neither -- so offer three
+#    buttons and let the oracle's verdict be context rather than another
+#    prompt. zenity's --extra-button is what makes a third answer possible:
+#    OK exits 0, the extra button exits non-zero but prints its own label, and
+#    a plain cancel or a closed window prints nothing.
 case "$verdict" in
-  blocked)
-    echo "Heads up: this looks like it won't work under Wine."
-    echo "  $reasons"
-    printf 'Try Wine anyway? [y/N] '
-    read r; case "$r" in [yY]|[yY][eE][sS]) ;; *) offer_vm ;; esac ;;
-  risky)
-    echo "Heads up: this one can be awkward under Wine."
-    echo "  $reasons"
-    printf 'Go ahead with Wine? [Y/n] '
-    read r; case "$r" in [nN]|[nN][oO]) offer_vm ;; *) ;; esac ;;
-  works) ;;
-  *)
-    # Unknown app — most are. Ask rather than pretend to know.
-    printf 'Install this with Wine? Simple apps and tools usually work; big suites and games often do not. [Y/n] '
-    read r; case "$r" in [nN]|[nN][oO]) offer_vm ;; *) ;; esac ;;
+  blocked) why="It looks like <b>$name</b> will not work under Wine.
+$reasons" ;;
+  risky)   why="<b>$name</b> can be awkward under Wine.
+$reasons" ;;
+  works)   why="<b>$name</b> should work under Wine." ;;
+  *)       why="How do you want to open <b>$name</b>?
+
+Simple apps and tools usually work under Wine. Big suites and games often
+need the Windows VM -- a real Windows, set up once, with apps opening as
+normal windows. It is heavier (a few GB)." ;;
 esac
+command -v wine >/dev/null 2>&1 || why="$why
+
+Wine is not installed yet; choosing it will download it first (a few hundred MB)."
+
+if command -v zenity >/dev/null 2>&1; then
+  pick=$(zenity --question --title='Open a Windows program' --width=470 \
+           --text="$why" --ok-label='Run with Wine' \
+           --extra-button='Use Windows VM' --cancel-label='Close' 2>/dev/null)
+  if [ $? -eq 0 ]; then need_wine
+  elif [ "$pick" = 'Use Windows VM' ]; then run_vm
+  else exit 0; fi
+else
+  # No desktop dialog available: the old text flow, unchanged.
+  offer_vm() {
+    echo
+    echo "You can run it in a Windows VM instead — a real Windows, set up once,"
+    echo "with apps opening as normal windows. It's heavier (a few GB) but works"
+    echo "for things Wine can't handle."
+    printf 'Use the Windows VM for this? [y/N] '
+    read r2
+    case "$r2" in [yY]|[yY][eE][sS]) run_vm ;; *) echo "Cancelled."; exit 1 ;; esac
+  }
+  case "$verdict" in
+    blocked)
+      echo "Heads up: this looks like it won't work under Wine."
+      echo "  $reasons"
+      printf 'Try Wine anyway? [y/N] '
+      read r; case "$r" in [yY]|[yY][eE][sS]) ;; *) offer_vm ;; esac ;;
+    risky)
+      echo "Heads up: this one can be awkward under Wine."
+      echo "  $reasons"
+      printf 'Go ahead with Wine? [Y/n] '
+      read r; case "$r" in [nN]|[nN][oO]) offer_vm ;; *) ;; esac ;;
+    works) ;;
+    *)
+      printf 'Install this with Wine? Simple apps and tools usually work; big suites and games often do not. [Y/n] '
+      read r; case "$r" in [nN]|[nN][oO]) offer_vm ;; *) ;; esac ;;
+  esac
+  need_wine
+fi
 
 # 3. Its own prefix, named after the installer, so apps stay isolated.
 slug=$(basename "$f" | sed 's/\.[Ee][Xx][Ee]$//; s/\.[Mm][Ss][Ii]$//' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//')
@@ -414,9 +440,22 @@ mod tests {
         // Wine is installed only when a Windows program is actually opened.
         assert!(s.contains("command -v wine") && s.contains("manifest windows-setup"),
                 "lazy wine setup: {s}");
-        assert!(s.contains("isn't installed yet"), "{s}");
-        // The oracle advises; the user decides. Even `blocked` offers "Try anyway".
-        assert!(s.contains("Try Wine anyway?"), "blocked still asks: {s}");
+        assert!(s.contains("Wine is not installed yet"), "{s}");
+        // This is reached by double-clicking a file in a file manager, where
+        // "[y/N]" is the wrong shape: there are three real answers -- Wine, the
+        // VM, or neither. So one dialog with three buttons, not a chain of
+        // yes/no reads. --extra-button is what makes a third answer possible:
+        // OK exits 0, the extra button exits non-zero but prints its label, and
+        // cancel or a closed window prints nothing.
+        assert!(s.contains("--ok-label='Run with Wine'"), "{s}");
+        assert!(s.contains("--extra-button='Use Windows VM'"), "{s}");
+        assert!(s.contains("--cancel-label='Close'"), "{s}");
+        assert!(s.contains("[ \"$pick\" = 'Use Windows VM' ]"), "read the extra button: {s}");
+        // The oracle advises; the user decides. Even `blocked` gets all three
+        // buttons rather than being refused.
+        assert!(s.contains("will not work under Wine"), "blocked still offers Wine: {s}");
+        // And the terminal flow stays underneath for a machine with no desktop.
+        assert!(s.contains("Try Wine anyway?"), "text fallback kept: {s}");
         assert!(s.contains("Install this with Wine?"), "unknown apps ask: {s}");
         // Never silently refuses on a fuzzy name match.
         assert!(!s.contains("exit 1 ;; esac
