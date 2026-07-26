@@ -30,24 +30,28 @@ pub fn apply(w: &Windows, ctx: &Ctx) -> Result<()> {
     if w.is_empty() {
         return Ok(());
     }
-    // Gate first: report every app's verdict before touching the system, so a
-    // blocked app is known up front rather than after a long install.
+    // The oracle is a *hint*, not an authority: matching an app by name is
+    // inherently fuzzy, so only mention it when there's something to say — and
+    // still install. The exception is hard evidence found INSIDE the installer
+    // (a bundled kernel anti-cheat/driver), which is reliable enough to skip on;
+    // `force` overrides even that.
     let plan = plan_apps(w);
     for (app, a) in &plan {
-        println!("  · {}", a.summary(&app.name));
+        if a.verdict != Verdict::Works {
+            println!("  · note — {}", a.summary(&app.name));
+        }
     }
     let installable: Vec<&WindowsApp> = plan
         .iter()
-        .filter(|(app, a)| a.verdict != Verdict::Blocked || app.force)
+        .filter(|(app, a)| !hard_blocked(a) || app.force)
         .map(|(app, _)| *app)
         .collect();
-    if let Some((app, a)) = plan.iter().find(|(app, a)| a.verdict == Verdict::Blocked && !app.force) {
+    for (app, a) in plan.iter().filter(|(app, a)| hard_blocked(a) && !app.force) {
         println!(
-            "  · skipping '{}' — {} (needs the `{}` tier, which isn't built yet; \
-             set \"force\": true to try anyway)",
+            "  · skipping '{}' — the installer itself contains a blocker ({}). \
+             Set \"force\": true to try anyway.",
             app.name,
-            a.reasons.join("; "),
-            a.verdict.tier()
+            a.reasons.join("; ")
         );
     }
     if installable.is_empty() {
@@ -63,6 +67,12 @@ pub fn apply(w: &Windows, ctx: &Ctx) -> Result<()> {
         install_app(app, w, ctx)?;
     }
     Ok(())
+}
+
+/// Only *installer-marker* evidence counts as a hard block: a name match is a
+/// guess, but a bundled EasyAntiCheat/driver found inside the file is not.
+fn hard_blocked(a: &wincompat::Assessment) -> bool {
+    a.verdict == Verdict::Blocked && a.reasons.iter().any(|r| r.starts_with("installer bundles"))
 }
 
 /// Assess every declared app. Pure apart from optionally reading a local
@@ -82,6 +92,16 @@ fn plan_apps(w: &Windows) -> Vec<(&WindowsApp, wincompat::Assessment)> {
             (app, refined)
         })
         .collect()
+}
+
+/// `manifest windows-setup` — install Wine on demand (what `windows-install`
+/// offers to run the first time you open a Windows program).
+pub fn setup(ctx: &Ctx) -> Result<()> {
+    ensure_wine(ctx)?;
+    ctx.write_root(LAUNCHER, launcher_script())?;
+    ctx.sudo("chmod", &["0755", LAUNCHER])?;
+    println!("  · Windows app support is ready");
+    Ok(())
 }
 
 /// Install Wine + the bits nearly every prefix needs.
@@ -172,6 +192,81 @@ fn install_app(app: &WindowsApp, w: &Windows, ctx: &Ctx) -> Result<()> {
         println!("    note: no `exe` declared — no menu entry (add one to get a launcher)");
     }
     Ok(())
+}
+
+/// `windows-install <file.exe|.msi>` — the runtime entry point for opening a
+/// Windows installer from a file manager. Wine is installed **only when you
+/// actually run one** (the same "add if used" flow as strata/Android), and the
+/// compatibility oracle is used quietly: it never refuses on a fuzzy name match,
+/// it just asks you first when it isn't sure. Pure — unit-tested.
+pub fn install_script() -> &'static str {
+    r####"#!/bin/sh
+# ManifestOS — install/run a Windows program (generated logic; do not edit).
+# usage: windows-install <file.exe|file.msi>
+[ $# -ge 1 ] || { echo 'usage: windows-install <file.exe|file.msi>' >&2; exit 2; }
+f=$1
+[ -f "$f" ] || { echo "windows-install: no such file: $f" >&2; exit 1; }
+
+# 1. Wine, only when it's actually needed.
+if ! command -v wine >/dev/null 2>&1; then
+  echo "Windows app support (Wine) isn't installed yet."
+  printf 'Install it now? (a few hundred MB) [y/N] '
+  read r
+  case "$r" in
+    [yY]|[yY][eE][sS]) manifest windows-setup || exit 1 ;;
+    *) echo "Cancelled."; exit 1 ;;
+  esac
+fi
+
+# 2. Ask the compatibility oracle — quietly. It's a hint, not a gate: a name
+#    match is a guess, so we only *warn* and let you decide. Machine-readable
+#    output: "<verdict>|<reasons>".
+info=$(manifest __wincheck "$f" 2>/dev/null)
+verdict=${info%%|*}
+reasons=${info#*|}
+case "$verdict" in
+  blocked)
+    echo "Heads up: this looks like it won't work under Wine."
+    echo "  $reasons"
+    printf 'Try anyway? [y/N] '
+    read r; case "$r" in [yY]|[yY][eE][sS]) ;; *) echo "Cancelled."; exit 1 ;; esac ;;
+  risky)
+    echo "Heads up: this one can be awkward under Wine."
+    echo "  $reasons"
+    printf 'Go ahead? [Y/n] '
+    read r; case "$r" in [nN]|[nN][oO]) echo "Cancelled."; exit 1 ;; *) ;; esac ;;
+  works) ;;
+  *)
+    # Unknown app — most are. Ask rather than pretend to know.
+    printf 'Install this with Wine? Simple apps and tools usually work; big suites and games often do not. [Y/n] '
+    read r; case "$r" in [nN]|[nN][oO]) echo "Cancelled."; exit 1 ;; *) ;; esac ;;
+esac
+
+# 3. Its own prefix, named after the installer, so apps stay isolated.
+slug=$(basename "$f" | sed 's/\.[Ee][Xx][Ee]$//; s/\.[Mm][Ss][Ii]$//' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//')
+[ -n "$slug" ] || slug=app
+PREFIX="$HOME/.local/share/manifest-os/wine/$slug"
+echo "Setting up a private Wine environment for '$slug'..."
+mkdir -p "$PREFIX"
+WINEPREFIX="$PREFIX" WINEARCH=win64 wineboot -u >/dev/null 2>&1 || true
+
+echo "Running the installer (a setup window should appear)..."
+case "$f" in
+  *.[Mm][Ss][Ii]) WINEPREFIX="$PREFIX" wine msiexec /i "$f" ;;
+  *)              WINEPREFIX="$PREFIX" wine "$f" ;;
+esac
+rc=$?
+
+if [ "$rc" = 0 ]; then
+  echo
+  echo "Done. Installed into: $PREFIX"
+  echo "Launch it with:  windows-app $slug '<Program Files/...>.exe'"
+  echo "(list what got installed:  ls \"$PREFIX/drive_c/Program Files\")"
+else
+  echo "The installer exited with status $rc." >&2
+fi
+exit $rc
+"####
 }
 
 /// `windows-app <slug> <exe-relative-to-C:>` — what every menu entry runs.
@@ -291,6 +386,35 @@ mod tests {
         let w2 = Windows { apps: vec![app("SolidWorks", None, None, true)], winetricks: vec![] };
         let plan2 = plan_apps(&w2);
         assert!(plan2[0].0.force, "forced app is still assessed but installable");
+    }
+
+    #[test]
+    fn install_script_is_lazy_and_asks_rather_than_refusing() {
+        let s = install_script();
+        // Wine is installed only when a Windows program is actually opened.
+        assert!(s.contains("command -v wine") && s.contains("manifest windows-setup"),
+                "lazy wine setup: {s}");
+        assert!(s.contains("isn't installed yet"), "{s}");
+        // The oracle advises; the user decides. Even `blocked` offers "Try anyway".
+        assert!(s.contains("Try anyway?"), "blocked still asks: {s}");
+        assert!(s.contains("Install this with Wine?"), "unknown apps ask: {s}");
+        // Never silently refuses on a fuzzy name match.
+        assert!(!s.contains("exit 1 ;; esac
+exit"), "{s}");
+        // Per-app prefix, msi handled properly.
+        assert!(s.contains("wine msiexec /i"), "msi support: {s}");
+        assert!(s.contains(".local/share/manifest-os/wine/$slug"), "{s}");
+    }
+
+    #[test]
+    fn only_installer_markers_hard_block() {
+        // Name-only match (fuzzy) → not a hard block, we still install.
+        let by_name = wincompat::assess("SolidWorks", None);
+        assert_eq!(by_name.verdict, Verdict::Blocked);
+        assert!(!hard_blocked(&by_name), "a name guess must not block: {by_name:?}");
+        // Evidence inside the installer → hard block.
+        let scanned = wincompat::assess_bytes(&wincompat::assess("Game", None), b"EasyAntiCheat");
+        assert!(hard_blocked(&scanned), "installer evidence blocks: {scanned:?}");
     }
 
     #[test]

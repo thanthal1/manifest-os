@@ -431,6 +431,14 @@ fn write_mime(ctx: &Ctx) -> Result<()> {
     ctx.write_root(GUI_INSTALL, &thin_stub("manifest-install-gui"))?;
     ctx.sudo("chmod", &["0755", GUI_INSTALL])?;
     ctx.write_root(MIME_HANDLER, mime_handler_desktop())?;
+    // Windows installers: the handler + the runtime command it needs. Wine
+    // itself is NOT installed here — windows-install offers that on first use.
+    ctx.write_root("/usr/local/bin/windows-install", &thin_stub("windows-install"))?;
+    ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-install"])?;
+    ctx.write_root(
+        "/usr/share/applications/manifest-windows-install.desktop",
+        windows_handler_desktop(),
+    )?;
     ctx.shell(
         &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),
         true,
@@ -456,6 +464,10 @@ fn default_associations() -> &'static [(&'static str, &'static str)] {
         ("application/vnd.apkm", "manifest-apkm-install.desktop"),
         ("application/vnd.apks", "manifest-apkm-install.desktop"),
         ("application/x-xapk", "manifest-apkm-install.desktop"),
+        ("application/x-ms-dos-executable", "manifest-windows-install.desktop"),
+        ("application/x-msdownload", "manifest-windows-install.desktop"),
+        ("application/x-msi", "manifest-windows-install.desktop"),
+        ("application/vnd.microsoft.portable-executable", "manifest-windows-install.desktop"),
         ("application/vnd.debian.binary-package", "manifest-strata-install.desktop"),
         ("application/x-deb", "manifest-strata-install.desktop"),
         ("application/x-rpm", "manifest-strata-install.desktop"),
@@ -540,6 +552,9 @@ case "$MOS_FILE" in
   *.deb|*.rpm)
     # strata-install offers to add the matching stratum itself.
     MOS_TOOL=strata-install;  MOS_WHAT="Linux package support"; MOS_SETUP="" ;;
+  *.exe|*.msi|*.EXE|*.MSI)
+    # windows-install installs Wine on demand and asks before it commits.
+    MOS_TOOL=windows-install; MOS_WHAT="Windows app support (Wine)"; MOS_SETUP="manifest windows-setup" ;;
   *) echo "manifest-install-gui: don't know how to install '$MOS_FILE'" >&2; exit 1 ;;
 esac
 export MOS_FILE MOS_TOOL MOS_WHAT MOS_SETUP
@@ -604,6 +619,23 @@ fn mime_xml() -> &'static str {
        <mime-type type=\"application/vnd.apks\"><comment>Android split APKs</comment><sub-class-of type=\"application/zip\"/><glob pattern=\"*.apks\" weight=\"80\"/></mime-type>\n  \
        <mime-type type=\"application/x-xapk\"><comment>Android XAPK bundle</comment><sub-class-of type=\"application/zip\"/><glob pattern=\"*.xapk\" weight=\"80\"/></mime-type>\n\
      </mime-info>\n"
+}
+
+/// The "Install with Wine" handler for `.exe`/`.msi`. Like the others it Execs
+/// the shared GUI wrapper, so it works with or without a terminal.
+fn windows_handler_desktop() -> &'static str {
+    "[Desktop Entry]
+     Type=Application
+     Name=Install with Wine (Windows app)
+     Comment=Run or install a Windows program using Wine
+     Exec=/usr/local/bin/manifest-install-gui %f
+     TryExec=/usr/local/bin/manifest-install-gui
+     Icon=wine
+     Terminal=false
+     Categories=System;
+     MimeType=application/x-ms-dos-executable;application/x-msdownload;application/x-msi;application/vnd.microsoft.portable-executable;
+     NoDisplay=false
+"
 }
 
 fn mime_handler_desktop() -> &'static str {
