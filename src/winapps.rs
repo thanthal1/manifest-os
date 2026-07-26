@@ -228,10 +228,18 @@ fn ensure_winapps(ctx: &Ctx) -> Result<()> {
 /// whichever privilege path works. `usermod -aG docker` doesn't affect a session
 /// that's already running, so `sg docker` bridges the gap without a re-login.
 fn docker_fn() -> &'static str {
+    // NEVER interactive sudo here: these scripts are what .desktop launchers
+    // Exec, and a launcher has no TTY — a password prompt there hangs forever
+    // with nothing on screen (the same trap Waydroid's launchers hit). `-n`
+    // fails immediately instead, and we say why somewhere the user can see it.
     "dk() {
          if docker \"$@\" 2>/dev/null; then return 0; fi
          if sg docker -c \"docker $*\" 2>/dev/null; then return 0; fi
-         sudo docker \"$@\"
+         if sudo -n docker \"$@\" 2>/dev/null; then return 0; fi
+         msg='Log out and back in once — your user was added to the `docker` group and a session only picks that up at login.'
+         echo \"windows-vm: cannot reach docker. $msg\" >&2
+         command -v notify-send >/dev/null 2>&1 && notify-send 'Windows VM' \"$msg\"
+         return 1
      }
 "
 }
@@ -309,7 +317,17 @@ WA=$(command -v winapps 2>/dev/null)
 [ -n "$WA" ] || WA="$HOME/.local/share/manifest-os/winapps/bin/winapps"
 [ -x "$WA" ] || {{ echo "windows-vm-run: winapps isn't set up — run: manifest windows-vm --link" >&2; exit 1; }}
 # winapps runs docker itself, so it needs the same group bridge dk() gives us.
-run_wa() {{ "$WA" "$@" 2>/dev/null || sg docker -c "'$WA' $*" 2>/dev/null; }}
+# Keep its output — we need it to tell "the window opened" from "it bailed".
+WALOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-launch.log"
+mkdir -p "$(dirname "$WALOG")" 2>/dev/null || true
+run_wa() {{ "$WA" "$@" >>"$WALOG" 2>&1 || sg docker -c "'$WA' $*" >>"$WALOG" 2>&1; }}
+
+# Which app launchers exist right now, so we can name whatever appears later.
+list_apps() {{
+  for d in "$HOME/.local/share/applications" /usr/share/applications; do
+    [ -d "$d" ] && ls "$d" 2>/dev/null | grep -i 'winapps' || true
+  done | sort -u
+}}
 
 # Run the installer as a RemoteApp: its own window on your desktop. No Windows
 # desktop, no Windows taskbar, no browser tab — which is the entire point of
@@ -322,24 +340,72 @@ run_wa() {{ "$WA" "$@" 2>/dev/null || sg docker -c "'$WA' $*" 2>/dev/null; }}
 #   Z:               dockur mounts our /shared volume ($HOME) as a drive.
 echo
 echo "Opening $base in Windows..."
+: > "$WALOG" 2>/dev/null || true
+APPSBEFORE=$(mktemp) && list_apps > "$APPSBEFORE"
 WINPATH=
+opened=0
 for p in '\\tsclient\home\Windows Transfer\' 'Z:\Windows Transfer\'; do
   WINPATH="$p$base"
-  if run_wa manual "$WINPATH"; then
-    echo
-    echo "Installer finished."
-    # Whatever it installed should now be in your launcher — re-detect so you
-    # never have to run anything yourself.
-    echo "Adding any newly installed Windows apps to your menu..."
-    manifest windows-vm --link >/dev/null 2>&1 || true
-    echo "Done — look for it in your app launcher."
-    exit 0
-  fi
+  t0=$(date +%s)
+  run_wa manual "$WINPATH"
+  t1=$(date +%s)
+  # winapps exits 0 whether or not the window ever painted, so exit status
+  # proves nothing. A session you actually saw and closed lasts longer than a
+  # few seconds; an instant return means the path was wrong or RDP refused.
+  if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
 done
+
+if [ "$opened" = 1 ]; then
+  echo
+  echo "$base has closed."
+  # Whatever it installed should now be in your launcher — re-detect so you
+  # never have to run anything yourself.
+  echo "Checking for newly installed Windows apps..."
+  manifest windows-vm --link >/dev/null 2>&1 || true
+  APPSAFTER=$(mktemp) && list_apps > "$APPSAFTER"
+  new=$(comm -13 "$APPSBEFORE" "$APPSAFTER" 2>/dev/null)
+  rm -f "$APPSBEFORE" "$APPSAFTER" 2>/dev/null || true
+
+  if [ -n "$new" ]; then
+    echo "Added to your app launcher:"
+    printf '%s\n' "$new" | sed 's/\.desktop$//; s/^winapps-//; s/^/  · /'
+  else
+    # Nothing new was installed — which is normal: plenty of Windows tools are
+    # a single portable .exe that IS the app (Rufus, for one). There is nothing
+    # for a scan to find, so make a launcher for the file itself.
+    echo "Nothing was installed — this looks like a portable app (the .exe is"
+    echo "the program itself). Adding it to your launcher directly."
+    name=$(printf '%s' "$base" | sed 's/\.[Ee][Xx][Ee]$//; s/\.[Mm][Ss][Ii]$//')
+    slug=$(printf '%s' "$name" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-' | sed 's/-\{{1,\}}/-/g; s/^-//; s/-$//')
+    apps="$HOME/.local/share/applications"
+    mkdir -p "$apps"
+    {{
+      echo '[Desktop Entry]'
+      echo 'Type=Application'
+      echo "Name=$name"
+      echo 'Comment=Windows app, running in the Windows VM'
+      echo "Exec=windows-vm-run \"$HOME/Windows Transfer/$base\""
+      echo 'Icon=applications-other'
+      echo 'Terminal=false'
+      echo 'Categories=Utility;'
+    }} > "$apps/manifest-winvm-$slug.desktop"
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$apps" 2>/dev/null || true
+    echo "  · $name"
+  fi
+  echo
+  echo "Done — look for it in your app launcher."
+  exit 0
+fi
+
+# Both share paths came back instantly: the RemoteApp never painted. Show what
+# winapps actually said rather than guessing.
+rm -f "$APPSBEFORE" 2>/dev/null || true
+echo "Couldn't open it as its own window." >&2
+[ -s "$WALOG" ] && {{ echo "What winapps reported:" >&2; sed 's/^/    /' "$WALOG" >&2; }}
 
 # Older WinApps (no `manual`), or the launch didn't take: fall back to the full
 # desktop so the file is still reachable by hand.
-echo "Couldn't open it as a single window — opening the Windows desktop instead." >&2
+echo "Opening the Windows desktop instead." >&2
 echo "Your installer is inside Windows at:" >&2
 echo "    $WINPATH" >&2
 echo "    (also on the Shared folder on the desktop)" >&2
@@ -799,6 +865,40 @@ mod tests {
         assert!(manual_at < desktop_at, "RemoteApp must be tried before the desktop:\n{s}");
         // After installing, newly-installed apps get added to the launcher.
         assert!(s.contains("manifest windows-vm --link"), "re-detects apps: {s}");
+        // winapps exits 0 even when nothing painted, so success must be judged
+        // by how long the session lasted -- never by exit status alone.
+        assert!(s.contains("t1 - t0"), "launch success is timed, not assumed: {s}");
+        assert!(!s.contains("Installer finished."), "must not claim success blindly: {s}");
+        // A portable .exe installs nothing, so it gets a launcher of its own
+        // rather than a cheerful message about an app that isn't there.
+        assert!(s.contains("manifest-winvm-$slug.desktop"), "portable apps get a launcher: {s}");
+        assert!(s.contains(r#"Exec=windows-vm-run \"$HOME/Windows Transfer/$base\""#), "{s}");
+        // And when apps DO get installed, they are named, not merely implied.
+        assert!(s.contains("comm -13"), "reports the actual delta: {s}");
+        // POSIX sh: no process substitution (this runs under #!/bin/sh).
+        assert!(!s.contains("<("), "process substitution is not POSIX sh: {s}");
+    }
+
+    /// Every generated script here is something a .desktop launcher Execs, and
+    /// a launcher has no TTY: an interactive `sudo` prompt there waits forever
+    /// with nothing on screen. This is the exact bug that made the Waydroid
+    /// launchers fail silently, so pin it down for the Windows tier too.
+    #[test]
+    fn generated_scripts_never_prompt_for_a_password() {
+        for (what, s) in [("vm_run", vm_run_script()), ("vm_idle", vm_idle_script(45))] {
+            for line in s.lines() {
+                let t = line.trim_start();
+                if t.starts_with('#') || t.starts_with("//") {
+                    continue;
+                }
+                if t.contains("sudo ") {
+                    assert!(
+                        t.contains("sudo -n "),
+                        "{what}: sudo must be non-interactive (-n), got: {line}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
