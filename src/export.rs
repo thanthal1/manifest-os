@@ -211,6 +211,11 @@ fn capture() -> Value {
         m.insert("users".into(), json!(users));
     }
 
+    // Android apps via Waydroid (docs/strata-design.md §13).
+    if let Some(android) = capture_android() {
+        m.insert("android".into(), android);
+    }
+
     // foreign-distro strata (Bedrock-style) under /strata.
     let strata = capture_strata();
     if !strata.is_empty() {
@@ -221,6 +226,84 @@ fn capture() -> Value {
 }
 
 // ---------------------------------------------------------------------------
+/// Reconstruct the `android` block from a Waydroid install: the image type and
+/// build stamps from `waydroid.cfg`, the multi-window mode, and the installed
+/// third-party apps. Returns `None` when Waydroid isn't set up, so systems
+/// without Android get no block. See [`crate::android`].
+fn capture_android() -> Option<Value> {
+    let cfg = std::fs::read_to_string("/var/lib/waydroid/waydroid.cfg").ok()?;
+    let mut a = Map::new();
+    if let Some(t) = parse_ini_value(&cfg, "vendor_type") {
+        // MAINLINE/HALIUM → the -s type the user declared (VANILLA/GAPPS/FOSS)
+        // isn't stored verbatim; record what we can identify.
+        if t.eq_ignore_ascii_case("MAINLINE") || t.eq_ignore_ascii_case("HALIUM") {
+            a.insert("vendor_type".into(), json!(t));
+        }
+    }
+    // Image build stamps — what was actually installed, for the record.
+    let mut stamps = Map::new();
+    if let Some(v) = parse_ini_value(&cfg, "system_datetime") {
+        stamps.insert("system".into(), json!(v));
+    }
+    if let Some(v) = parse_ini_value(&cfg, "vendor_datetime") {
+        stamps.insert("vendor".into(), json!(v));
+    }
+    if !stamps.is_empty() {
+        a.insert("image_stamps".into(), Value::Object(stamps));
+    }
+    if let Some(c) = parse_ini_value(&cfg, "system_ota") {
+        a.insert("system_channel".into(), json!(c));
+    }
+    if let Some(c) = parse_ini_value(&cfg, "vendor_ota") {
+        a.insert("vendor_channel".into(), json!(c));
+    }
+    let apps = installed_android_apps();
+    if !apps.is_empty() {
+        a.insert("apps".into(), json!(apps));
+    }
+    Some(Value::Object(a))
+}
+
+/// A bare `key = value` lookup in Waydroid's ini-style config.
+fn parse_ini_value(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Third-party Android packages, recovered from the launchers Waydroid writes
+/// for them (`waydroid.<pkg>.desktop` in the user's applications dir). Reading
+/// the container's package list would need it running; the launchers persist.
+fn installed_android_apps() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = format!("{home}/.local/share/applications");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| {
+            n.strip_prefix("waydroid.")
+                .and_then(|r| r.strip_suffix(".desktop"))
+                .map(str::to_string)
+        })
+        .filter(|p| p != "com.android.settings")
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 // strata readers  (see src/strata.rs)
 // ---------------------------------------------------------------------------
 

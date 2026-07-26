@@ -90,6 +90,11 @@ fn waydroid_init(a: &Android, ctx: &Ctx) -> Result<()> {
         println!("  · waydroid already initialised — skipping");
         return Ok(());
     }
+    if a.system_channel.is_none() {
+        println!(
+            "  · warning: no `system_channel` pin — Waydroid will fetch \"newest at              install time\" and is NOT reproducible (docs/strata-design.md §13)"
+        );
+    }
     println!("  · waydroid init");
     ctx.shell(&waydroid_init_cmd(a), true)
 }
@@ -100,6 +105,17 @@ fn waydroid_init_cmd(a: &Android) -> String {
     if let Some(sys) = &a.system {
         cmd.push_str(" -s ");
         cmd.push_str(&shq(sys));
+    }
+    // Reproducibility: pin the OTA channels the images come from. Without these
+    // an init pulls "newest at install time" (a loud warning, like strata's
+    // missing `snapshot`).
+    if let Some(c) = &a.system_channel {
+        cmd.push_str(" -c ");
+        cmd.push_str(&shq(c));
+    }
+    if let Some(v) = &a.vendor_channel {
+        cmd.push_str(" -v ");
+        cmd.push_str(&shq(v));
     }
     cmd
 }
@@ -362,6 +378,21 @@ install_bundle() {
     else echo "  ! install-commit: $r" >&2; ok=0; fi
   fi
   [ -n "$sid" ] && [ "$ok" != 1 ] && sudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1
+  # .xapk bundles ship expansion data (Android/obb/<pkg>/*.obb) that must live in
+  # the app's OBB dir or the game re-downloads it (or refuses to start).
+  if [ "$ok" = 1 ]; then
+    obbs=$(find "$dir" -name '*.obb' 2>/dev/null || true)
+    if [ -n "$obbs" ]; then
+      for o in $obbs; do
+        # .../Android/obb/<pkg>/<file>.obb  → recover <pkg> from the parent dir
+        opkg=$(basename "$(dirname "$o")")
+        dst="/var/lib/waydroid/data/media/0/Android/obb/$opkg"
+        echo "  installing expansion file $(basename "$o") for $opkg"
+        sudo mkdir -p "$dst" 2>/dev/null
+        sudo cp "$o" "$dst/$(basename "$o")" 2>/dev/null && sudo chmod 644 "$dst/$(basename "$o")" 2>/dev/null           || echo "  ! could not place $(basename "$o")" >&2
+      done
+    fi
+  fi
   if [ "$ok" != 1 ]; then
     echo "  split install failed; trying the base APK alone via waydroid..." >&2
     if waydroid app install "$base"; then echo "  installed base APK only (some resources may be missing)"
@@ -782,6 +813,9 @@ mod tests {
             apps: apps.iter().map(|s| s.to_string()).collect(),
             expose: expose.iter().map(|s| s.to_string()).collect(),
             idle_minutes: idle,
+            system_channel: None,
+            vendor_channel: None,
+            image_stamps: None,
         }
     }
 

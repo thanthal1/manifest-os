@@ -407,6 +407,33 @@ pub struct Android {
     /// in use. `None` ⇒ 45. `Some(0)` ⇒ never auto-stop (stay resident once up).
     #[serde(default)]
     pub idle_minutes: Option<u32>,
+
+    /// Reproducibility pin for the Android images — the OTA channel `waydroid
+    /// init` pulls the **system** image from (`-c`). Point it at a pinned/
+    /// archived channel to reproduce a known image instead of "newest at install
+    /// time". Omit for Waydroid's default channel.
+    #[serde(default)]
+    pub system_channel: Option<String>,
+
+    /// Same, for the **vendor** image (`waydroid init -v`).
+    #[serde(default)]
+    pub vendor_channel: Option<String>,
+
+    /// The image build stamps captured from a running system (`export`), so a
+    /// snapshot records exactly which images were installed. Informational —
+    /// Waydroid can't re-install an arbitrary stamp, so pin the channels above
+    /// for true reproducibility. Written as `system`/`vendor` datetimes.
+    #[serde(default)]
+    pub image_stamps: Option<AndroidImageStamps>,
+}
+
+/// The Waydroid image build stamps recorded on a system (from `waydroid.cfg`).
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+pub struct AndroidImageStamps {
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub vendor: Option<String>,
 }
 
 impl Android {
@@ -419,6 +446,8 @@ impl Android {
             && self.apps.is_empty()
             && self.expose.is_empty()
             && self.idle_minutes.is_none()
+            && self.system_channel.is_none()
+            && self.vendor_channel.is_none()
     }
 }
 

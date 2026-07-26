@@ -401,7 +401,7 @@ CORE_KEYS = {
     "schema_version", "meta", "system", "repos", "packages", "services",
     "dotfiles", "desktop", "display_manager", "boot", "variables", "survey",
     "settings", "conditional_packages", "conditional", "detect", "users",
-    "files", "snippets", "flatpak", "strata", "defaults", "wallpaper", "keybindings",
+    "files", "snippets", "flatpak", "strata", "android", "defaults", "wallpaper", "keybindings",
     "gestures", "theme", "display", "login", "pre_install", "post_install", "plugins",
 }
 
@@ -527,6 +527,73 @@ def scan_strata(m, rep):
                         "host tooling doesn't audit.", f"{where}.expose")
 
 
+# Android app sources we can reason about. An F-Droid package id resolves through
+# F-Droid's signed index; a bare APK path/URL is an unsigned-by-anyone-we-trust
+# binary that Android installs with the app's own permissions.
+ANDROID_TRUSTED_APK_HOSTS = ("f-droid.org", "apt.izzysoft.de")
+# Google Play services in the image: a real choice (many apps need it) but it
+# ships proprietary blobs and phones home — surface it rather than hide it.
+ANDROID_GAPPS_TYPES = {"gapps", "foss"}
+
+
+def scan_android(m, rep):
+    a = m.get("android")
+    if not a:
+        return
+    if not isinstance(a, dict):
+        rep.add("HIGH", "android", "android is not an object",
+                "The android block must be a JSON object.", "android")
+        return
+
+    # Waydroid runs a full Android userspace in a privileged LXC container on the
+    # host kernel — a broad new trust surface, always worth surfacing.
+    rep.add("MEDIUM", "android", "sets up Android (Waydroid)",
+            "Runs a full Android system in a privileged container on the host "
+            "kernel, and installs a passwordless sudoers rule to start/stop it. "
+            "Confirm this is intended.", "android")
+
+    # Reproducibility: unpinned channels fetch "newest at install time".
+    if not a.get("system_channel"):
+        rep.add("LOW", "reproducibility", "Android images are not pinned",
+                "Without `system_channel` the images are whatever is newest at "
+                "install time, so the result isn't reproducible.", "android")
+
+    sys_type = str(a.get("system", "")).strip().lower()
+    if sys_type == "gapps":
+        rep.add("MEDIUM", "android", "uses the GAPPS image (Google Play services)",
+                "Ships proprietary Google components that run inside the "
+                "container and talk to Google servers.", "android.system")
+
+    # App sources: F-Droid ids are index-verified; raw APKs are not.
+    for i, app in enumerate(a.get("apps", []) or []):
+        app = str(app)
+        where = f"android.apps[{i}]"
+        low = app.lower()
+        if low.endswith((".apk", ".apkm", ".apks", ".xapk")):
+            if "://" in app:
+                host = re.sub(r"^\w+://([^/]+).*", r"\g<1>", app).lower()
+                trusted = any(host == t or host.endswith("." + t)
+                              for t in ANDROID_TRUSTED_APK_HOSTS)
+                sev = "MEDIUM" if trusted else "HIGH"
+                rep.add(sev, "android", f"installs an APK from `{host}`",
+                        "A downloaded APK is an unsigned-by-any-trusted-index "
+                        "binary installed into Android with the app's own "
+                        "permissions. Prefer an F-Droid package id.", where)
+                if app.lower().startswith("http://"):
+                    rep.add("HIGH", "insecure URL", f"plain-HTTP APK `{app}`",
+                            "An APK fetched over unencrypted HTTP can be "
+                            "swapped in transit.", where)
+            else:
+                rep.add("HIGH", "android", f"sideloads a local APK `{app}`",
+                        "A bundled APK bypasses any app-store review or "
+                        "signature index. Prefer an F-Droid package id so the "
+                        "source is verifiable.", where)
+        elif not re.fullmatch(r"[A-Za-z][\w]*(\.[A-Za-z0-9_]+)+", app):
+            rep.add("MEDIUM", "android", f"unrecognised app source `{app}`",
+                    "Expected an F-Droid package id (com.example.app) or an "
+                    "APK/APKM path.", where)
+
+
 def scan(manifest, check_packages=False):
     rep = Report()
     if not isinstance(manifest, dict):
@@ -540,6 +607,7 @@ def scan(manifest, check_packages=False):
     scan_sources(manifest, rep)
     scan_repos_boot(manifest, rep)
     scan_strata(manifest, rep)
+    scan_android(manifest, rep)
     scan_packages(manifest, rep, check=check_packages)
     return rep
 

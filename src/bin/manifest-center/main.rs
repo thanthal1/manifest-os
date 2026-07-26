@@ -112,6 +112,15 @@ fn build_home(
         let families: Vec<String> = now.strata.iter().map(|s| pretty(&s.distro)).collect();
         group.add(&info_row("Other app sources", &families.join(", ")));
     }
+    // Android apps (Waydroid), if set up.
+    if let Some(a) = &now.android {
+        let detail = if a.apps.is_empty() {
+            "Set up".to_string()
+        } else {
+            format!("{} app(s)", a.apps.len())
+        };
+        group.add(&info_row("Android apps", &detail));
+    }
     page.add(&group);
 
     // The one big action.
@@ -478,6 +487,31 @@ fn build_strata(stack: &std::rc::Rc<adw::ViewStack>) {
         }
     }
     page.add(&group);
+
+    // Android (Waydroid) — same read-only awareness as the strata list above.
+    if let Some(a) = &now.android {
+        let agroup = adw::PreferencesGroup::builder()
+            .title("Android apps")
+            .description("Android apps run in a lightweight container and open from your menu like any other app. They start when you launch one and shut down when unused.")
+            .build();
+        let subtitle = if a.apps.is_empty() {
+            "Set up — install apps by opening an APK file".to_string()
+        } else {
+            a.apps.join(", ")
+        };
+        agroup.add(
+            &adw::ActionRow::builder()
+                .title("Android")
+                .subtitle(&subtitle)
+                .build(),
+        );
+        if let Some(st) = &a.image_stamps {
+            if let Some(sys) = &st.system {
+                agroup.add(&info_row("Android version", sys));
+            }
+        }
+        page.add(&agroup);
+    }
 
     stack
         .add_titled(&page, Some("strata"), "Other apps")

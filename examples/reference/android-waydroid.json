@@ -4,12 +4,19 @@
     "name": "Android apps (Waydroid) demo",
     "author": "you",
     "description": "Run Android apps on the desktop via Waydroid — the 'android stratum' (docs/strata-design.md §13). A container on the host kernel, not a chroot or VM; apps launch from fuzzel/rofi. LAZY lifecycle: Android is not kept in the background — it boots on the first app launch and auto-stops after `idle_minutes` unused (default 45). Hardware-gated: needs binderfs in the kernel and a real GPU. `system: GAPPS` pulls Play services (many apps need it); use VANILLA/FOSS otherwise. Apps install on the first graphical session; `android-install <apk|fdroid-id>` adds more anytime.",
-    "tags": ["android", "waydroid", "strata", "reference"],
+    "tags": [
+      "android",
+      "waydroid",
+      "strata",
+      "reference"
+    ],
     "version": "1.0.0",
     "license": "free"
   },
   "android": {
     "system": "GAPPS",
+    "system_channel": "https://ota.waydro.id/system",
+    "vendor_channel": "https://ota.waydro.id/vendor",
     "mode": "multi_windows",
     "idle_minutes": 45,
     "apps": [

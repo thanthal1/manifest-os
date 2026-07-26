@@ -51,6 +51,7 @@ pub fn compute(new: &Manifest, current: Option<&Manifest>) -> Vec<Change> {
     flatpak_changes(&mut out, old, new);
     defaults_changes(&mut out, old, new);
     strata_changes(&mut out, old, new);
+    android_changes(&mut out, old, new);
 
     if old.keybindings.len() != new.keybindings.len() {
         out.push(changed(
@@ -90,6 +91,50 @@ pub fn requires_full_apply(new: &Manifest, current: Option<&Manifest>) -> bool {
         || flatpak_apps(old) != flatpak_apps(new)
         || users(old) != users(new)
         || strata_sig(old) != strata_sig(new)
+        || android_sig(old) != android_sig(new)
+}
+
+/// A comparable signature of the Android block's install-affecting state — the
+/// image type/channel pins and the declared apps. A change here means Waydroid
+/// setup or an app install must re-run, so it forces a full apply.
+fn android_sig(m: &Manifest) -> String {
+    let Some(a) = &m.android else {
+        return String::new();
+    };
+    let mut apps = a.apps.clone();
+    apps.sort();
+    format!(
+        "{}|{}|{}|{}|{}",
+        a.system.as_deref().unwrap_or(""),
+        a.system_channel.as_deref().unwrap_or(""),
+        a.vendor_channel.as_deref().unwrap_or(""),
+        a.mode.as_deref().unwrap_or(""),
+        apps.join(","),
+    )
+}
+
+/// Human-readable Android changes for the preview.
+fn android_changes(out: &mut Vec<Change>, old: &Manifest, new: &Manifest) {
+    let old_apps: Vec<String> = old.android.as_ref().map(|a| a.apps.clone()).unwrap_or_default();
+    let new_apps: Vec<String> = new.android.as_ref().map(|a| a.apps.clone()).unwrap_or_default();
+    // Turning Android on/off is the headline; app adds/removes list individually.
+    match (old.android.is_some(), new.android.is_some()) {
+        (false, true) => out.push(Change {
+            kind: ChangeKind::Added,
+            category: "Android".into(),
+            detail: "Android app support (Waydroid)".into(),
+        }),
+        (true, false) => out.push(Change {
+            kind: ChangeKind::Removed,
+            category: "Android".into(),
+            detail: "Android app support (Waydroid)".into(),
+        }),
+        _ => {}
+    }
+    list_changes(out, "Android apps", &old_apps, &new_apps);
+    let old_img = old.android.as_ref().and_then(|a| a.system.clone());
+    let new_img = new.android.as_ref().and_then(|a| a.system.clone());
+    value_change(out, "Android image", old_img.as_deref(), new_img.as_deref());
 }
 
 /// A comparable signature of every stratum's install-affecting state — its name,
