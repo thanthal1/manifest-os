@@ -183,6 +183,11 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
              if you want the full desktop)"
         );
         ctx.shell(&setup_autologon_step(), false)?;
+        println!(
+            "  · guest setup: allowing apps to launch from your home folder (Windows blocks \
+             programs on a network drive, and the prompt is fatal to a single-window app)"
+        );
+        ctx.shell(&setup_zone_policy_step(), false)?;
         let compose = compose_yaml(vm, &pass);
         ctx.write_user(&expand(&format!("{COMPOSE_DIR}/compose.yaml")), &compose)?;
         // WinApps reads ~/.config/winapps/compose.yaml — the path is hardcoded in
@@ -565,6 +570,34 @@ APPSBEFORE=$(mktemp) && list_apps > "$APPSBEFORE"
 # fallback still has to tell the user where to find their installer.
 WINPATH='Z:\Windows Transfer\'"$base"
 opened=0
+
+# Z: is a network location to Windows, so launching an .exe from it raises
+# "Open File - Security Warning". As a RemoteApp that is fatal twice: the app
+# never starts, and the modal stays parked in the guest's session -- and since
+# RAIL surfaces every top-level window, the NEXT launch of any app shows that
+# stale dialog instead. Setup writes this into C:\OEM\install.bat for new
+# guests; a guest installed before that never ran it, so apply it once here.
+# Costs one short RDP round-trip, exactly once per guest.
+ZONE_STAMP="$VMDIR/.launch-policy-set"
+WACONF="$HOME/.config/winapps/winapps.conf"
+if [ ! -f "$ZONE_STAMP" ] && [ -r "$WACONF" ]; then
+  RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
+  . "$WACONF" 2>/dev/null || true
+  if [ -n "$RDP_USER" ]; then
+    # Through cmd.exe, ending in `tsdiscon`: a RemoteApp session does not close
+    # when the program exits, so running reg.exe directly leaves FreeRDP sitting
+    # there until the timeout -- a 90-second stall before the app the user
+    # actually asked for. Disconnecting explicitly is what WinApps' own
+    # connection test does, and it returns in seconds.
+    timeout 60 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+      /v:127.0.0.1:3389 \
+      '/app:program:C:\Windows\System32\cmd.exe,cmd:/C reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v 1806 /t REG_DWORD /d 0 /f & tsdiscon' \
+      >/dev/null 2>&1
+  fi
+  # Best-effort: a failure here just means the warning may still appear, which
+  # is visible and recoverable. Never block the launch on it.
+  touch "$ZONE_STAMP" 2>/dev/null || true
+fi
 # Only a guest INSTALLED with TSAppAllowList\fDisabledAllowList=1 can run an
 # arbitrary program as a RemoteApp. Without it the connection still succeeds --
 # Windows just serves the console session instead, so you get a full desktop,
@@ -1194,6 +1227,33 @@ fn setup_autologon_step() -> String {
     )
 }
 
+/// Stop Windows blocking every app we launch, by appending to
+/// `C:\OEM\install.bat`. Pure — unit-tested.
+///
+/// We hand the guest a path on `Z:` (dockur's `/shared`, i.e. the user's own
+/// home). Windows treats that as a network location, so launching an `.exe`
+/// from it raises **"Open File - Security Warning"** — and as a RemoteApp that
+/// is fatal twice over: the app never starts, *and* the modal stays parked in
+/// the guest's session. They accumulate, and because RAIL surfaces every
+/// top-level window, the next launch of *any* app shows the old dialog instead
+/// of what you asked for. Observed: launching Notepad produced a stale
+/// "Open File - Security Warning" from an earlier attempt.
+///
+/// Zone 3 policy `1806` is "launching applications and unsafe files". Turning
+/// the prompt off is a deliberate narrowing of a Windows security control, and
+/// it is the right call *here*: the only network location involved is the
+/// user's own `$HOME`, they picked the file themselves on the Linux side, and
+/// the guest is a disposable container. It is not a general-purpose Windows.
+fn setup_zone_policy_step() -> String {
+    let zone = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3";
+    format!(
+        r#"b="{COMPOSE_DIR}/oem/install.bat"
+           if ! grep -qi 'Internet Settings' "$b" 2>/dev/null; then
+             printf '%s\r\n' 'reg add "{zone}" /v 1806 /t REG_DWORD /d 0 /f >nul 2>&1' >> "$b"
+           fi"#
+    )
+}
+
 /// Append our debloat call to WinApps' `install.bat`. Pure — unit-tested.
 ///
 /// Chained onto theirs rather than replacing it: dockur runs exactly one
@@ -1623,6 +1683,7 @@ mod tests {
             ("debloat bat step", setup_debloat_bat_step()),
             ("fallback bat step", setup_fallback_bat_step()),
             ("autologon step", setup_autologon_step()),
+            ("zone policy step", setup_zone_policy_step()),
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
@@ -1709,6 +1770,30 @@ mod tests {
         assert!(s.contains("grep -qi 'AutoAdminLogon'"), "{s}");
         // A batch file Windows reads: CRLF, not LF.
         assert!(s.contains(r"'%s\r\n'"), "batch files need CRLF: {s}");
+    }
+
+    /// Z: is a network location to Windows, so launching an .exe from it raises
+    /// "Open File - Security Warning" — and as a RemoteApp that is fatal twice:
+    /// the app never starts, and the modal stays parked in the guest session.
+    /// They accumulate, and since RAIL surfaces every top-level window, the next
+    /// launch of *any* app shows the stale dialog. Measured: asking for Notepad
+    /// produced a security warning left over from an earlier attempt.
+    #[test]
+    fn apps_are_allowed_to_launch_from_the_shared_home() {
+        let s = setup_zone_policy_step();
+        // Zone 3, policy 1806 = "launching applications and unsafe files".
+        assert!(s.contains(r"Internet Settings\Zones\3"), "{s}");
+        assert!(s.contains("/v 1806 /t REG_DWORD /d 0 /f"), "{s}");
+        assert!(s.contains(">> \"$b\""), "append to the OEM hook, never replace it: {s}");
+        assert!(s.contains("grep -qi 'Internet Settings'"), "idempotent: {s}");
+        // A guest installed before this existed never ran that install.bat, so
+        // the launcher applies it once itself rather than telling the user to.
+        let run = vm_run_script();
+        assert!(run.contains(".launch-policy-set"), "existing guests get it too: {run}");
+        assert!(run.contains("/v 1806 /t REG_DWORD /d 0 /f"), "{run}");
+        let stamp = run.find("ZONE_STAMP=").expect("stamp");
+        let launch = run.find("run_wa manual \"$WINPATH\"").expect("launch");
+        assert!(stamp < launch, "must be set before the first launch, not after:\n{run}");
     }
 
     /// The stamp answers "was the Windows in storage/ INSTALLED with
