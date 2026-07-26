@@ -435,6 +435,11 @@ fn write_mime(ctx: &Ctx) -> Result<()> {
     // itself is NOT installed here — windows-install offers that on first use.
     ctx.write_root("/usr/local/bin/windows-install", &thin_stub("windows-install"))?;
     ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-install"])?;
+    // The VM handoff target, so declining Wine always has somewhere to go — even
+    // before `manifest windows-vm` has ever run. (Setting the VM up is still
+    // lazy; this only makes the command exist.)
+    ctx.write_root("/usr/local/bin/windows-vm-run", &thin_stub("windows-vm-run"))?;
+    ctx.sudo("chmod", &["0755", "/usr/local/bin/windows-vm-run"])?;
     ctx.write_root(
         "/usr/share/applications/manifest-windows-install.desktop",
         windows_handler_desktop(),

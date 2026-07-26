@@ -234,7 +234,12 @@ offer_vm() {
   printf 'Use the Windows VM for this? [y/N] '
   read r2
   case "$r2" in
-    [yY]|[yY][eE][sS]) exec windows-vm-run "$f" ;;
+    [yY]|[yY][eE][sS])
+      # Use the installed command if present, else run the logic straight from
+      # the binary — so this works right after `pacman -Syu`, before the command
+      # file has been written.
+      if command -v windows-vm-run >/dev/null 2>&1; then exec windows-vm-run "$f"; fi
+      exec sh -c "$(manifest __script windows-vm-run)" manifest "$f" ;;
     *) echo "Cancelled."; exit 1 ;;
   esac
 }
@@ -426,7 +431,11 @@ exit"), "{s}");
         let s = install_script();
         // Saying no to Wine must not be a dead end — every path offers the VM.
         assert!(s.contains("offer_vm()"), "{s}");
+        // Uses the installed command when present, else runs the logic straight
+        // from the binary — the command may not exist yet on an upgraded system.
         assert!(s.contains("exec windows-vm-run \"$f\""), "hands the file to the VM: {s}");
+        assert!(s.contains("manifest __script windows-vm-run"),
+                "must self-bootstrap when the command isn't installed yet: {s}");
         assert_eq!(s.matches("offer_vm ;;").count(), 3,
                    "blocked, risky and unknown all fall through to the VM offer:
 {s}");
