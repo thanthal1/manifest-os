@@ -1496,15 +1496,60 @@ New-Item -ItemType Directory -Path (Split-Path $xml) -Force | Out-Null
 @"
 <?xml version="1.0" encoding="UTF-8"?>
 <DefaultAssociations>
-  <Association Identifier=".htm"  ProgId="$html" ApplicationName="Waterfox" />
-  <Association Identifier=".html" ProgId="$html" ApplicationName="Waterfox" />
-  <Association Identifier="http"  ProgId="$url"  ApplicationName="Waterfox" />
-  <Association Identifier="https" ProgId="$url"  ApplicationName="Waterfox" />
+  <Association Identifier=".htm"   ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier=".html"  ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier=".xhtml" ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier=".shtml" ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier=".pdf"   ProgId="$html" ApplicationName="Waterfox" />
+  <Association Identifier="http"   ProgId="$url"  ApplicationName="Waterfox" />
+  <Association Identifier="https"  ProgId="$url"  ApplicationName="Waterfox" />
+  <Association Identifier="ftp"    ProgId="$url"  ApplicationName="Waterfox" />
 </DefaultAssociations>
 "@ | Set-Content -Path $xml -Encoding UTF8
 $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
 New-Item -Path $key -Force | Out-Null
 Set-ItemProperty -Path $key -Name 'DefaultAssociationsConfiguration' -Value $xml -Type String
+
+# Get Edge out of the way where Windows allows it. Edge cannot be uninstalled
+# on a stock image and fighting that is a losing game -- but its shortcuts are
+# what a user actually clicks, and every one of them opens a window that cannot
+# render. Removing the shortcuts is enough; the associations above are what
+# stop programs handing it URLs.
+foreach ($p in @(
+    "$env:PUBLIC\Desktop\Microsoft Edge.lnk",
+    "$env:USERPROFILE\Desktop\Microsoft Edge.lnk",
+    "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk",
+    "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk")) {{
+    Remove-Item -LiteralPath $p -Force -EA SilentlyContinue
+}}
+# And stop it reinstating itself as the handler on update.
+$edge = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+New-Item -Path $edge -Force | Out-Null
+Set-ItemProperty -Path $edge -Name 'DefaultBrowserSettingEnabled' -Value 0 -Type DWord
+Set-ItemProperty -Path $edge -Name 'HideFirstRunExperience' -Value 1 -Type DWord
+
+# A guest-side watcher is what makes the browser observable from Linux. Polling
+# the guest over RDP costs a round trip each time; a flag on the shared drive
+# costs nothing to read. Written whenever waterfox.exe is running, removed when
+# it exits -- so the host can see an OAuth flow start and finish.
+$watch = 'C:\ProgramData\ManifestOS\browser-watch.ps1'
+@'
+# Z: is dockur's /shared mount -- the user's own home, readable from Linux
+# without an RDP round trip, which is the whole point of signalling here.
+$flag = 'Z:\.manifest-browser-active'
+while ($true) {{
+    try {{
+        if (Get-Process waterfox -ErrorAction SilentlyContinue) {{
+            if (-not (Test-Path $flag)) {{ New-Item -ItemType File -Path $flag -Force | Out-Null }}
+        }} elseif (Test-Path $flag) {{
+            Remove-Item $flag -Force -ErrorAction SilentlyContinue
+        }}
+    }} catch {{ }}
+    Start-Sleep -Seconds 2
+}}
+'@ | Set-Content -Path $watch -Encoding UTF8
+$run = "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watch`""
+schtasks /Create /TN 'ManifestOS Browser Watch' /SC ONLOGON /RL HIGHEST /F /TR $run | Out-Null
 "#,
         url = url,
         policies = WATERFOX_POLICIES.trim_end(),
@@ -2066,6 +2111,27 @@ mod tests {
         assert!(!ps.contains("WaterfoxHTML-"), "a hardcoded install hash would be wrong: {ps}");
         // Pinned, so a build is reproducible and upstream can't move under us.
         assert!(WATERFOX_URL.contains("6.6.17"), "pin the version: {WATERFOX_URL}");
+        // One browser, standardised. Detecting "a browser" generically means
+        // handling every engine's quirks; supporting exactly one that is known
+        // to render collapses the problem. So Edge's shortcuts go, and the
+        // associations cover every way a program can hand out a URL or page.
+        for id in [".htm", ".html", ".xhtml", "http", "https", "ftp", ".pdf"] {
+            assert!(ps.contains(&format!("Identifier=\"{id}\"")), "{id} unhandled: {ps}");
+        }
+        assert!(ps.contains("Microsoft Edge.lnk"), "remove the shortcuts a user clicks: {ps}");
+        assert!(ps.contains("DefaultBrowserSettingEnabled"), "stop Edge reclaiming it: {ps}");
+        // Edge cannot be uninstalled on a stock image; fighting that is a
+        // losing game, so this only removes shortcuts and takes the handlers.
+        assert!(!ps.contains("Remove-AppxPackage"), "do not fight Windows over Edge: {ps}");
+        // The host cannot poll the guest cheaply -- every check is an RDP round
+        // trip -- so the guest signals instead, onto the drive Linux already
+        // has mounted.
+        assert!(ps.contains(r"Z:\.manifest-browser-active"), "signal via the share: {ps}");
+        assert!(ps.contains("Get-Process waterfox"), "watch only waterfox: {ps}");
+        assert!(ps.contains("schtasks /Create"), "watcher must survive a reboot: {ps}");
+        // PowerShell continues lines with a backtick; `^` is cmd's and would
+        // silently truncate the command.
+        assert!(!ps.contains(" ^\n"), "cmd continuation in a PowerShell script: {ps}");
         // Chained onto the OEM hook, never replacing it.
         let bat = setup_browser_bat_step();
         assert!(bat.contains(">> \"$b\""), "append: {bat}");
