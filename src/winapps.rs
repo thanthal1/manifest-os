@@ -296,6 +296,17 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Re-scan the guest's Start Menu and refresh the menu entries.
+///
+/// Called automatically after anything is installed — a person should never
+/// have to run a command to make an app they just installed appear. Exposed as
+/// `manifest __winvm-apps` only so the generated launcher can invoke it.
+pub fn refresh_app_launchers(ctx: &Ctx) -> Result<usize> {
+    ctx.write_user(&expand("$HOME/Windows Transfer/.manifest-enum-apps.ps1"), ENUM_APPS_PS1)?;
+    ctx.shell(&enum_apps_step(), false)?;
+    write_app_launchers()
+}
+
 /// Enumerate the guest's Start Menu. Runs *in* Windows and writes a TSV onto
 /// the shared drive, which is the user's own home — so the Linux side reads a
 /// local file rather than paying an RDP round trip per app.
@@ -321,21 +332,37 @@ $rows | Sort-Object -Unique | Set-Content -Path $out -Encoding UTF8
 "#;
 
 /// Run the enumerator in the guest. Pure — unit-tested.
+///
+/// The script is passed **encoded on the command line**, not as a file on the
+/// share. The guest lists `Z:\Windows Transfer` as an empty directory even when
+/// it has files in it — dockur's share does not show the guest what was written
+/// a moment ago from Linux — so `-File Z:\...` fails with "does not exist".
+/// Reading *out* through Z: works fine, which is why the result still comes
+/// back that way; it is only fresh writes the guest cannot see. `-EncodedCommand`
+/// also sidesteps quoting a multi-line script through cmd.
 fn enum_apps_step() -> String {
-    // Ends in tsdiscon: a RemoteApp session does not close when its program
-    // exits, so without it this sits until the timeout.
-    r#"CONF="$HOME/.config/winapps/winapps.conf"
+    format!(
+        r#"CONF="$HOME/.config/winapps/winapps.conf"
        [ -r "$CONF" ] || exit 0
        RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
        . "$CONF" 2>/dev/null || true
        [ -n "$RDP_USER" ] || exit 0
+       command -v iconv >/dev/null 2>&1 || exit 0
+       ENC=$(cat <<'MOSPSEOF' | iconv -f UTF-8 -t UTF-16LE | base64 -w0
+{script}
+MOSPSEOF
+)
+       [ -n "$ENC" ] || exit 0
        rm -f "$HOME/.manifest-apps.tsv"
-       timeout 120 "${FREERDP_COMMAND:-xfreerdp3}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+       # tsdiscon: a RemoteApp session does not close when its program exits,
+       # so without it this sits until the timeout.
+       timeout 120 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
          /v:127.0.0.1:3389 \
-         '/app:program:C:\Windows\System32\cmd.exe,cmd:/C copy /Y "Z:\Windows Transfer\.manifest-enum-apps.ps1" "%TEMP%\ea.ps1" >nul && powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\ea.ps1" & tsdiscon' \
+         "/app:program:C:\\Windows\\System32\\cmd.exe,cmd:/C powershell -NoProfile -EncodedCommand $ENC & tsdiscon" \
          >/dev/null 2>&1 || true
-       true"#
-        .to_string()
+       true"#,
+        script = ENUM_APPS_PS1.trim_end(),
+    )
 }
 
 /// Turn the guest's app list into `.desktop` launchers. Returns how many.
@@ -354,13 +381,26 @@ fn write_app_launchers() -> Result<usize> {
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName={name}\n\
              Comment=Windows app (Manifest OS Windows VM)\n\
-             Exec=windows-vm-run '{target}'\nTryExec=/usr/local/bin/windows-vm-run\n\
-             Icon=applications-other\nTerminal=false\nCategories=Windows;\n"
+             Exec=windows-vm-run \"{exec}\"\nTryExec=/usr/local/bin/windows-vm-run\n\
+             Icon=applications-other\nTerminal=false\nCategories=Utility;X-Windows;\n",
+            exec = exec_quote(target),
         );
         std::fs::write(format!("{dir}/manifest-winvm-app-{slug}.desktop"), entry)?;
         n += 1;
     }
     Ok(n)
+}
+
+/// Escape a Windows path for a `.desktop` `Exec=` line. Pure — unit-tested.
+///
+/// A backslash goes through **two** unescapings on the way to the program: the
+/// desktop-entry value parser, then Exec's own quoting. So each one has to be
+/// written four times. Getting this wrong is not a cosmetic problem — the entry
+/// fails validation and launchers simply never appear, which is exactly how
+/// Inventor stayed missing from the menu after it had supposedly been added.
+/// (Single quotes are a *reserved character* here and are not an alternative.)
+fn exec_quote(path: &str) -> String {
+    path.replace('\\', "\\\\\\\\").replace('"', "\\\\\"")
 }
 
 /// Whether a Start Menu target is something the user installed, rather than a
@@ -856,6 +896,12 @@ if [ "$opened" = 1 ]; then
   # Whatever it installed should now be in your launcher — re-detect so you
   # never have to run anything yourself.
   echo "Checking for newly installed Windows apps..."
+  # Re-scan the guest's Start Menu directly. `--link` only asks WinApps, which
+  # writes entries solely for apps in its own hardcoded catalog -- so anything
+  # it has not heard of (Inventor, and most things) installed fine and then
+  # never appeared. Nobody should have to run a scan to find an app they just
+  # installed, so this happens here, automatically.
+  manifest __winvm-apps >/dev/null 2>&1 || true
   manifest windows-vm --link >/dev/null 2>&1 || true
   APPSAFTER=$(mktemp) && list_apps > "$APPSAFTER"
   new=$(comm -13 "$APPSBEFORE" "$APPSAFTER" 2>/dev/null)

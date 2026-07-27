@@ -95,6 +95,11 @@ enum Command {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// (internal) Re-scan the Windows VM's Start Menu and refresh menu entries.
+    /// Run automatically after anything is installed — nobody should have to
+    /// type a command to see an app they just installed.
+    #[command(name = "__winvm-apps", hide = true)]
+    WinvmApps,
     /// (internal) Compatibility hint for a Windows app, as `<verdict>|<reasons>`.
     /// Used by `windows-install` to decide whether to warn before installing;
     /// name matching is fuzzy, so it's advice, never a gate.
@@ -424,6 +429,14 @@ fn run() -> Result<()> {
             refuse_if_run_via_sudo("windows-setup")?;
             let ctx = Ctx::new(false);
             winapps_wine::setup(&ctx)
+        }
+        Command::WinvmApps => {
+            let ctx = Ctx::new(false);
+            match winapps::refresh_app_launchers(&ctx) {
+                Ok(n) => println!("  · {n} Windows apps in your menu"),
+                Err(e) => println!("  ! couldn't read the app list from Windows: {e}"),
+            }
+            Ok(())
         }
         Command::WindowsVm { link, file } => {
             refuse_if_run_via_sudo("windows-vm")?;
