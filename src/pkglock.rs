@@ -28,8 +28,14 @@ use std::process::Command;
 pub const DIR: &str = "/var/lib/manifest-os/versions";
 /// The single tracked file: `name version` per line, sorted.
 pub const LOCK_FILE: &str = "packages.lock";
-/// Pacman hook that runs [`snapshot`] after every package transaction.
+/// Pacman hook that runs [`snapshot`] after every package transaction. Written
+/// at install time on systems that don't have the `manifest-os` *package*.
 const HOOK_PATH: &str = "/etc/pacman.d/hooks/96-manifest-versions.hook";
+/// The same hook, shipped by the `manifest-os` package and therefore always
+/// pointing at `/usr/bin/manifest`. A same-named file in pacman's HookDir
+/// ([`HOOK_PATH`]) overrides this one, so when this exists the override is both
+/// redundant and the only copy that can go stale.
+const PACKAGED_HOOK: &str = "/usr/share/libalpm/hooks/96-manifest-versions.hook";
 /// Where pacman keeps downloaded package files (the downgrade source of truth).
 const CACHE_DIR: &str = "/var/cache/pacman/pkg";
 /// Arch Linux Archive — historical package files for official-repo downgrades.
@@ -266,13 +272,24 @@ fn hook_exe() -> String {
         .unwrap_or_else(|_| PACKAGED.to_string())
 }
 
-/// Rewrite the hook if it points at a `manifest` that isn't there any more.
+/// Drop the runtime hook once the package owns one, or rewrite it if it points
+/// at a `manifest` that isn't there any more.
 ///
 /// Runs from `manifest __refresh-integration`, which the package's
 /// PostTransaction hook invokes on every upgrade — so `pacman -Syu` alone
 /// repairs a system whose hook was baked with an old path. Best-effort: this
 /// must never fail an upgrade.
 pub fn repair_hook(ctx: &Ctx) {
+    // Packaged systems: hand the job to the package's copy. Removing the
+    // override is the repair — the package's path can never go stale, whereas
+    // any runtime-written one is a baked absolute path waiting to rot.
+    if std::path::Path::new(PACKAGED_HOOK).exists() {
+        if std::path::Path::new(HOOK_PATH).exists() {
+            println!("  · the manifest-os package now owns the package-version hook — dropping the old override");
+            let _ = ctx.sudo("rm", &["-f", HOOK_PATH]);
+        }
+        return;
+    }
     let Ok(existing) = std::fs::read_to_string(HOOK_PATH) else { return };
     let stale = existing
         .lines()
@@ -678,6 +695,25 @@ mod tests {
         }
     }
 
+    /// The package ships its own copy of this hook (PKGBUILD →
+    /// /usr/share/libalpm/hooks). It must stay behaviourally identical to the
+    /// runtime-written one, minus the bakeable path — otherwise a fresh install,
+    /// which deletes the runtime copy in favour of the packaged one, silently
+    /// stops snapshotting versions.
+    #[test]
+    fn the_packaged_hook_matches_the_runtime_one() {
+        let shipped = include_str!("../packaging/pkg/96-manifest-versions.hook");
+        assert!(shipped.contains("Exec = /usr/bin/manifest snapshot-packages"), "{shipped}");
+        assert!(shipped.contains("When = PostTransaction"), "{shipped}");
+        // Same trigger set, or the two copies snapshot different events.
+        for line in hook_text("/usr/bin/manifest")
+            .lines()
+            .filter(|l| l.starts_with("Operation = ") || *l == "Type = Package" || *l == "Target = *")
+        {
+            assert!(shipped.contains(line), "packaged hook is missing `{line}`");
+        }
+    }
+
     /// The repair only fires on a hook whose target has actually gone away —
     /// rewriting a good one on every upgrade would be churn.
     #[test]
@@ -689,7 +725,12 @@ mod tests {
             .and_then(|c| c.split_whitespace().next())
             .expect("an Exec line");
         assert!(!std::path::Path::new(exe).exists(), "this one is stale");
-        let good = hook_text("/bin/sh");
+        // A target that definitely exists: this very test binary. (Not /bin/sh —
+        // these tests also run on the Windows dev host.)
+        let here = std::env::current_exe().expect("the test binary's own path");
+        let here = here.to_string_lossy();
+        assert!(!here.contains(char::is_whitespace), "the Exec parse splits on whitespace");
+        let good = hook_text(&here);
         let exe = good
             .lines()
             .find_map(|l| l.trim().strip_prefix("Exec = "))

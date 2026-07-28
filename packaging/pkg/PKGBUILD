@@ -14,7 +14,7 @@
 pkgbase=manifest-os
 pkgname=(manifest-os manifest-os-gui manifest-os-plugins manifest-os-examples)
 pkgver="${MANIFEST_PKGVER:-0.1.0}"
-pkgrel=68
+pkgrel=69
 pkgdesc="Declare a complete Arch system in one manifest.json and reproduce it anywhere"
 arch=('x86_64')
 url="https://github.com/thanthal1/manifest-os"
@@ -41,6 +41,11 @@ package_manifest-os() {
     # it's always correct after upgrades (no dependence on /usr/local/bin).
     install -Dm644 packaging/pkg/95-manifest-export.hook \
         "$pkgdir/usr/share/libalpm/hooks/95-manifest-export.hook"
+    # Same deal for the version-snapshot hook: package-owned means it always
+    # points at /usr/bin/manifest, instead of at wherever the binary happened to
+    # live when tracking was first enabled (which the install then deletes).
+    install -Dm644 packaging/pkg/96-manifest-versions.hook \
+        "$pkgdir/usr/share/libalpm/hooks/96-manifest-versions.hook"
     # Keeps the generated shell integration (command-not-found) and the
     # file-manager handlers current on every upgrade — no manual re-run.
     install -Dm644 packaging/pkg/96-manifest-integration.hook \

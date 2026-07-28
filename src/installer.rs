@@ -1845,9 +1845,18 @@ fn configure_updates(plan: &InstallPlan, ctx: &Ctx) {
         return;
     }
 
-    // 4. Success: the packages now own /usr/bin/manifest[-center] + the hook, so
-    //    remove the baked /usr/local/bin copies and the runtime hook to avoid
-    //    PATH shadowing and a duplicate/stale hook.
+    // 4. Success: the packages now own /usr/bin/manifest[-center] + BOTH hooks,
+    //    so remove the baked /usr/local/bin copies and the runtime hooks to
+    //    avoid PATH shadowing and stale hooks.
+    //
+    //    Both hooks matter here, and the version one is the one that bit us: the
+    //    chroot install wrote it while the only `manifest` was
+    //    /usr/local/bin/manifest, so that absolute path got baked in — and the
+    //    very next line deletes that binary. Left behind, it ends EVERY pacman
+    //    transaction on a fresh install with "call to execv failed (No such file
+    //    or directory)". A file of this name in pacman's HookDir also *overrides*
+    //    the package's copy, so removing it is what lets the package's
+    //    /usr/bin/manifest version take over.
     let _ = ctx.sudo(
         "rm",
         &[
@@ -1855,6 +1864,7 @@ fn configure_updates(plan: &InstallPlan, ctx: &Ctx) {
             "/mnt/usr/local/bin/manifest",
             "/mnt/usr/local/bin/manifest-center",
             "/mnt/etc/pacman.d/hooks/95-manifest-export.hook",
+            "/mnt/etc/pacman.d/hooks/96-manifest-versions.hook",
         ],
     );
     println!("  · components installed as packages — `pacman -Syu` keeps them updated");

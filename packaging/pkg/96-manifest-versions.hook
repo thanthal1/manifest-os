@@ -1,0 +1,17 @@
+# Managed by the manifest-os package — snapshot the exact installed version of
+# every package after each transaction, so a bad upgrade is revertible with
+# `manifest restore`. Package-owned so the path can never go stale: the runtime
+# copy this replaces baked in whatever `manifest` existed at setup time, and
+# died with "call to execv failed" once that binary moved.
+# PostTransaction, so it can never abort or roll back a pacman transaction.
+[Trigger]
+Operation = Install
+Operation = Remove
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Snapshotting package versions (Manifest OS)...
+When = PostTransaction
+Exec = /usr/bin/manifest snapshot-packages
