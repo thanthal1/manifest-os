@@ -398,6 +398,15 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
 5. `packaging/sign-repo.sh` (needs the private key — maintainer machine only),
    then `packaging/publish-repo.sh` (gh release, fixed tag `repo`).
 6. Delete the superseded pkgrel's assets so the release stays at 16.
+7. Prove it from the outside, not from `packaging/out/`: `curl` the package **and**
+   its `.sig` from the release URL and `gpg --verify` both, then look inside the
+   downloaded package for whatever the release was for. Two minutes, and it is the
+   only check that covers the upload itself.
+
+> **VBoxManage `copyfrom` in a bash loop:** write the host destination with
+> forward slashes (`C:/…/out/$f`). In a double-quoted string `"…out\\$f"` collapses
+> to `out\$f` — an *escaped* dollar — so every file silently lands in one file
+> literally named `out$f`, with exit 0 and a 100% progress bar each time.
 
 ## Known gaps / next steps
 
