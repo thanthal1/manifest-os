@@ -22,6 +22,30 @@ if ! command -v mkarchiso &>/dev/null; then
     exit 1
 fi
 
+# A FAT volume label is 11 bytes. Writers that EXTRACT the ISO onto a FAT32
+# stick rather than raw-copying it (Rufus "ISO Image mode", UNetbootin, plain
+# drag-and-drop) set the stick's label from ours and silently truncate it --
+# but the kernel cmdline still searches for the full string, finds no medium,
+# and the boot dies. This is invisible when you test by dd/Etcher, which
+# preserve the real filesystem, so it only ever bites end users.
+# `file_permissions` is an associative array, so it needs declaring before the
+# source or bash reads the ["/path"] keys as arithmetic and dies. mkarchiso does
+# the same. Without this the label reads back EMPTY and the check below passes
+# for the wrong reason -- which is worse than not checking at all.
+iso_label="$(declare -A file_permissions; . "$profile/profiledef.sh" >/dev/null 2>&1; printf '%s' "${iso_label:-}")"
+if [[ -z $iso_label ]]; then
+    echo "could not read iso_label from $profile/profiledef.sh — refusing to" >&2
+    echo "build blind, since the FAT32 length check below would be meaningless." >&2
+    exit 1
+fi
+if (( ${#iso_label} > 11 )); then
+    echo "iso_label '$iso_label' is ${#iso_label} chars; FAT32 allows 11." >&2
+    echo "It would truncate to '${iso_label:0:11}' on an extracted USB and the" >&2
+    echo "resulting stick would not boot. Shorten it in $profile/profiledef.sh." >&2
+    exit 1
+fi
+echo "iso_label: $iso_label (${#iso_label}/11 chars — survives a FAT32 extraction)"
+
 # Bake the freshly-built manifest binary into the live filesystem.
 bin="$repo/target/release/manifest"
 [[ -x "$bin" ]] || bin="$repo/dist/manifest"

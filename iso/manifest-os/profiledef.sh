@@ -2,7 +2,14 @@
 # shellcheck disable=SC2034
 
 iso_name="manifestos"
-iso_label="MANIFESTOS_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
+# MUST stay <= 11 characters. A FAT volume label is 11 bytes, so anything longer
+# is silently truncated when a writer extracts the ISO onto a FAT32 stick
+# (Rufus "ISO Image mode", UNetbootin, drag-and-drop). The kernel cmdline still
+# searches for the full label, matches nothing, and the boot dies looking for
+# its own medium. "MANIFESTOS_202607" truncated to exactly "MANIFESTOS_" and
+# cost a user a non-booting USB. Arch's own releng uses ARCH_YYYYMM (11) for
+# this reason. iso/build.sh enforces the limit.
+iso_label="MOS_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="Manifest OS <https://manifest.os>"
 iso_application="Manifest OS Installer"
 iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
