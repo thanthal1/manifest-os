@@ -1854,13 +1854,9 @@ pub fn password_in_compose(compose: &str) -> Option<String> {
 /// everything with "sudo: a terminal is required" and leaves the user with the
 /// same broken state they started with.
 fn write_root_if_changed(ctx: &Ctx, path: &str, content: &str, executable: bool) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if !ctx.dry_run {
         let same = std::fs::read_to_string(path).map(|c| c == content).unwrap_or(false);
-        let mode_ok = !executable
-            || std::fs::metadata(path)
-                .map(|m| m.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false);
+        let mode_ok = !executable || is_executable(path);
         if same && mode_ok {
             return Ok(());
         }
@@ -1870,6 +1866,20 @@ fn write_root_if_changed(ctx: &Ctx, path: &str, content: &str, executable: bool)
         ctx.sudo("chmod", &["0755", path])?;
     }
     Ok(())
+}
+
+/// Does `path` already have an executable bit? Unix-only in practice; the
+/// Windows arm exists so the host dev loop (`cargo build`/`cargo test` on the
+/// Windows box) still compiles — `std::os::unix` doesn't exist there.
+#[cfg(unix)]
+fn is_executable(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &str) -> bool {
+    false
 }
 
 /// Expand a leading `$HOME` for the write_user path (which is a real path, not a
@@ -2233,6 +2243,24 @@ mod tests {
         assert_eq!(password_in_compose("      USERNAME: \"manifest\"\n"), None);
     }
 
+    /// Is there a `sh` to test against? There isn't on the Windows dev host,
+    /// where these two tests would otherwise fail the whole suite and cost us
+    /// the fast inner loop. They still run everywhere the generated shell
+    /// actually matters (Docker, the build VM, CI).
+    fn have_sh() -> bool {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(":")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if !ok {
+            println!("no `sh` on this host — skipping the shell-syntax check");
+        }
+        ok
+    }
+
     /// Every shell fragment this module hands to `sh -c` must at least *parse*.
     ///
     /// The release loop pipes `manifest __script <name>` through `sh -n`, but
@@ -2247,6 +2275,9 @@ mod tests {
     fn every_generated_shell_fragment_parses() {
         use std::io::Write;
         use std::process::{Command, Stdio};
+        if !have_sh() {
+            return;
+        }
         for (what, fragment) in [
             ("oem step", setup_oem_step()),
             ("debloat bat step", setup_debloat_bat_step()),
@@ -2290,6 +2321,9 @@ mod tests {
     fn the_idle_decision_holds_up_against_a_clock() {
         use std::io::Write;
         use std::process::{Command, Stdio};
+        if !have_sh() {
+            return;
+        }
         // ago_used, ago_started, expect_stop
         let cases = [
             // Mid-install: nothing touches the activity file for 20-90 minutes,
