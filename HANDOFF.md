@@ -418,6 +418,36 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
   **This is why generated scripts must stay stubs** — anything written as a real
   file at setup time (e.g. the VM's `compose.yaml`) does *not* get updated by an
   upgrade and needs its own migration path.
+- ~~**Opening a `.exe` left a window that never closed**~~ — **fixed** (0.1.0-69),
+  reported on niri. Two independent causes, both in `android::gui_install_script`:
+  1. the progress dialog was fed by `tool | zenity --progress`, so it lived until
+     the **write end of that pipe** closed — which every child the tool leaves
+     behind inherits. Wine daemonises `wineserver`, so "Opening x.exe..." stayed
+     up after the install finished. Now the tool logs to a file and the dialog is
+     driven by a loop watching the tool's **PID**, ending with `echo 100` (under
+     `--pulsate`, `--auto-close` has no other way to know it's done).
+  2. `windows-install` draws its **own** dialogs and then hands over to the
+     program's real installer window — there is no moment a wrapper can call
+     "finished". `.exe`/`.msi` now set `MOS_OWN_UI=1` and skip the progress
+     dialog entirely.
+  Also: the terminal fallback closed only on `press Enter`, even after a
+  successful install — it now closes itself on success and waits only on failure.
+  **General rule:** never tie a dialog's lifetime to a pipe a tool's children can
+  inherit, and never wrap a tool that has its own UI.
+- ~~**Every pacman run failed on a fresh install**~~ — **fixed** (0.1.0-69).
+  `call to execv failed (No such file or directory)` after
+  `Snapshotting package versions (Manifest OS)...`, on a brand-new install.
+  The chroot install writes `/etc/pacman.d/hooks/96-manifest-versions.hook` while
+  the only `manifest` is `/usr/local/bin/manifest`, so that path gets baked in —
+  and `configure_updates` deletes that binary minutes later once the packages
+  install. It removed the *export* hook alongside it but not this one.
+  (`repair_hook` didn't catch it either: it runs from the package's integration
+  hook *during* that same transaction, when the binary is still there.) Now the
+  package owns `96-manifest-versions.hook` too (`/usr/share/libalpm/hooks`,
+  pointing at `/usr/bin/manifest`), the installer removes the runtime override,
+  and `repair_hook` drops any leftover override once the packaged copy exists.
+  **Rule this re-teaches:** a hook that has to name an absolute path belongs in
+  the *package*, not in something written at setup time.
 - ~~**Windows VM tier — does a RemoteApp paint?**~~ — **done.** It needed all
   three of §16 together (registry permission, automatic sign-in off, and the
   `Z:` share tried first), which is why five releases of registry-only work
