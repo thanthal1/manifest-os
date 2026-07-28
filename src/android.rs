@@ -541,9 +541,14 @@ fn merge_mimeapps(existing: &str, entries: &[(&str, &str)]) -> String {
 
 /// The GUI-launched installer: file managers can't show a long-running install,
 /// and `Terminal=true` silently fails where no terminal is configured. So this
-/// opens the user's terminal when one exists (keeping it open so the log is
-/// readable) and otherwise runs headless, reporting via desktop notifications.
-/// Dispatches by extension to `android-install` or `strata-install`.
+/// prefers a zenity dialog, falls back to the user's terminal (kept open only
+/// when something failed), and otherwise runs headless, reporting via desktop
+/// notifications. Dispatches by extension to `android-install`,
+/// `strata-install` or `windows-install`.
+///
+/// Every window it opens must close on its own. That is harder than it looks:
+/// see `run_logged` (a daemonised child holding the pipe open) and `MOS_OWN_UI`
+/// (a tool whose own UI outlives any wrapper's idea of "done").
 pub fn gui_install_script() -> &'static str {
     // Env-passing (MOS_*) keeps the terminal payload single-quoted, so no nested
     // quoting games with user file names.
@@ -559,7 +564,10 @@ case "$MOS_FILE" in
     MOS_TOOL=strata-install;  MOS_WHAT="Linux package support"; MOS_SETUP="" ;;
   *.exe|*.msi|*.EXE|*.MSI)
     # windows-install installs Wine on demand and asks before it commits.
-    MOS_TOOL=windows-install; MOS_WHAT="Windows app support (Wine)"; MOS_SETUP="manifest windows-setup" ;;
+    # MOS_OWN_UI: it draws its own dialogs and then hands over to a real Windows
+    # installer window, so it must NOT be wrapped in a progress dialog (see below).
+    MOS_TOOL=windows-install; MOS_WHAT="Windows app support (Wine)"; MOS_SETUP="manifest windows-setup"
+    MOS_OWN_UI=1 ;;
   *) echo "manifest-install-gui: don't know how to install '$MOS_FILE'" >&2; exit 1 ;;
 esac
 export MOS_FILE MOS_TOOL MOS_WHAT MOS_SETUP
@@ -573,11 +581,39 @@ if command -v zenity >/dev/null 2>&1; then
   z() { zenity "$@" 2>/dev/null; }
   MOS_TMP=$(mktemp -d 2>/dev/null) || MOS_TMP=${TMPDIR:-/tmp}
   trap 'rm -rf "$MOS_TMP"' EXIT INT TERM
-  # `echo $?` inside the group captures the TOOL's status, before the pipe --
-  # $? after a pipeline is the last command's, and PIPESTATUS is a bashism this
-  # #!/bin/sh script cannot use.
+  # run_logged <dialog text> <cmd> [args...]
+  #
+  # The tool's output goes to a FILE, and the progress dialog is fed by a loop
+  # that watches the tool's PID. The obvious `tool | zenity --progress` instead
+  # ties the dialog's life to the write end of that pipe -- which EVERY child
+  # the tool leaves behind inherits. Wine leaves a `wineserver` daemon running,
+  # so the pipe never reached EOF and the "Opening ..." window sat there for
+  # ever, long after the install had finished. Watching the PID is the only
+  # thing that actually tracks the tool.
+  #
+  # The closing `echo 100` is what makes --auto-close fire: under --pulsate
+  # zenity has no other way to know it reached the end.
+  #
+  # stdin is /dev/null: launched from a file manager there is nothing to read
+  # from, and a tool that asks a question must fail rather than hang unseen.
   run_logged() {
-    { "$@" 2>&1; echo "$?" > "$MOS_TMP/rc"; } | tee "$MOS_TMP/log" | sed -u 's/^/#/'
+    mos_text=$1; shift
+    : > "$MOS_TMP/log"
+    "$@" > "$MOS_TMP/log" 2>&1 < /dev/null &
+    mos_pid=$!
+    {
+      while kill -0 "$mos_pid" 2>/dev/null; do
+        # zenity reads a leading '#' as "replace the status text", so the tool's
+        # latest line becomes the dialog's caption. The prefix also stops a line
+        # that happens to start with a number being read as a percentage.
+        sed -n '$s/^/#/p' "$MOS_TMP/log" 2>/dev/null
+        sleep 1
+      done
+      echo 100
+    } | z --progress --pulsate --auto-close --no-cancel --width=460 \
+          --title='ManifestOS' --text="$mos_text"
+    wait "$mos_pid"
+    echo "$?" > "$MOS_TMP/rc"
   }
   ok() { [ "$(cat "$MOS_TMP/rc" 2>/dev/null)" = "0" ]; }
   if ! command -v "$MOS_TOOL" >/dev/null 2>&1; then
@@ -594,11 +630,7 @@ Install it with:  manifest strata add debian"
 
 Setting it up downloads and configures what is needed. It can take
 a few minutes, and only happens once." || exit 0
-    # Live log into the progress dialog: zenity treats a leading '#' as a text
-    # update, so every line the tool prints becomes the current status.
-    run_logged $MOS_SETUP \
-      | z --progress --pulsate --auto-close --no-cancel --width=460 \
-          --title='ManifestOS' --text="Setting up $MOS_WHAT..."
+    run_logged "Setting up $MOS_WHAT..." $MOS_SETUP
     if ! ok; then
       z --error --width=520 --title='ManifestOS' \
         --text="Could not set up $MOS_WHAT.
@@ -607,9 +639,18 @@ $(tail -n 3 "$MOS_TMP/log" 2>/dev/null)"
       exit 1
     fi
   fi
-  run_logged "$MOS_TOOL" "$MOS_FILE" \
-    | z --progress --pulsate --auto-close --no-cancel --width=460 \
-        --title='ManifestOS' --text="Opening $MOS_NAME..."
+  if [ -n "$MOS_OWN_UI" ]; then
+    # No progress dialog for a tool that talks to the user itself. windows-install
+    # asks Wine-or-VM in its own dialog and then hands over to the program's real
+    # installer window, which can be up for as long as the user wants -- there is
+    # no moment a wrapper could call "finished", so an "Opening ..." window on top
+    # of it is a window nothing ever closes. Report the outcome and get out of the
+    # way.
+    "$MOS_TOOL" "$MOS_FILE" > "$MOS_TMP/log" 2>&1 < /dev/null
+    echo "$?" > "$MOS_TMP/rc"
+  else
+    run_logged "Opening $MOS_NAME..." "$MOS_TOOL" "$MOS_FILE"
+  fi
   if ok; then
     command -v notify-send >/dev/null 2>&1 && notify-send -a ManifestOS 'ManifestOS' "$MOS_NAME finished"
     exit 0
@@ -643,7 +684,18 @@ if ! command -v "$MOS_TOOL" >/dev/null 2>&1; then
   fi
 fi
 "$MOS_TOOL" "$MOS_FILE"
-echo; echo "--- done - press Enter to close ---"; read _
+mos_rc=$?
+# Close on success. A terminal that always ends on "press Enter to close" is a
+# window the desktop never reclaims -- and after a *successful* install there is
+# nothing left to read. Failures still wait, because that output is the only
+# explanation the user gets.
+if [ "$mos_rc" = 0 ]; then
+  command -v notify-send >/dev/null 2>&1 && \
+    notify-send -a ManifestOS "ManifestOS" "$(basename "$MOS_FILE") finished"
+  exit 0
+fi
+echo; echo "--- it did not finish (exit $mos_rc) - press Enter to close ---"; read _
+exit "$mos_rc"
 '
 for t in "$TERMINAL" kitty foot alacritty wezterm konsole gnome-terminal xfce4-terminal \
          mate-terminal tilix ghostty x-terminal-emulator xterm; do
@@ -1111,6 +1163,34 @@ mod tests {
         // The handler must not rely on Terminal=true.
         assert!(mime_handler_desktop().contains("Terminal=false"), "{}", mime_handler_desktop());
         assert!(mime_handler_desktop().contains("Exec=/usr/local/bin/manifest-install-gui %f"), "{}", mime_handler_desktop());
+    }
+
+    /// Every window this wrapper opens has to close by itself. Two ways it
+    /// didn't, both reported from a real niri desktop:
+    ///
+    ///   * the progress dialog was fed by `tool | zenity`, so it lived until the
+    ///     write end of that pipe closed — which every child the tool leaves
+    ///     behind inherits. Wine daemonises `wineserver`, so "Opening x.exe..."
+    ///     stayed on screen after the install had finished;
+    ///   * the terminal fallback always ended on `press Enter to close`, so a
+    ///     perfectly successful install still left a window sitting there.
+    #[test]
+    fn nothing_it_opens_can_outlive_the_install() {
+        let s = gui_install_script();
+        // The tool writes to a file and the dialog is driven by the tool's PID.
+        assert!(s.contains("kill -0 \"$mos_pid\""), "dialog must track the PID: {s}");
+        assert!(s.contains("> \"$MOS_TMP/log\" 2>&1 < /dev/null &"), "output to a file: {s}");
+        // ...and no variant of "pipe the tool straight into zenity" came back.
+        assert!(!s.contains("| tee \"$MOS_TMP/log\""), "the pipe is the bug: {s}");
+        // --pulsate never reaches 100 on its own, so --auto-close needs telling.
+        assert!(s.contains("--auto-close") && s.contains("echo 100"), "{s}");
+        // A tool that draws its own UI is never wrapped in a progress dialog.
+        assert!(s.contains("MOS_OWN_UI=1"), "{s}");
+        assert!(s.contains("if [ -n \"$MOS_OWN_UI\" ]; then"), "{s}");
+        // The terminal fallback closes itself when the install worked.
+        assert!(s.contains("if [ \"$mos_rc\" = 0 ]; then"), "{s}");
+        assert!(!s.contains("--- done - press Enter to close ---"), "not on success: {s}");
+        assert!(s.contains("press Enter to close"), "still waits on failure: {s}");
     }
 
     #[test]
