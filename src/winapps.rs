@@ -17,6 +17,26 @@
 //! That's the same "thin orchestrator of standard tools" contract as pacman,
 //! debootstrap and waydroid — and it keeps the licence boundary clean.
 //!
+//! ## How an app gets onto the screen
+//!
+//! Two mechanisms, tried in that order by `windows-vm-run`:
+//!
+//! 1. **The kiosk session** (default). One RDP connection whose session runs
+//!    [`KIOSK_SHELL_PS1`] as its *shell* instead of `explorer.exe` — so no
+//!    taskbar, no Start menu, no desktop icons, because none of them were
+//!    started. The app is launched maximized into that session and every window
+//!    it opens afterwards is composited by the guest **inside** it. Linux sees
+//!    one client whose count never changes.
+//! 2. **RemoteApp** (fallback, and all an older guest can do). FreeRDP's RAIL
+//!    surfaces each guest window as its own X client. Correct in principle, and
+//!    what this tier shipped on — but the host compositor then owns a set of
+//!    windows it has no way to relate to each other, so a dialog arrives as a
+//!    new tile over whatever you were using, and FreeRDP's own RAIL handling
+//!    paints Firefox-family popups as blank full-screen transients.
+//!
+//! Both need the same thing from install time (see `setup_autologon_step`), and
+//! both are gated on the same stamp.
+//!
 //! ## Why it's lazy
 //!
 //! Setting this up downloads and installs a **real Windows** (multi-GB, tens of
@@ -172,7 +192,7 @@ pub fn setup(vm: &WindowsVm, ctx: &Ctx) -> Result<()> {
         ctx.shell(&setup_oem_step(), false)?;
         if vm.debloat.unwrap_or(true) {
             println!("  · debloating: removing preinstalled Store apps, Cortana and telemetry");
-            ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/debloat.ps1")), debloat_ps1())?;
+            ctx.write_user(&expand(&format!("{COMPOSE_DIR}/oem/debloat.ps1")), &debloat_ps1())?;
             // Chain onto WinApps' install.bat rather than replacing it: dockur
             // runs exactly one install.bat, and theirs is the one that enables
             // RemoteApp. Ours must not be what overwrites it.
@@ -304,6 +324,123 @@ pub fn link_apps(ctx: &Ctx) -> Result<()> {
 pub fn refresh_app_launchers(ctx: &Ctx) -> Result<usize> {
     ctx.write_user(&expand("$HOME/Windows Transfer/.manifest-enum-apps.ps1"), ENUM_APPS_PS1)?;
     ctx.shell(&enum_apps_step(), false)?;
+    write_app_launchers()
+}
+
+/// Apply the debloat to a Windows that is **already installed** — once, stamped.
+///
+/// Setup-time debloat is a FirstLogonCommand, and §3's rule applies: there is no
+/// re-running setup on an installed guest, so a guest built before this list grew
+/// keeps the old, narrower one forever. This is the way out that isn't a 40-minute
+/// reinstall.
+///
+/// Explicit rather than automatic. Removing app packages takes minutes, and
+/// silently prepending that to someone's app launch is worse than asking.
+pub fn apply_debloat(ctx: &Ctx) -> Result<()> {
+    if !std::path::Path::new(&expand(&format!("{COMPOSE_DIR}/compose.yaml"))).exists() {
+        bail!("the Windows VM isn't set up yet — run: manifest windows-vm");
+    }
+    println!("  · Applying the debloat to the installed Windows.");
+    println!("    Removing app packages takes a few minutes. Nothing is uninstalled");
+    println!("    that an app you added depends on — see the list in the source.");
+    // A file at the ROOT of the share, run by exact path: the one shape of this
+    // that works. `Z:\Windows Transfer\...` is listed stale by the guest, so a
+    // script written there a moment ago reads as "does not exist".
+    ctx.write_user(&expand("$HOME/.manifest-debloat.ps1"), &debloat_runtime_ps1())?;
+    ctx.shell(&apply_debloat_step(), false)?;
+    Ok(())
+}
+
+/// Run the runtime debloat in the guest and act on what it reports. Pure —
+/// unit-tested and `sh -n`-checked.
+///
+/// The stamp is written **only** on a clean run. An unelevated pass still does
+/// the user-scope half — which is most of what anyone notices — but leaving it
+/// unstamped is deliberate: it keeps the offer open, and a stamp that claimed a
+/// partial run was complete would hide the one thing the user needs to know.
+fn apply_debloat_step() -> String {
+    format!(
+        r#"CONF="$HOME/.config/winapps/winapps.conf"
+       [ -r "$CONF" ] || {{ echo '  ! the Windows VM is not configured yet' >&2; exit 1; }}
+       RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
+       . "$CONF" 2>/dev/null || true
+       [ -n "$RDP_USER" ] || {{ echo '  ! no guest credentials in winapps.conf' >&2; exit 1; }}
+{docker}{rdpready}
+       # The VM is stopped after `idle_minutes` of disuse, so on any normal day
+       # this command finds it down. Without starting it, every run would fail as
+       # "the debloat did not report back" -- which reads like the script broke.
+       st=$(dk inspect -f '{{{{.State.Running}}}}' WinApps 2>/dev/null || echo missing)
+       if [ "$st" != "true" ]; then
+         echo '  · starting Windows (it is stopped when idle)'
+         dk start WinApps >/dev/null 2>&1 \
+           || (cd "{COMPOSE_DIR}" && dk compose up -d) >/dev/null 2>&1 \
+           || {{ echo '  ! could not start the Windows container' >&2; exit 1; }}
+       fi
+       if ! rdp_ready; then
+         echo '  · waiting for Windows to be ready'
+         i=0
+         while [ $i -lt 90 ]; do          # ~3 min; a cold boot is not instant
+           rdp_ready && break
+           i=$((i+1)); sleep 2
+         done
+       fi
+       rdp_ready || {{
+         echo '  ! Windows is not serving RDP yet — nothing was changed.' >&2
+         echo '    If it is still installing, watch http://localhost:8006 and retry.' >&2
+         exit 1; }}
+       # This counts as using the VM, or the idle watchdog may stop it underneath
+       # a debloat that takes several minutes.
+       : > "${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-activity" 2>/dev/null || true
+       RES="$HOME/.manifest-debloat-result"
+       rm -f "$RES" 2>/dev/null || true
+       # tsdiscon: a RemoteApp session does not end when its program exits, so
+       # without it this sits until the timeout. 15 min -- appx removal is slow.
+       timeout 900 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+         /v:127.0.0.1:3389 \
+         "$(printf '/app:program:C:\\Windows\\System32\\cmd.exe,cmd:/C powershell -NoProfile -ExecutionPolicy Bypass -File Z:\\.manifest-debloat.ps1 & tsdiscon')" \
+         >/dev/null 2>&1 || true
+       if [ ! -f "$RES" ]; then
+         echo '  ! the debloat did not report back — nothing is assumed to have happened' >&2
+         echo '    (the guest may still have been booting; try again in a minute)' >&2
+         exit 1
+       fi
+       # Strip the CR. PowerShell's Set-Content writes CRLF, and `$(cat …)` eats
+       # the trailing newline but NOT the carriage return -- so `$r` is "ok\r",
+       # every arm below misses, and a complete success is reported as an
+       # unrecognised result and left unstamped. Observed on the first real run.
+       r=$(tr -d '\r\n' < "$RES" 2>/dev/null)
+       rm -f "$RES" 2>/dev/null || true
+       case "$r" in
+         ok)
+           touch "{COMPOSE_DIR}/.debloat-applied" 2>/dev/null || true
+           echo '  · debloat applied.' ;;
+         partial:*)
+           # Windows filters the token of an RDP logon unless the account escapes
+           # UAC, so the machine-scope half can be refused. Say which half, and
+           # do NOT stamp -- the offer stays open.
+           echo "  · debloat partly applied. Skipped ${{r#partial: }}." >&2
+           echo '    Those need a full administrator token, which an RDP logon does' >&2
+           echo '    not get here. The rest -- visual effects, notifications and the' >&2
+           echo '    app packages for this account -- is done, and is most of what' >&2
+           echo '    you notice. For the remainder, reinstall the guest.' >&2 ;;
+         *)
+           echo "  ! the debloat reported: $r" >&2 ;;
+       esac"#,
+        docker = docker_fn(),
+        rdpready = rdp_ready_fn(),
+    )
+}
+
+/// Turn an app list the guest has **already** written into launchers, with no
+/// RDP round trip at all.
+///
+/// The kiosk stub ends every session by writing that list ([`KIOSK_SHELL_PS1`]),
+/// so after a kiosk launch the scan has happened and asking Windows again is
+/// pure cost: [`enum_apps_step`] runs its script as a RemoteApp, which surfaces
+/// a **cmd console and then a PowerShell console as visible windows** — after
+/// every single launch. That is most of the "many cmd windows" this tier used to
+/// flash up. Nothing about the resulting launchers differs.
+pub fn relink_from_share() -> Result<usize> {
     write_app_launchers()
 }
 
@@ -580,6 +717,46 @@ fn docker_fn() -> &'static str {
 /// rule: the rule syntax differs per compositor *and* per version (Hyprland
 /// 0.56 rejects every `windowrule` spelling that 0.4x accepted), whereas these
 /// dispatchers are stable and a missing one just fails harmlessly.
+/// Whether Windows is really serving RDP — shared by `windows-vm-run` and
+/// `--debloat`, because both are useless against a guest that isn't up yet.
+///
+/// A plain TCP connect to 3389 proves nothing: docker publishes that port when
+/// the *container* starts, so it answers throughout the ~40 minutes Windows
+/// installs. This sends an X.224 Connection Request; only a real RDP server
+/// replies with a Connection Confirm (`03 00 …`), and docker's proxy returns
+/// nothing at all. The image may define no healthcheck, so this is the one
+/// dependable readiness signal here.
+fn rdp_ready_fn() -> &'static str {
+    "rdp_ready() {
+  printf '\\003\\000\\000\\023\\016\\340\\000\\000\\000\\000\\000\\001\\000\\010\\000\\003\\000\\000\\000' \\
+    | timeout 5 nc 127.0.0.1 3389 2>/dev/null | head -c 2 | od -An -tx1 | tr -d ' \\n' \\
+    | grep -q '^0300'
+}
+"
+}
+
+/// Window ids from niri, by App ID. Shared by `float_windows` and `kiosk_raise`.
+///
+/// niri has no class *selector* — unlike hyprctl, swaymsg and i3-msg, every
+/// action it exposes takes `--id`, so the id has to be looked up first. Hence a
+/// helper rather than a one-liner in each branch.
+///
+/// This machine runs niri, and until it was added **neither** function did
+/// anything at all here: no `HYPRLAND_INSTANCE_SIGNATURE`, no `SWAYSOCK`, no
+/// `I3SOCK`, and `wmctrl` is X11-only and not installed — so `float_windows`
+/// fell through to `break` on its first pass and RemoteApp windows got no
+/// management whatsoever. That is a large part of what "it breaks when windows
+/// pop in front" *was* on niri.
+fn niri_ids_fn() -> &'static str {
+    "niri_ids() {
+         # $1 -- a lowercase extended-regex matched against each App ID.
+         niri msg windows 2>/dev/null | awk -v pat=\"$1\" '
+           /^Window ID /       { id = $3; sub(/:$/, \"\", id) }
+           /^[ \\t]*App ID:/   { if (tolower($0) ~ pat) print id }'
+     }
+"
+}
+
 fn float_windows_fn() -> &'static str {
     "float_windows() {
          # Run detached: the launch below blocks until the app exits, and
@@ -595,6 +772,13 @@ fn float_windows_fn() -> &'static str {
                  swaymsg '[class=\"^RAIL:.*$\"] floating enable, focus' >/dev/null 2>&1
              elif command -v i3-msg >/dev/null 2>&1 && [ -n \"${I3SOCK:-}\" ]; then
                  i3-msg '[class=\"^RAIL:.*$\"] floating enable, focus' >/dev/null 2>&1
+             elif [ -n \"${NIRI_SOCKET:-}\" ] && command -v niri >/dev/null 2>&1; then
+                 # A RAIL window is XWayland, so its WM_CLASS (RAIL:<hex>) is
+                 # what niri reports as the App ID.
+                 for w in $(niri_ids 'rail:'); do
+                     niri msg action move-window-to-floating --id \"$w\" >/dev/null 2>&1
+                     niri msg action focus-window --id \"$w\"           >/dev/null 2>&1
+                 done
              elif command -v wmctrl >/dev/null 2>&1; then
                  # Last resort: no floating concept reachable, but at least
                  # raise it so it is not lost behind what you were using.
@@ -606,6 +790,266 @@ fn float_windows_fn() -> &'static str {
          ) >/dev/null 2>&1 &
      }
 "
+}
+
+/// The guest session's **shell** — what runs instead of `explorer.exe`.
+///
+/// This is the whole kiosk tier in one file. RDP lets the client name an
+/// alternate shell for the session it creates; name this, and the session has
+/// no taskbar, no desktop, no Start menu and no Explorer, because none of them
+/// were ever started. Every window an app opens — dialogs, menus, its second
+/// top-level, a Windows security prompt — is composited by the guest *inside*
+/// that session, and reaches Linux as pixels in the one FreeRDP window rather
+/// than as a separate X client per window (which is what RAIL does, and what
+/// made this tier fragile: the host compositor tiled, stacked and focus-stole
+/// between windows it had no way to relate to each other).
+///
+/// It is also what makes the tier hold more than one app. The stub is a
+/// launcher loop, not a wrapper around one program: `windows-vm-run` drops a
+/// path in `Z:\.manifest-launch` and the stub starts it, whether the session is
+/// being created right now or has been up for an hour.
+///
+/// **The heartbeat is the load-bearing part.** Windows silently *ignores* the
+/// alternate shell whenever the session already exists, and serves an ordinary
+/// desktop instead — which is indistinguishable from success to a duration
+/// check, and is exactly the trap that got `/shell:` banned from this file for
+/// five releases (HANDOFF §5). So the stub proves it ran, by touching
+/// `Z:\.manifest-shell-alive`; the host deletes that file, connects, and waits
+/// for it to come back. Writes *out* through the share are the direction that
+/// has always worked here — the app enumerator returns its results the same way.
+///
+/// Refreshed on a timer rather than written once, deliberately: a reconnect to
+/// a session this stub is *already* running has to be able to prove itself too,
+/// and there is no second `Beat` to be had from a stub that started an hour ago.
+const KIOSK_SHELL_PS1: &str = r#"# ManifestOS — the Windows session's shell (generated; do not edit).
+$ErrorActionPreference = 'SilentlyContinue'
+$queue = 'Z:\.manifest-launch'
+$alive = 'Z:\.manifest-shell-alive'
+$err   = 'Z:\.manifest-shell-error'
+
+function Beat { Set-Content -Path $alive -Value $PID -Encoding ASCII }
+Beat
+
+$tracked = @()
+$idle = 0
+$tick = 0
+while ($true) {
+    if (Test-Path $queue) {
+        # Rename before reading. The Linux side truncates and rewrites this
+        # file, so a request read straight out of it can be overwritten
+        # mid-read; taking it away first makes the handover atomic enough, and
+        # the queue file vanishing is also how the host knows this session
+        # is alive and consuming (see kiosk_launch).
+        $taken = $queue + '.taken'
+        Move-Item -Path $queue -Destination $taken -Force
+        foreach ($line in @(Get-Content -Path $taken)) {
+            $line = $line.Trim()
+            if (-not $line) { continue }
+            try {
+                # Maximized: with no shell running there is nothing else on the
+                # desktop, so an app filling the session makes the FreeRDP
+                # window on Linux read as that app's own window.
+                $p = Start-Process -FilePath $line -WindowStyle Maximized -PassThru
+                if ($p) { $tracked += $p }
+            } catch {
+                # Say so, rather than idling out in 30 s and letting the Linux
+                # side read a session that closed cleanly as an app that ran and
+                # was quit. That reading is what makes it write a launcher for
+                # something the guest never managed to start.
+                Set-Content -Path $err -Value $_.Exception.Message -Encoding ASCII
+            }
+        }
+        Remove-Item -Path $taken -Force
+    }
+
+    $tracked = @($tracked | Where-Object { -not $_.HasExited })
+    # Count WINDOWS, not just the processes we started. Plenty of installers
+    # exit the moment they have spawned their real UI, and an app that
+    # relaunches itself would end the session under our feet if the only thing
+    # keeping it open were the process we happen to hold a handle to.
+    $windows = @(Get-Process | Where-Object { $_.Id -ne $PID -and $_.MainWindowHandle -ne 0 })
+    if ($tracked.Count -eq 0 -and $windows.Count -eq 0) { $idle++ } else { $idle = 0 }
+
+    # Nothing left on screen: exit. The shell exiting ends the session, which
+    # drops the RDP connection, which closes the window on Linux — so quitting
+    # the last Windows app closes its window, with nothing to clean up. The
+    # grace period is for a first paint that is slower than the first poll.
+    if ($idle -ge 30) { break }
+
+    $tick++
+    if ($tick % 2 -eq 0) { Beat }
+    Start-Sleep -Seconds 1
+}
+
+# Leave a fresh app list behind. This is the same scan `enum_apps_step` does
+# over RDP, and doing it HERE is why the kiosk path needs no round trip after a
+# launch: we are already inside the session, already hidden, already in
+# PowerShell, and this is exactly the moment the list is worth taking -- the app
+# has closed, so anything it installed is on disk. The RDP one-shot cost two
+# visible console windows (cmd, then powershell) after every single launch.
+$out = 'Z:\.manifest-apps.tsv'
+$dirs = @(
+  "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+)
+$sh = New-Object -ComObject WScript.Shell
+$rows = foreach ($d in $dirs) {
+  Get-ChildItem -Path $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $t = $sh.CreateShortcut($_.FullName).TargetPath
+      if ($t -and $t -match '\.exe$' -and (Test-Path $t)) {
+        if ($_.BaseName -notmatch 'uninstall|readme|help|licen|documentation|release notes|repair|modify') {
+          "{0}`t{1}" -f $_.BaseName, $t
+        }
+      }
+    } catch { }
+  }
+}
+$rows | Sort-Object -Unique | Set-Content -Path $out -Encoding UTF8
+
+Remove-Item -Path $alive -Force
+"#;
+
+/// Launch into the guest's kiosk session, from `windows-vm-run`. Pure —
+/// unit-tested, and `sh -n`-checked with the rest of the generated shell.
+///
+/// Returns 0 only on **proven** success: the heartbeat file came back while
+/// FreeRDP held the connection. Every other outcome returns 1 and lets the
+/// caller fall through to the RemoteApp path, which still works and is still
+/// the only thing an older guest can do.
+fn kiosk_launch_fn() -> String {
+    format!(
+        r####"kiosk_raise() {{
+         # One window, already mapped -- so this is a plain focus, not a race
+         # against window creation the way the RemoteApp path's float_windows
+         # is. There is nothing to float: the session is a single client.
+         if [ -n "${{HYPRLAND_INSTANCE_SIGNATURE:-}}" ] && command -v hyprctl >/dev/null 2>&1; then
+             hyprctl dispatch focuswindow 'class:^([Xx]?[Ff]ree[Rr][Dd][Pp].*)$' >/dev/null 2>&1
+         elif [ -n "${{SWAYSOCK:-}}" ] && command -v swaymsg >/dev/null 2>&1; then
+             swaymsg '[class="(?i)^x?freerdp.*$"] focus' >/dev/null 2>&1
+         elif [ -n "${{NIRI_SOCKET:-}}" ] && command -v niri >/dev/null 2>&1; then
+             # Not 'rail:' -- a kiosk session is a plain desktop client, so
+             # FreeRDP names it xfreerdp / FreeRDP:<host>, never RAIL:<hex>.
+             for w in $(niri_ids 'freerdp'); do
+                 niri msg action focus-window --id "$w" >/dev/null 2>&1
+             done
+         elif command -v wmctrl >/dev/null 2>&1; then
+             wmctrl -x -a 'xfreerdp' >/dev/null 2>&1
+         fi
+         true
+     }}
+kiosk_launch() {{
+         # $1 -- the Windows path to run.
+         KIOSK_PS1="$HOME/.manifest-shell.ps1"
+         KIOSK_QUEUE="$HOME/.manifest-launch"
+         KIOSK_ALIVE="$HOME/.manifest-shell-alive"
+         KIOSK_ERR="$HOME/.manifest-shell-error"
+         KIOSK_PIDF="$VMDIR/.kiosk.pid"
+         KCONF="$HOME/.config/winapps/winapps.conf"
+         [ -r "$KCONF" ] || return 1
+         RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
+         . "$KCONF" 2>/dev/null || true
+         [ -n "$RDP_USER" ] || return 1
+
+         # The stub and its two channel files live at the ROOT of the share, not
+         # under "Windows Transfer". The guest lists that subdirectory stale --
+         # a file written from Linux a moment ago reads as "does not exist",
+         # which is why the app enumerator passes its script -EncodedCommand
+         # rather than as a file. Root-level files opened by exact path are the
+         # one shape of this that has been shown to work here (the disk-grow
+         # script runs that way).
+         cat > "$KIOSK_PS1" <<'MOSKIOSKEOF'
+{kiosk_ps1}
+MOSKIOSKEOF
+
+         # Queue the app BEFORE connecting, so the stub finds it on its first
+         # poll -- and so a session that is already up starts it without any
+         # second connection at all. That is what makes several Windows apps
+         # possible on a client edition that allows exactly one session.
+         printf '%s\r\n' "$1" > "$KIOSK_QUEUE"
+
+         # Already on screen? Then the running stub takes it from the queue and
+         # all that is left is to raise the window. Proof it took it: the queue
+         # file disappears, because the stub renames it away before reading.
+         # If it never does, that session is gone however healthy its pid looks
+         # -- so tear it down and reconnect rather than returning a success
+         # nobody can see.
+         KPID=$(cat "$KIOSK_PIDF" 2>/dev/null || echo 0)
+         if [ "$KPID" != 0 ] && kill -0 "$KPID" 2>/dev/null; then
+           i=0
+           while [ $i -lt 10 ]; do
+             if [ ! -f "$KIOSK_QUEUE" ]; then
+               kiosk_raise
+               # That window belongs to another windows-vm-run, so `wait` is not
+               # available here -- poll until it goes. Returning as soon as the
+               # app STARTED would run the caller's "what did it install?" step
+               # against an installer still on its first page, and announce that
+               # the user's installer had closed while they were looking at it.
+               while kill -0 "$KPID" 2>/dev/null; do sleep 2; done
+               return 0
+             fi
+             i=$((i+1)); sleep 1
+           done
+           kill "$KPID" 2>/dev/null || true
+           rm -f "$KIOSK_PIDF" 2>/dev/null || true
+         fi
+
+         # Delete the heartbeat, then wait for it to come back. This is the only
+         # dependable signal that the alternate shell RAN: Windows ignores
+         # /shell: whenever the session already exists and serves an ordinary
+         # desktop instead, and that desktop sits there indefinitely -- it
+         # passes a duration check, an exit-status check and FreeRDP's own log
+         # equally well. Same lesson as rdp_ready above: make it prove itself.
+         rm -f "$KIOSK_ALIVE" "$KIOSK_ERR" 2>/dev/null || true
+         "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+           /v:127.0.0.1:3389 /dynamic-resolution +auto-reconnect \
+           "/shell:powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File Z:\\.manifest-shell.ps1" \
+           >>"$WALOG" 2>&1 &
+         KPID=$!
+         echo "$KPID" > "$KIOSK_PIDF"
+
+         i=0
+         while [ $i -lt 45 ]; do          # a cold session logon is not instant
+           [ -f "$KIOSK_ALIVE" ] && break
+           kill -0 "$KPID" 2>/dev/null || break   # FreeRDP died; nothing to wait for
+           i=$((i+1)); sleep 1
+         done
+
+         if [ ! -f "$KIOSK_ALIVE" ]; then
+           if kill -0 "$KPID" 2>/dev/null; then
+             # Connected, serving something, but not our shell: this is the
+             # plain-desktop case. Don't leave a stray Windows desktop on the
+             # user's screen, and don't ask this guest again -- it cannot do it.
+             kill "$KPID" 2>/dev/null || true
+             touch "$VMDIR/.kiosk-unsupported" 2>/dev/null || true
+           fi
+           # FreeRDP dying outright is NOT evidence about the shell (the VM may
+           # still be booting), so that case is left unstamped and retried.
+           rm -f "$KIOSK_PIDF" "$KIOSK_QUEUE" 2>/dev/null || true
+           return 1
+         fi
+
+         # Blocks until the window closes, matching what the caller expects of
+         # `winapps manual`: the session ends when its last app exits.
+         wait "$KPID" 2>/dev/null || true
+         rm -f "$KIOSK_PIDF" "$KIOSK_ALIVE" 2>/dev/null || true
+
+         # The shell ran, but the program it was asked to start did not. A
+         # session with nothing in it idles out in 30 s and closes exactly like
+         # one whose app was quit -- so without this the caller would announce
+         # that the installer had closed and write a launcher for an app the
+         # guest never managed to run.
+         if [ -f "$KIOSK_ERR" ]; then
+           echo "Windows couldn't start it:" >&2
+           sed 's/^/    /' "$KIOSK_ERR" >&2
+           rm -f "$KIOSK_ERR" 2>/dev/null || true
+           return 1
+         fi
+         return 0
+     }}
+"####,
+        kiosk_ps1 = KIOSK_SHELL_PS1.trim_end(),
+    )
 }
 
 /// Erase the Windows disk, used by `windows-vm-run`'s reinstall offer.
@@ -662,7 +1106,7 @@ case "$f" in
   *) INGUEST=0 ;;
 esac
 VMDIR="$HOME/.local/share/manifest-os/windows-vm"
-{docker}{wipe}{floatfn}
+{docker}{wipe}{nirifn}{floatfn}{kioskfn}
 # 1. First use? Set the VM up (downloads and installs Windows — one time).
 if [ ! -f "$VMDIR/compose.yaml" ]; then
   echo "The Windows VM isn't set up yet."
@@ -710,11 +1154,7 @@ fi
 #    Connection Request gets a Connection Confirm (starts 03 00) only from a real
 #    RDP server, and nothing at all from docker's proxy. The image may not define
 #    a healthcheck at all, so this is the only dependable readiness signal here.
-rdp_ready() {{
-  printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' \
-    | timeout 5 nc 127.0.0.1 3389 2>/dev/null | head -c 2 | od -An -tx1 | tr -d ' \n' \
-    | grep -q '^0300'
-}}
+{rdpready}
 if ! rdp_ready; then
   echo "Waiting for Windows to be ready..."
   i=0
@@ -749,7 +1189,40 @@ WA=$(command -v winapps 2>/dev/null)
 # Keep its output — we need it to tell "the window opened" from "it bailed".
 WALOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/windows-vm-launch.log"
 mkdir -p "$(dirname "$WALOG")" 2>/dev/null || true
-run_wa() {{ "$WA" "$@" >>"$WALOG" 2>&1 || sg docker -c "'$WA' $*" >>"$WALOG" 2>&1; }}
+# Retry under `sg docker` ONLY when the failure looks like the docker-group
+# problem the retry exists for.
+#
+# It used to fire on ANY non-zero exit, and that is a cascade: `winapps manual`
+# blocks on `wait $FREERDP_PID` (§7), so a launch that Windows logged off exits
+# non-zero too -- and the retry then opened a SECOND connection to a
+# single-session Windows while the first was still dying. Visible in
+# windows-vm-freerdp.log as pairs of connections 261 ms apart, both ending
+# ERRINFO_LOGOFF_BY_USER. One collision became two, then four.
+run_wa() {{
+  out=$("$WA" "$@" 2>&1); rc=$?
+  printf '%s\n' "$out" >>"$WALOG"
+  [ $rc -eq 0 ] && return 0
+  case "$out" in
+    *"permission denied"*|*"Permission denied"*|*docker.sock*|\
+    *"Cannot connect to the Docker daemon"*|*"no such object"*)
+      sg docker -c "'$WA' $*" >>"$WALOG" 2>&1 ;;
+    *) return $rc ;;
+  esac
+}}
+
+# Windows client editions allow ONE interactive session. A second RDP connection
+# therefore does not add a window -- it TAKES the session from the first, and
+# both usually end ERRINFO_LOGOFF_BY_USER.
+#
+# This is exactly why an app that opens another app INSIDE the guest is fine:
+# Inventor starting Waterfox to sign in creates no second connection, so the
+# already-connected client is simply told about a new window. Same session, same
+# connection, nothing to contend for. The kiosk session generalises that -- a
+# second launch goes through the queue the stub is already polling. RemoteApp has
+# no resident agent to ask, so here the only safe answer is not to collide.
+rail_busy() {{
+  [ -s "$VMDIR/.rail.pid" ] && kill -0 "$(cat "$VMDIR/.rail.pid" 2>/dev/null)" 2>/dev/null
+}}
 
 # Which Windows-app launchers exist right now, so we can name whatever appears
 # later. Match on CONTENT, not filename: WinApps writes "<exe>.desktop" with no
@@ -762,11 +1235,11 @@ list_apps() {{
   done | sed 's#.*/##' | sort -u
 }}
 
-# Run the installer as a RemoteApp: its own window on your desktop. No Windows
-# desktop, no Windows taskbar, no browser tab — which is the entire point of
-# this tier.
+# Two ways to get a Windows program onto your desktop without a Windows desktop
+# around it. The kiosk session is tried first (see below); RemoteApp is the
+# fallback, and the only thing an older guest can do.
 #
-# Two ways your home reaches the guest. Z: FIRST, and the order matters:
+# For RemoteApp, two ways your home reaches the guest. Z: FIRST, and the order matters:
 #   Z:               dockur mounts our /shared volume ($HOME) as a drive inside
 #                    the guest. Always there, needs nothing from the client.
 #                    This is the one that works -- verified painting a real
@@ -779,6 +1252,13 @@ list_apps() {{
 # Getting this order wrong is invisible: the failing attempt still holds the
 # connection open for ~20s, which the duration check below reads as success, so
 # the working path is never reached.
+# A guest installed before the debloat list grew keeps the old one -- setup-time
+# debloat is a FirstLogonCommand and there is no re-running setup (§3). Mention
+# the way out once, but never do it here: removing app packages takes minutes,
+# and silently prepending that to someone's app launch is worse than saying so.
+if [ ! -f "$VMDIR/.debloat-applied" ] && [ -f "$VMDIR/oem/debloat.ps1" ]; then
+  echo "(This Windows can be slimmed down further: manifest windows-vm --debloat)"
+fi
 echo
 echo "Opening $base in Windows..."
 : > "$WALOG" 2>/dev/null || true
@@ -789,6 +1269,7 @@ APPSBEFORE=$(mktemp) && list_apps > "$APPSBEFORE"
 WINPATH='Z:\Windows Transfer\'"$base"
 [ "$INGUEST" = 1 ] && WINPATH="$f"
 opened=0
+via_kiosk=0
 
 # Z: is a network location to Windows, so launching an .exe from it raises
 # "Open File - Security Warning". As a RemoteApp that is fatal twice: the app
@@ -861,7 +1342,53 @@ fi
 # anyway does not produce evidence: it produces a false success, a stray
 # Windows desktop, and a launcher for an app nobody installed. Don't attempt
 # what the guest cannot do -- the reinstall offer below is the actual fix.
-if [ -f "$VMDIR/.remoteapp-enabled" ]; then
+# 5a. The kiosk session -- the default, and the reason this tier stopped being
+#     fragile. One RDP connection whose session runs our stub as its SHELL, so
+#     no explorer, no taskbar, no Start menu and no desktop icons; the app is
+#     started maximized into it and every further window it opens is drawn by
+#     the guest INSIDE that one window. What reaches Linux is a single client
+#     that never changes count, so nothing can pop in front of what you were
+#     doing, nothing gets tiled into a share of your layout, and the FreeRDP
+#     RAIL bug that paints Firefox-family popups as blank full-screen transients
+#     cannot arise -- those popups are now just pixels in the session.
+#
+#     It also carries more than one app on a Windows that allows exactly one
+#     session: a second launch drops its path in the queue the stub is already
+#     polling and raises the window, instead of opening a second connection that
+#     would take the session away from the first.
+#
+#     Gated on the same stamp as RemoteApp, because it needs the same two things
+#     from install time: our OEM install.bat, and the automatic sign-in it turns
+#     off. Windows ignores an alternate shell whenever the session already
+#     exists, so an auto-signed-in guest gets a plain desktop instead -- which is
+#     precisely why /shell: was ruled out here for five releases. kiosk_launch
+#     therefore makes the guest PROVE the shell ran, and stamps the guest
+#     .kiosk-unsupported when it demonstrably didn't.
+if [ -f "$VMDIR/.remoteapp-enabled" ] && [ ! -f "$VMDIR/.kiosk-unsupported" ]    && [ "${{MANIFEST_WINVM_MODE:-kiosk}}" = kiosk ]; then
+  kiosk_launch "$WINPATH" && {{ opened=1; via_kiosk=1; }}
+fi
+
+# 5b. RemoteApp: one X client per guest window. Correct in principle and what
+#     this tier shipped on, but the host compositor then owns windows it has no
+#     way to relate to each other -- see float_windows for the mitigation, and
+#     5a for why it is no longer the first choice.
+if [ "$opened" != 1 ] && [ -f "$VMDIR/.remoteapp-enabled" ] && rail_busy; then
+  echo >&2
+  echo "Another Windows app is already open." >&2
+  echo "  Windows allows one remote session at a time, and this guest is using the" >&2
+  echo "  older single-window mode, which needs a connection per app -- so opening" >&2
+  echo "  this one would close the one you have rather than sit beside it." >&2
+  echo "  Close the other app first." >&2
+  echo >&2
+  echo "  (An app opening another app inside Windows is fine -- that is why a" >&2
+  echo "   sign-in browser works. It is only launching from here that collides.)" >&2
+  rm -f "$APPSBEFORE" 2>/dev/null || true
+  exit 1
+fi
+if [ "$opened" != 1 ] && [ -f "$VMDIR/.remoteapp-enabled" ]; then
+  # Claim the session for the length of this launch, so a second windows-vm-run
+  # refuses above instead of taking the session away from this one.
+  echo $$ > "$VMDIR/.rail.pid" 2>/dev/null || true
   # Float and raise the windows as they appear, so a second window from a
   # Windows app doesn't tile itself over whatever you were using.
   float_windows
@@ -879,16 +1406,31 @@ if [ -f "$VMDIR/.remoteapp-enabled" ]; then
     # reason never reaches us.
     if [ $((t1 - t0)) -ge 5 ]; then opened=1; break; fi
   done
+  # Release it here rather than on exit: the "what got installed?" step below can
+  # run for a while, and holding the session claim through that would refuse a
+  # launch that would now succeed. A stale file is harmless anyway -- rail_busy
+  # checks the pid is alive, not that the file exists.
+  rm -f "$VMDIR/.rail.pid" 2>/dev/null || true
 fi
 
-# NOTE: RDP's "alternate shell" (/shell:) was tried here and does NOT work on
-# this stack. Windows client editions allow one interactive session, and dockur
-# signs the user in at the console automatically -- so an RDP connection as that
-# user TAKES OVER the existing session instead of creating one, and the
-# alternate shell is ignored. The result is an ordinary Windows desktop with
-# explorer running, which also looks "successful" to any duration check. The
-# only real single-window mechanism here is RemoteApp, which needs the guest
-# registry key below.
+# NOTE on the alternate shell (/shell:), which this file banned outright until
+# the kiosk path above. The ban was right for the stack it was written against
+# and wrong for this one, and the difference is worth stating so it is not
+# re-applied. It was ruled out because dockur autologons the user at the
+# console: Windows client editions allow one interactive session, so an RDP
+# connect TOOK OVER that session instead of creating one, the alternate shell
+# was ignored, and you got an ordinary desktop that passes a duration check.
+# Turning automatic sign-in off (see setup_autologon_step) removed that -- the
+# console now sits at a lock screen, so our connect is what CREATES the session,
+# and a created session honours its alternate shell. The premise changed; the
+# conclusion followed it.
+#
+# What has NOT changed is that the failure mode is silent, so the ban is
+# replaced by proof rather than by trust: kiosk_launch waits for the stub's
+# heartbeat file and stamps .kiosk-unsupported when a connected session never
+# produces one. Do not remove that check to "simplify" this -- without it, a
+# guest that ignores the shell shows a stray Windows desktop and reports
+# success, which is the exact bug the ban existed to prevent.
 
 if [ "$opened" = 1 ]; then
   echo
@@ -901,8 +1443,20 @@ if [ "$opened" = 1 ]; then
   # it has not heard of (Inventor, and most things) installed fine and then
   # never appeared. Nobody should have to run a scan to find an app they just
   # installed, so this happens here, automatically.
-  manifest __winvm-apps >/dev/null 2>&1 || true
-  manifest windows-vm --link >/dev/null 2>&1 || true
+  #
+  # After a kiosk launch the scan has ALREADY happened: the stub ends every
+  # session by writing the list, from inside the session, hidden. Asking Windows
+  # again would open a second connection and flash a cmd console and then a
+  # PowerShell console -- after every launch -- for an identical result. And
+  # `--link` is skipped with it: it only ever writes entries for apps in
+  # WinApps' own hardcoded catalog, which the scan above supersedes, and its
+  # setup.sh makes its own connection to do it.
+  if [ "$via_kiosk" = 1 ]; then
+    manifest __winvm-apps --from-share >/dev/null 2>&1 || true
+  else
+    manifest __winvm-apps >/dev/null 2>&1 || true
+    manifest windows-vm --link >/dev/null 2>&1 || true
+  fi
   APPSAFTER=$(mktemp) && list_apps > "$APPSAFTER"
   new=$(comm -13 "$APPSBEFORE" "$APPSAFTER" 2>/dev/null)
   rm -f "$APPSBEFORE" "$APPSAFTER" 2>/dev/null || true
@@ -981,6 +1535,8 @@ if [ ! -f "$VMDIR/.remoteapp-enabled" ]; then
           echo "then open this file again:" >&2
           echo "    $VMDIR/storage" >&2
           exit 1; }}
+        # Whatever the old Windows couldn't do says nothing about the new one.
+        rm -f "$VMDIR/.kiosk-unsupported" "$VMDIR/.kiosk.pid" 2>/dev/null || true
         echo "Reinstalling — watch it at http://localhost:8006" >&2
         manifest windows-vm || exit 1
         echo >&2
@@ -1017,7 +1573,10 @@ run_wa windows || {{
 "####,
         docker = docker_fn(),
         wipe = wipe_storage_fn(),
+        nirifn = niri_ids_fn(),
+        rdpready = rdp_ready_fn(),
         floatfn = float_windows_fn(),
+        kioskfn = kiosk_launch_fn(),
     )
 }
 
@@ -1388,15 +1947,69 @@ exit /b 0
 "#
 }
 
-/// What actually gets removed. Deliberately conservative: it uninstalls *apps*
-/// and flips *policy/preference* registry values -- no system-file surgery, no
-/// service deletion, nothing that stops Windows updating or being repaired. This
-/// VM exists to run one application, so the consumer extras are pure overhead.
-fn debloat_ps1() -> &'static str {
-    r#"# ManifestOS - Windows debloat (generated; runs once during setup).
-# Conservative by design: removes preinstalled Store apps and turns off
-# consumer suggestions/telemetry. No OS surgery - Windows still updates.
+/// What actually gets removed. Uninstalls *apps*, flips *policy/preference*
+/// registry values, and *disables* (never deletes) services and scheduled tasks
+/// with nothing to manage in a container guest — no system-file surgery, no
+/// component removal, nothing that stops Windows updating or being repaired.
+/// This VM exists to run one application, so the consumer extras are overhead.
+///
+/// The exclusions are as deliberate as the removals and are listed at the end of
+/// the script with their reasons; a unit test pins each one. The two worth
+/// knowing without reading it: **Defender stays**, because `Z:` is the user's
+/// real `$HOME` mounted into a guest that runs arbitrary downloaded installers —
+/// this is not a sandbox, so its AV is not redundant — and **WebView2 stays**,
+/// because modern installers embed it to draw their own UI.
+fn debloat_ps1() -> String {
+    format!("# ManifestOS - Windows debloat (generated; runs once during setup).\n{DEBLOAT_BODY}\nWrite-Output \"ManifestOS debloat: done (admin=$admin, skipped: $($skipped -join ', '))\"\n")
+}
+
+/// The same debloat, run against a Windows that is **already installed**.
+///
+/// Setup-time debloat is a FirstLogonCommand and therefore elevated. This one is
+/// not: it arrives over RDP, and unless the guest's account escapes UAC token
+/// filtering it runs with a filtered token — so the machine-scope half (services,
+/// scheduled tasks, HKLM policy, provisioned packages, hibernation, System
+/// Restore) silently does nothing. With `$ErrorActionPreference =
+/// 'SilentlyContinue'` over the whole script, "silently" is literal.
+///
+/// It does **not** self-elevate, though WinApps' own `install.bat` does
+/// (`fltmc` then `Start-Process -Verb RunAs`). Two reasons: a UAC consent dialog
+/// arriving as a RAIL window is the same shape as the blank full-screen
+/// transients that break Firefox doorhangers, and — the decisive one — an
+/// elevated process gets a **different logon session, which has no `Z:`
+/// mapping**. The elevated copy could neither read the script nor write its
+/// result back.
+///
+/// So instead it reports. Everything doable unelevated is done, `$skipped` names
+/// what wasn't, and the result lands on the share for the Linux side to read.
+/// That split is kinder than it sounds: visual effects, transparency,
+/// animations, notification toasts and per-user app removal are all user-scope,
+/// and those are most of what is actually felt.
+fn debloat_runtime_ps1() -> String {
+    format!(
+        "# ManifestOS - Windows debloat (generated; runs on an installed guest).\n\
+         {DEBLOAT_BODY}\n\
+         # The Linux side reads this and only stamps the guest when nothing was\n\
+         # skipped. Writes OUT through the share are the direction that works.\n\
+         if ($skipped.Count -eq 0) {{ $r = 'ok' }} else {{ $r = 'partial: ' + ($skipped -join ', ') }}\n\
+         Set-Content -Path 'Z:\\.manifest-debloat-result' -Value $r -Encoding ASCII\n"
+    )
+}
+
+/// Everything both debloat scripts do, guarded by `$admin` where a filtered
+/// token cannot do the work. One body so the two callers can never drift.
+const DEBLOAT_BODY: &str = r#"# Conservative by design: removes preinstalled Store apps, turns off consumer
+# suggestions/telemetry, and disables (never deletes) services and tasks with
+# nothing to manage in a container. No OS surgery - Windows still updates.
 $ErrorActionPreference = 'SilentlyContinue'
+
+# Setup-time this is always true (a FirstLogonCommand is elevated). Over RDP it
+# may not be, and the machine-scope half below would then do nothing at all --
+# silently, because of the line above. So it is checked, not assumed.
+$admin = (New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent())
+         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$skipped = @()
 
 $bloat = @(
   'Microsoft.3DBuilder','Microsoft.549981C3F5F10','Microsoft.BingNews',
@@ -1410,13 +2023,57 @@ $bloat = @(
   'Microsoft.XboxIdentityProvider','Microsoft.XboxSpeechToTextOverlay',
   'Microsoft.YourPhone','Microsoft.ZuneMusic','Microsoft.ZuneVideo',
   'Clipchamp.Clipchamp','MicrosoftTeams','MSTeams','Microsoft.Todos',
-  'Microsoft.PowerAutomateDesktop','Microsoft.MicrosoftJournal'
+  'Microsoft.PowerAutomateDesktop','Microsoft.MicrosoftJournal',
+  'Microsoft.Paint3D','Microsoft.Print3D','Microsoft.Microsoft3DViewer',
+  'Microsoft.549981C3F5F10','Microsoft.Copilot','Microsoft.Windows.Ai.Copilot.Provider',
+  'Microsoft.windowscommunicationsapps','Microsoft.WindowsAlarms',
+  'Microsoft.OutlookForWindows','Microsoft.Family','Microsoft.GamingApp',
+  'Microsoft.BingFinance','Microsoft.BingSports','Microsoft.BingFoodAndDrink',
+  'Microsoft.BingHealthAndFitness','Microsoft.BingTravel','Microsoft.OneDriveSync'
 )
-foreach ($b in $bloat) {
-  Get-AppxPackage -AllUsers -Name $b | Remove-AppxPackage -AllUsers
-  Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $b |
-    Remove-AppxProvisionedPackage -Online -AllUsers
+# Third-party stubs Microsoft preinstalls. These ship under vendor-specific
+# package names that change (and are region-dependent), so they are matched by
+# wildcard rather than named -- the exact-name list above cannot catch them.
+$bloatLike = @('*spotify*','*netflix*','*disney*','*tiktok*','*instagram*',
+               '*facebook*','*linkedin*','*prime*video*','*amazon*',
+               '*candycrush*','*booking*','*adobe*express*','*whatsapp*')
+
+# -AllUsers on both, and the PROVISIONED package too. `Get-AppxPackage *x* |
+# Remove-AppxPackage` (the form every debloat gist uses) removes it for the
+# calling user only and leaves the provisioned copy in place, so the next profile
+# Windows creates gets the whole lot back. Do not "simplify" to that.
+#
+# Unelevated, -AllUsers and the provisioned removal are both refused, so the
+# calling user is all that can be cleaned. That is still worth doing -- it is the
+# only profile this VM ever signs in as -- but it is not the same thing, so it
+# counts as skipped.
+if ($admin) {
+  foreach ($b in $bloat) {
+    Get-AppxPackage -AllUsers -Name $b | Remove-AppxPackage -AllUsers
+    Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $b |
+      Remove-AppxProvisionedPackage -Online -AllUsers
+  }
+  foreach ($p in $bloatLike) {
+    Get-AppxPackage -AllUsers $p | Remove-AppxPackage -AllUsers
+    Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like $p |
+      Remove-AppxProvisionedPackage -Online -AllUsers
+  }
+} else {
+  foreach ($b in $bloat)     { Get-AppxPackage -Name $b | Remove-AppxPackage }
+  foreach ($p in $bloatLike) { Get-AppxPackage $p | Remove-AppxPackage }
+  $skipped += 'provisioned app removal (needs admin)'
 }
+
+# OneDrive: nothing in this VM syncs, and its setup runs at every first logon.
+foreach ($od in @("$env:SystemRoot\SysWOW64\OneDriveSetup.exe",
+                  "$env:SystemRoot\System32\OneDriveSetup.exe")) {
+  if (Test-Path $od) { Start-Process -FilePath $od -ArgumentList '/uninstall' -Wait }
+}
+Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
+  -Name 'OneDriveSetup' -ErrorAction SilentlyContinue
+
+# ---- machine scope: everything below needs a full token ----------------------
+if ($admin) {
 
 # Consumer suggestions / 'recommended' junk and silent app installs.
 $cd = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
@@ -1441,15 +2098,118 @@ $dsh = 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'
 New-Item -Path $dsh -Force | Out-Null
 Set-ItemProperty -Path $dsh -Name 'AllowNewsAndInterests' -Value 0 -Type DWord
 
+} else {
+  $skipped += 'machine policy: consumer features, telemetry, Cortana, widgets'
+}
+
+# ---- user scope: works with a filtered token, and is most of what is felt ----
+
 # Faster, quieter desktop for RemoteApp use.
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
 New-Item -Path $adv -Force | Out-Null
 Set-ItemProperty -Path $adv -Name 'ShowTaskViewButton' -Value 0 -Type DWord
 Set-ItemProperty -Path $adv -Name 'TaskbarDa' -Value 0 -Type DWord
 
-Write-Output 'ManifestOS debloat: done'
-"#
+# Notification noise. Every one of these is a toast that, under RemoteApp, is a
+# top-level window RAIL surfaces onto the Linux desktop.
+$cs = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+New-Item -Path $cs -Force | Out-Null
+foreach ($n in @('SubscribedContent-338389Enabled','SubscribedContent-338393Enabled',
+                 'SubscribedContent-353694Enabled','SubscribedContent-353696Enabled',
+                 'SystemPaneSuggestionsEnabled','SilentInstalledAppsEnabled',
+                 'SoftLandingEnabled','RotatingLockScreenOverlayEnabled')) {
+  Set-ItemProperty -Path $cs -Name $n -Value 0 -Type DWord
 }
+
+# Services with nothing to manage in a container guest. Disabled, then stopped.
+#
+# Deliberately NOT here:
+#   Spooler   -- apps enumerate printers at startup and a fair number hang or
+#                throw without it, and "Print to PDF" is genuinely useful when
+#                the host is Linux. Removing it buys almost nothing.
+#   wuauserv  -- this guest reaches the internet.
+#   TermService, UmRdpService -- they ARE the transport for this whole tier.
+#   WinDefend -- see the closing note.
+if ($admin) {
+  foreach ($s in @('SysMain','WSearch','Fax','bthserv','BTAGService',
+                   'WbioSrvc','SensorService','SensrSvc','SensorDataService',
+                   'TabletInputService','WMPNetworkSvc','RetailDemo',
+                   'MapsBroker','lfsvc','PhoneSvc','WalletService')) {
+    Set-Service -Name $s -StartupType Disabled -ErrorAction SilentlyContinue
+    Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+  }
+} else {
+  $skipped += 'idle services'
+}
+# Nothing in this tier indexes: the app scan reads Start Menu .lnk files
+# directly (see the enumerator), never the search index. Disabling WSearch
+# above therefore costs us nothing.
+
+# Visual effects off -- the biggest win of anything in this file. Animations,
+# shadows and transparency are pixels that have to cross RDP, so they cost
+# latency on every frame, not just GPU the guest hasn't got.
+$vfx = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
+New-Item -Path $vfx -Force | Out-Null
+Set-ItemProperty -Path $vfx -Name 'VisualFXSetting' -Value 2 -Type DWord
+$dsk = 'HKCU:\Control Panel\Desktop'
+Set-ItemProperty -Path $dsk -Name 'UserPreferencesMask' -Type Binary `
+  -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+Set-ItemProperty -Path $dsk -Name 'DragFullWindows' -Value '0' -Type String
+Set-ItemProperty -Path $dsk -Name 'MenuShowDelay' -Value '0' -Type String
+Set-ItemProperty -Path "$dsk\WindowMetrics" -Name 'MinAnimate' -Value '0' -Type String
+Set-ItemProperty -Path $adv -Name 'TaskbarAnimations' -Value 0 -Type DWord
+Set-ItemProperty -Path $adv -Name 'ListviewAlphaSelect' -Value 0 -Type DWord
+New-Item -Path 'HKCU:\Software\Microsoft\Windows\DWM' -Force | Out-Null
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\DWM' -Name 'EnableAeroPeek' -Value 0 -Type DWord
+# Transparency is the expensive one over a remote pipe.
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' `
+  -Name 'EnableTransparency' -Value 0 -Type DWord
+
+# Telemetry and compatibility-appraiser tasks, plus defrag -- the host's
+# filesystem backs this disk, and it is not being defragmented from in here.
+if ($admin) {
+  foreach ($t in @(
+    '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser',
+    '\Microsoft\Windows\Application Experience\ProgramDataUpdater',
+    '\Microsoft\Windows\Application Experience\StartupAppTask',
+    '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator',
+    '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip',
+    '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector',
+    '\Microsoft\Windows\Defrag\ScheduledDefrag',
+    '\Microsoft\Windows\Feedback\Siuf\DmClient',
+    '\Microsoft\Windows\Windows Error Reporting\QueueReporting')) {
+    Disable-ScheduledTask -TaskPath (Split-Path $t -Parent) `
+      -TaskName (Split-Path $t -Leaf) -ErrorAction SilentlyContinue | Out-Null
+  }
+
+  # Hibernation: a hiberfil.sys the size of RAM, for a guest a container runtime
+  # stops rather than suspends. Takes Fast Startup with it.
+  powercfg /hibernate off 2>$null
+
+  # System Restore: this guest is disposable -- the tier's answer to a broken
+  # Windows is an unattended reinstall -- so restore points are disk spent on a
+  # recovery path nobody will take.
+  Disable-ComputerRestore -Drive 'C:\' -ErrorAction SilentlyContinue
+} else {
+  $skipped += 'telemetry/defrag tasks, hibernation, System Restore'
+}
+
+# NOT DONE, on purpose:
+#
+#   Pagefile off       -- only safe with RAM to spare, and the failure mode is an
+#                         app dying mid-install with nothing that says why.
+#   Windows Defender   -- normally the first thing a VM debloat turns off, and
+#                         the wrong call HERE: Z: is the user's real $HOME,
+#                         mounted in. Anything this guest runs can write to the
+#                         host's home directory, so the guest is not a sandbox
+#                         and its AV is not redundant -- and it exists to run
+#                         arbitrary installers the user downloaded.
+#   Edge / WebView2    -- WebView2 is what modern installers embed to draw their
+#                         own UI; removing it breaks them, and Edge maintains it.
+#   Optional features  -- Disable-WindowsOptionalFeature is slow, sometimes wants
+#                         a reboot mid-setup, and IE11/DirectPlay/WMP cost
+#                         almost nothing next to the appx list.
+"#;
 
 /// A random password for the Windows account, so a manifest never has to carry
 /// one. Not cryptographic-grade secrecy — it guards a local loopback RDP service
@@ -1500,6 +2260,11 @@ fn setup_oem_step() -> String {
              if [ -z "$(ls -A "{COMPOSE_DIR}/storage" 2>/dev/null)" ] || grep -qs '/oem:/oem' "{COMPOSE_DIR}/compose.yaml"; then
                echo '  · guest setup: enabling single-window apps (WinApps oem/RDPApps.reg)'
                touch "{COMPOSE_DIR}/.remoteapp-enabled"
+               # A guest built from these files gets the kiosk session tried
+               # again. The stamp records what one PARTICULAR Windows could not
+               # do, so carrying it across a reinstall would permanently demote
+               # a guest that can.
+               rm -f "{COMPOSE_DIR}/.kiosk-unsupported"
              else
                rm -f "{COMPOSE_DIR}/.remoteapp-enabled"
                echo '  ! this Windows was installed before single-window apps could be'
@@ -1999,12 +2764,144 @@ mod tests {
         assert!(ps.contains("Remove-AppxPackage"), "{ps}");
         assert!(ps.contains("DisableWindowsConsumerFeatures"), "{ps}");
         assert!(ps.contains("AllowTelemetry"), "{ps}");
-        // Must NOT disable Windows Update or strip components: a VM that can't
-        // patch itself is a worse outcome than a bloated one.
-        assert!(!ps.to_lowercase().contains("wuauserv"), "must not touch Windows Update: {ps}");
         assert!(!ps.to_lowercase().contains("remove-windowspackage"), "no component removal: {ps}");
+
+        // What must NOT be switched off, checked as *service-list entries* --
+        // the quoted form. A plain substring check also fires on the comment
+        // that explains why each one is excluded, and that comment is the part
+        // worth keeping: without it the next person re-adds them.
+        //
+        //   wuauserv -- a VM that cannot patch itself is worse than a bloated one.
+        //   Spooler  -- apps enumerate printers at startup and some hang or throw
+        //               without it; removing it buys almost nothing.
+        //   WinDefend -- Z: is the user's real $HOME, mounted into a guest that
+        //               runs arbitrary downloaded installers. This guest is not a
+        //               sandbox, so its AV is not redundant.
+        //   TermService/UmRdpService -- they are the transport for the whole tier.
+        for keep in ["'wuauserv'", "'Spooler'", "'WinDefend'", "'TermService'", "'UmRdpService'"] {
+            assert!(!ps.contains(keep), "{keep} must not be in the disable list: {ps}");
+        }
+        // Nor may the pagefile be removed: safe only with RAM to spare, and it
+        // fails as an app dying mid-install with nothing that says why. Matched
+        // by the two mechanisms that do it, for the same reason as above -- the
+        // word itself appears in the comment saying not to.
+        for m in ["Win32_PageFileSetting", "AutomaticManagedPagefile"] {
+            assert!(!ps.contains(m), "the pagefile stays: {ps}");
+        }
+
+        // The parts that earn their place. Visual effects are the biggest single
+        // win -- animations and transparency are pixels crossing RDP, so they
+        // cost latency per frame rather than GPU the guest hasn't got.
+        assert!(ps.contains("VisualFXSetting"), "visual effects off: {ps}");
+        assert!(ps.contains("EnableTransparency"), "{ps}");
+        assert!(ps.contains("powercfg /hibernate off"), "no hiberfil in a container: {ps}");
+        assert!(ps.contains("Disable-ComputerRestore"), "disposable guest: {ps}");
+        assert!(ps.contains("Set-Service"), "idle services off: {ps}");
+        assert!(ps.contains("Disable-ScheduledTask"), "telemetry tasks off: {ps}");
+        // Provisioned packages too, or the next profile Windows creates gets the
+        // whole lot back. Both removals need -AllUsers.
+        assert!(ps.contains("Remove-AppxProvisionedPackage -Online -AllUsers"), "{ps}");
+        assert!(ps.contains("Remove-AppxPackage -AllUsers"), "{ps}");
         // The batch shim hands off to it.
         assert!(debloat_bat().contains("debloat.ps1"), "{}", debloat_bat());
+    }
+
+    /// Applying the debloat to a guest that is already installed.
+    ///
+    /// The whole risk here is a silent no-op. An RDP logon can be handed a
+    /// filtered token, and the script sets `$ErrorActionPreference =
+    /// 'SilentlyContinue'` over everything — so without the elevation check the
+    /// machine-scope half would fail invisibly and the guest would be stamped as
+    /// done. That is the same class of bug as §5's plain desktop.
+    #[test]
+    fn the_runtime_debloat_reports_what_it_could_not_do() {
+        let ps = debloat_runtime_ps1();
+        let setup = debloat_ps1();
+        // One body, two callers: the lists must never drift apart.
+        assert!(ps.contains("'*spotify*'") && setup.contains("'*spotify*'"), "shared body: {ps}");
+        assert!(ps.contains("$admin = (New-Object Security.Principal.WindowsPrincipal"), "{ps}");
+        // Elevation is checked, not assumed, and the machine-scope half is
+        // actually guarded by it rather than merely preceded by the check.
+        for guarded in ["Set-Service", "Disable-ScheduledTask", "powercfg /hibernate off"] {
+            let at = ps.find(guarded).expect(guarded);
+            let guard = ps[..at].rfind("if ($admin) {").expect("guarded");
+            let close = ps[..at].rfind("} else {");
+            assert!(close.is_none_or(|c| c < guard), "{guarded} is outside an $admin guard: {ps}");
+        }
+        // It must NOT self-elevate. An elevated process gets a different logon
+        // session with no Z: mapping, so the elevated copy could neither read
+        // the script nor write its result back -- and a UAC dialog arriving as a
+        // RAIL window is the shape that paints blank.
+        assert!(!ps.contains("-Verb RunAs"), "must not self-elevate off the share: {ps}");
+        // The result goes back through the share, which is the direction that
+        // works (the app-list TSV returns the same way).
+        assert!(ps.contains(r"Set-Content -Path 'Z:\.manifest-debloat-result'"), "{ps}");
+        assert!(ps.contains("if ($skipped.Count -eq 0) { $r = 'ok' }"), "{ps}");
+
+        let s = apply_debloat_step();
+        // Never assume: no report at all is a failure, not a success.
+        assert!(s.contains("if [ ! -f \"$RES\" ]; then"), "silence is not success: {s}");
+        // And the stamp goes on a clean run ONLY. Stamping a partial run would
+        // hide the single thing the user needs to know, and withdraw the offer.
+        let stamp = s.find(".debloat-applied").expect("stamp");
+        let ok = s.find("         ok)").expect("ok arm");
+        let partial = s.find("         partial:*)").expect("partial arm");
+        assert!(ok < stamp && stamp < partial, "stamp only in the ok arm:\n{s}");
+        // Root of the share, by exact path -- `Z:\Windows Transfer` lists stale.
+        assert!(s.contains(r"-File Z:\\.manifest-debloat.ps1"), "{s}");
+        assert!(s.contains("tsdiscon"), "a RemoteApp session needs ending: {s}");
+        // Appx removal is slow; a 2-minute timeout would cut it off half done.
+        assert!(s.contains("timeout 900"), "long enough for appx removal: {s}");
+        // The VM is stopped after idle_minutes, so on any normal day this command
+        // finds it down. Without starting it and waiting, every run would fail as
+        // "did not report back" -- which reads like the script is broken.
+        let start = s.find("dk start WinApps").expect("starts the VM");
+        let wait = s.find("rdp_ready || {").expect("waits for RDP");
+        let run = s.find("timeout 900").expect("the run");
+        assert!(start < wait && wait < run, "start, then wait, then run:\n{s}");
+        // And it must count as using the VM, or the idle watchdog can stop it
+        // underneath a debloat that takes several minutes.
+        assert!(s.contains("windows-vm-activity"), "keeps the watchdog off: {s}");
+        // The CR has to go. PowerShell's Set-Content writes CRLF and `$(cat …)`
+        // strips only the newline, so the value is "ok\r": every arm of the case
+        // misses, and a complete success is reported as an unrecognised result
+        // and left unstamped. That is exactly what the first real run did.
+        assert!(s.contains(r#"r=$(tr -d '\r\n' < "$RES""#), "strip the CR: {s}");
+    }
+
+    /// Brace and paren balance across every generated PowerShell script.
+    ///
+    /// There is no `pwsh` on the dev host, so nothing else here would notice an
+    /// unbalanced block — and one of these scripts is the *session's shell*, where
+    /// a parse error is a session with nothing in it and no way to close it. This
+    /// is a smoke test, not a parser: it only proves the depth returns to zero and
+    /// never goes negative. It is worth having because it is exactly what the
+    /// `then : fi` bug (§11) was, in the other language.
+    ///
+    /// It works on these scripts because the only braces inside string literals
+    /// are `-f` format placeholders (`"{0}`t{1}"`), which balance. Add a literal
+    /// unmatched brace to a string and this will need a real parser instead.
+    #[test]
+    fn the_generated_powershell_at_least_balances() {
+        for (what, ps) in [
+            ("kiosk shell", KIOSK_SHELL_PS1.to_string()),
+            ("debloat (setup)", debloat_ps1()),
+            ("debloat (runtime)", debloat_runtime_ps1()),
+            ("enum apps", ENUM_APPS_PS1.to_string()),
+        ] {
+            for (open, close) in [('{', '}'), ('(', ')')] {
+                let mut depth = 0i32;
+                for (n, line) in ps.lines().enumerate() {
+                    if line.trim_start().starts_with('#') {
+                        continue;
+                    }
+                    depth += line.matches(open).count() as i32;
+                    depth -= line.matches(close).count() as i32;
+                    assert!(depth >= 0, "{what}: unmatched {close} at line {}: {line}", n + 1);
+                }
+                assert_eq!(depth, 0, "{what}: {open}{close} left open at depth {depth}:\n{ps}");
+            }
+        }
     }
 
     #[test]
@@ -2073,8 +2970,33 @@ mod tests {
         // A reinstall regenerates the guest's RDP certificate; WinApps' own
         // connection test uses /cert:tofu, which refuses a CHANGED key.
         assert!(s.contains("freerdp/server/127.0.0.1_3389.pem"), "clear the stale pin: {s}");
-        // winapps talks to docker itself, so it needs the group bridge too.
+        // winapps talks to docker itself, so it needs the group bridge too --
+        // but ONLY for a docker failure. `winapps manual` blocks on
+        // `wait $FREERDP_PID`, so a launch Windows logged off also exits
+        // non-zero; retrying that opened a second connection to a
+        // single-session Windows while the first was still dying, turning one
+        // collision into a cascade. Observed in the FreeRDP log as pairs of
+        // connections 261 ms apart, both ending ERRINFO_LOGOFF_BY_USER.
         assert!(s.contains("sg docker -c \"'$WA' $*\""), "{s}");
+        assert!(
+            s.contains(r#"*"Cannot connect to the Docker daemon"*"#),
+            "the retry must be conditional on a docker failure: {s}"
+        );
+        let retry = s.find("sg docker -c \"'$WA' $*\"").expect("retry");
+        let guard = s.find("case \"$out\" in").expect("guard");
+        assert!(guard < retry, "the retry sits inside the docker-failure case:\n{s}");
+
+        // One RDP connection at a time on the RemoteApp path. A second does not
+        // add a window -- Windows client editions are single-session, so it
+        // TAKES the session from the first and both end LOGOFF_BY_USER. (An app
+        // opening another app *inside* the guest is fine and always was: no
+        // second connection exists. That is the whole difference.)
+        let busy = s.find("rail_busy; then").expect("single-flight guard");
+        let claim = s.find("echo $$ > \"$VMDIR/.rail.pid\"").expect("claims the session");
+        assert!(busy < claim, "refuse before claiming:\n{s}");
+        let rail_at = s.find("run_wa manual \"$WINPATH\"").expect("remoteapp launch");
+        assert!(claim < rail_at, "claim before launching:\n{s}");
+        assert!(s.contains("rm -f \"$VMDIR/.rail.pid\""), "and release it: {s}");
         // The installer must open as a RemoteApp — its own window — not as a
         // Windows desktop in a browser tab.
         assert!(s.contains("run_wa manual \"$WINPATH\""), "runs the exe as a native window: {s}");
@@ -2101,11 +3023,21 @@ mod tests {
         assert!(!s.contains("grep -i 'winapps'"), "filename matching is wrong here: {s}");
         // POSIX sh: no process substitution (this runs under #!/bin/sh).
         assert!(!s.contains("<("), "process substitution is not POSIX sh: {s}");
-        // The RDP alternate shell is a dead end here: Windows client editions
-        // are single-session and dockur signs the user in at the console, so an
-        // RDP connect TAKES OVER that session and /shell: is ignored -- you get
-        // a plain desktop that also looks "successful" to a duration check.
-        assert!(!s.contains("/shell:\""), "alternate shell cannot work on this stack: {s}");
+        // The alternate shell is now the primary path -- but ONLY with the
+        // proof below. Windows ignores /shell: whenever the session already
+        // exists and serves a plain desktop instead, which passes a duration
+        // check, an exit status and FreeRDP's own log alike. That is why this
+        // was banned outright for five releases; using it without the
+        // heartbeat check would reinstate the bug the ban prevented.
+        assert!(s.contains("/shell:powershell.exe"), "kiosk session is the launch path: {s}");
+        assert!(
+            s.contains("[ -f \"$KIOSK_ALIVE\" ] && break"),
+            "the shell must PROVE it ran, not be assumed to have: {s}"
+        );
+        assert!(
+            s.contains("touch \"$VMDIR/.kiosk-unsupported\""),
+            "a guest that ignores the shell is never asked twice: {s}"
+        );
         // Erasing a Windows install must never happen without being asked.
         let rm_at = s.find("wipe_storage \"$VMDIR/storage\"").expect("reinstall path");
         let prompt_at = s.find("Reinstall Windows now?").expect("prompt");
@@ -2122,6 +3054,16 @@ mod tests {
         let float_at = s.find("float_windows\n").expect("called");
         let launch_at = s.find("run_wa manual \"$WINPATH\"").expect("launch");
         assert!(float_at < launch_at, "must be running before the window appears:\n{s}");
+        // niri is in this list because it is what the dev box runs, and until
+        // it was added float_windows hit its `else break` on the first pass:
+        // no HYPRLAND_INSTANCE_SIGNATURE, no SWAYSOCK, no I3SOCK, and wmctrl is
+        // X11-only and not installed. RemoteApp windows got no management at
+        // all, silently -- the loop just exited.
+        assert!(s.contains("niri msg action move-window-to-floating"), "niri floats too: {s}");
+        assert!(s.contains("niri msg action focus-window"), "and raises: {s}");
+        // Every action niri exposes takes --id; it has no class selector, so a
+        // hyprctl-style one-liner cannot be written for it.
+        assert!(s.contains("niri_ids() {"), "ids are looked up first: {s}");
         for c in ["hyprctl dispatch setfloating", "swaymsg", "i3-msg", "wmctrl"] {
             assert!(s.contains(c), "no path for {c}: {s}");
         }
@@ -2134,8 +3076,17 @@ mod tests {
         // desktop appears with an "Another user is signed in" prompt, because
         // dockur is already signed in at the console. So the attempt has to be
         // gated on the stamp, not merely explained after the fact.
-        let gate = s.find("if [ -f \"$VMDIR/.remoteapp-enabled\" ]; then").expect("gate");
+        // The kiosk session needs the same stamp for the same reason -- it also
+        // depends on the OEM install.bat, and on the automatic sign-in that
+        // turns off. A guest without it serves the console session either way.
+        let gate = s.find("[ -f \"$VMDIR/.remoteapp-enabled\" ]").expect("gate");
+        let kiosk = s.find("kiosk_launch \"$WINPATH\"").expect("kiosk attempt");
         let attempt = s.find("run_wa manual \"$WINPATH\"").expect("attempt");
+        assert!(gate < kiosk, "must not attempt what the guest cannot do:\n{s}");
+        assert!(
+            s.contains("if [ \"$opened\" != 1 ] && [ -f \"$VMDIR/.remoteapp-enabled\" ]; then"),
+            "the RemoteApp fallback is gated on the stamp too:\n{s}"
+        );
         assert!(gate < attempt, "must not attempt what the guest cannot do:\n{s}");
         // dockur creates storage/ as root:root, so a plain `rm -rf` deletes
         // NOTHING -- and with the error swallowed the reinstall looks like it
@@ -2146,6 +3097,97 @@ mod tests {
             s.contains("wipe_storage \"$VMDIR/storage\" || {"),
             "a failed wipe must abort, not pretend it reinstalled: {s}"
         );
+    }
+
+    /// The kiosk session — one host window, ordered ahead of RemoteApp, and
+    /// never trusted without proof.
+    ///
+    /// Each assertion here stands for a failure that is invisible at runtime.
+    /// Getting the order wrong silently keeps the fragile path; queueing after
+    /// the connect loses the launch on a session that is already up; and
+    /// treating a connection as success is the exact trap (a plain Windows
+    /// desktop, indistinguishable from a working launch) that had `/shell:`
+    /// banned from this file for five releases.
+    #[test]
+    fn the_kiosk_session_is_tried_first_and_has_to_prove_itself() {
+        let s = vm_run_script();
+        let kiosk_at = s.find("kiosk_launch \"$WINPATH\"").expect("kiosk launch");
+        let rail_at = s.find("run_wa manual \"$WINPATH\"").expect("remoteapp launch");
+        let desktop_at = s.find("run_wa windows").expect("desktop fallback");
+        assert!(kiosk_at < rail_at, "kiosk before RemoteApp:\n{s}");
+        assert!(rail_at < desktop_at, "RemoteApp before the bare desktop:\n{s}");
+
+        let f = kiosk_launch_fn();
+        // Queue, THEN connect. A session that is already up never gets a second
+        // connection -- the queue is the only way its stub hears about the app,
+        // so writing it afterwards means the launch is simply dropped.
+        let queue_at = f.find("> \"$KIOSK_QUEUE\"").expect("queue write");
+        let connect_at = f.find("/shell:powershell.exe").expect("connect");
+        assert!(queue_at < connect_at, "queue the app before connecting:\n{f}");
+        // Success is the heartbeat, never the connection: FreeRDP staying up
+        // describes a plain desktop just as well as a kiosk session.
+        assert!(f.contains("rm -f \"$KIOSK_ALIVE\""), "clears the stamp first: {f}");
+        assert!(f.contains("if [ ! -f \"$KIOSK_ALIVE\" ]; then"), "{f}");
+        // FreeRDP dying is not evidence about the shell (the VM may still be
+        // booting), so only a LIVE connection with no heartbeat condemns a
+        // guest. Stamping on any failure would demote a guest for being slow.
+        let stamp = f.find(".kiosk-unsupported").expect("stamp");
+        let guard = f.find("if kill -0 \"$KPID\" 2>/dev/null; then").expect("liveness guard");
+        assert!(guard < stamp, "only a live connection condemns a guest:\n{f}");
+        // Blocks, like `winapps manual` does -- the caller's whole
+        // "did anything get installed?" step runs after the window closes.
+        // BOTH paths must block: on the second launch into a session that is
+        // already open the window belongs to another process, so `wait` is
+        // unavailable and returning early would announce that an installer the
+        // user is still clicking through had finished.
+        assert!(f.contains("wait \"$KPID\""), "blocks until the window closes: {f}");
+        assert!(
+            f.contains("while kill -0 \"$KPID\" 2>/dev/null; do sleep 2; done"),
+            "a launch into an open session blocks too: {f}"
+        );
+        // Root of the share only. The guest lists `Z:\Windows Transfer` stale,
+        // so a stub written there reads as "does not exist" and the session
+        // comes up with no shell at all.
+        // Doubled in the source because sh eats one inside double quotes; what
+        // FreeRDP is handed is `Z:\.manifest-shell.ps1`.
+        for p in ["Z:\\\\.manifest-shell.ps1", "$HOME/.manifest-shell.ps1"] {
+            assert!(f.contains(p), "channel files live at the share root: {f}");
+        }
+        assert!(!f.contains("Z:\\Windows Transfer\\.manifest"), "not the stale subdir: {f}");
+    }
+
+    /// The in-guest stub. It is the shell, so anything it gets wrong leaves a
+    /// session with no way to run or close anything.
+    #[test]
+    fn the_kiosk_stub_beats_repeatedly_and_outlives_its_first_app() {
+        let p = KIOSK_SHELL_PS1;
+        // Beat on a timer, not once. A RECONNECT to a session this stub is
+        // already running has to prove itself too, and there is no second
+        // first-run to be had -- a write-once stamp makes every relaunch of an
+        // open app look like a guest that cannot do this at all.
+        assert!(p.contains("function Beat"), "{p}");
+        assert!(p.contains("if ($tick % 2 -eq 0) { Beat }"), "heartbeat is periodic: {p}");
+        // Rename before reading: the host truncates and rewrites the queue, and
+        // the file disappearing is also how it knows this session consumed it.
+        assert!(p.contains("Move-Item -Path $queue"), "handover is atomic: {p}");
+        // Count windows, not just processes we started. Installers routinely
+        // exit once their real UI is up in a child; ending the session then
+        // would close the app the user is looking at.
+        assert!(p.contains("MainWindowHandle -ne 0"), "windows keep it alive: {p}");
+        assert!(p.contains("$idle -ge 30"), "grace before ending the session: {p}");
+        // A session whose app never started idles out in 30 s and closes
+        // exactly like one whose app was quit. Saying so is the difference
+        // between a clear error and a launcher for an app that does not run.
+        assert!(p.contains("Set-Content -Path $err"), "a failed start is reported: {p}");
+        assert!(
+            kiosk_launch_fn().contains("if [ -f \"$KIOSK_ERR\" ]; then"),
+            "and the Linux side reads it before claiming success"
+        );
+        // Maximized: with no explorer there is nothing else on the desktop, so
+        // this is what makes the FreeRDP window read as the app's own window.
+        assert!(p.contains("-WindowStyle Maximized"), "{p}");
+        // No shell means no taskbar -- so nothing here may start one.
+        assert!(!p.to_lowercase().contains("explorer.exe"), "never start a shell: {p}");
     }
 
     /// Every generated script here is something a .desktop launcher Execs, and
@@ -2289,6 +3331,11 @@ mod tests {
             ("link container check", link_container_check_step()),
             ("link install step", link_install_step().to_string()),
             ("ensure winapps", ensure_winapps_step().to_string()),
+            // Not reachable through `__script` on its own -- it is spliced into
+            // windows-vm-run -- but it carries a heredoc holding a PowerShell
+            // script, which is exactly the shape that ends up unbalanced.
+            ("kiosk launch", kiosk_launch_fn()),
+            ("apply debloat", apply_debloat_step()),
             // These are whole scripts. `windows-vm-run` is reachable via
             // `__script`, so the release loop can pipe it through `sh -n` by
             // hand -- the other two are written as real files and never were.

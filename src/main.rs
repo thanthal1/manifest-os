@@ -91,6 +91,12 @@ enum Command {
         /// after the Windows install completes.
         #[arg(long)]
         link: bool,
+        /// Apply the current debloat list to a Windows that is already installed.
+        /// Setup-time debloat runs during Windows setup and cannot be re-run, so
+        /// a guest built before the list grew keeps the old one; this is the way
+        /// out that isn't a 40-minute reinstall. Takes a few minutes.
+        #[arg(long)]
+        debloat: bool,
         /// Path to a manifest whose `windows.vm` settings to use (optional).
         #[arg(long)]
         file: Option<PathBuf>,
@@ -99,7 +105,13 @@ enum Command {
     /// Run automatically after anything is installed — nobody should have to
     /// type a command to see an app they just installed.
     #[command(name = "__winvm-apps", hide = true)]
-    WinvmApps,
+    WinvmApps {
+        /// Trust the list the guest already wrote, instead of asking it again.
+        /// The kiosk session ends by writing one, so re-scanning over RDP costs
+        /// a connection and flashes two console windows for the same result.
+        #[arg(long)]
+        from_share: bool,
+    },
     /// (internal) Compatibility hint for a Windows app, as `<verdict>|<reasons>`.
     /// Used by `windows-install` to decide whether to warn before installing;
     /// name matching is fuzzy, so it's advice, never a gate.
@@ -430,19 +442,27 @@ fn run() -> Result<()> {
             let ctx = Ctx::new(false);
             winapps_wine::setup(&ctx)
         }
-        Command::WinvmApps => {
+        Command::WinvmApps { from_share } => {
             let ctx = Ctx::new(false);
-            match winapps::refresh_app_launchers(&ctx) {
+            let r = if from_share {
+                winapps::relink_from_share()
+            } else {
+                winapps::refresh_app_launchers(&ctx)
+            };
+            match r {
                 Ok(n) => println!("  · {n} Windows apps in your menu"),
                 Err(e) => println!("  ! couldn't read the app list from Windows: {e}"),
             }
             Ok(())
         }
-        Command::WindowsVm { link, file } => {
+        Command::WindowsVm { link, debloat, file } => {
             refuse_if_run_via_sudo("windows-vm")?;
             let ctx = Ctx::new(false);
             if link {
                 return winapps::link_apps(&ctx);
+            }
+            if debloat {
+                return winapps::apply_debloat(&ctx);
             }
             // Take settings from a manifest when given one, else sensible defaults.
             let vm = match &file {
