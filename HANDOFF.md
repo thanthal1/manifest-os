@@ -119,7 +119,9 @@ Full design: [`docs/strata-design.md`](docs/strata-design.md). Shipped in the
   installed on first use, not at install time. **Works: Notepad++ on real HW.**
 - **Windows — VM tier** (`windows.vm` / `manifest windows-vm`): a real Windows in
   a container (dockur/windows, downloaded from Microsoft unattended) with apps
-  painted onto the desktop by **WinApps** over FreeRDP RemoteApp. Same lazy
+  painted onto the desktop over FreeRDP — by default in a **kiosk session**
+  (one connection, our stub as the session's shell, so no taskbar and no
+  per-window X clients; §21), falling back to **WinApps** RemoteApp. Same lazy
   lifecycle as Android. Declining Wine offers this instead. **See the section
   below — this tier has sharp edges that cost five release cycles.**
 - **`manifest update`**: one command updates the host (repos + AUR), every stratum
@@ -148,12 +150,16 @@ produces "the window didn't open", so none of them are guessable from a log.
    user's clone into the oem mount — never into this MIT tree. Our debloat step
    *appends to* their `install.bat` rather than replacing it (dockur runs exactly
    one, and theirs is the one that matters).
-5. **RDP's alternate shell (`/shell:`) is a dead end here** — do not re-add it.
-   Windows client editions are single-session and dockur signs the user in at the
-   console, so an RDP connect *takes over* that session instead of creating one:
-   the alternate shell is ignored, explorer runs, and you get a plain Windows
-   desktop that also looks "successful" to any duration check. A unit test keeps
-   it out.
+5. **RDP's alternate shell (`/shell:`) was a dead end, and stopped being one —
+   see §21.** It was banned for five releases because dockur signed the user in
+   at the console: client editions are single-session, so an RDP connect *took
+   over* that session instead of creating one, the alternate shell was ignored,
+   and you got a plain Windows desktop that also looks "successful" to any
+   duration check. **§20 removed the premise** — the console sits at a lock
+   screen now, so our connect is what *creates* the session, and a created
+   session honours its alternate shell. It is the default launch path as of
+   §21. The failure mode is unchanged and still silent, so the ban was replaced
+   by *proof*, not by trust.
 6. **WinApps discards FreeRDP's output** (`$FREERDP_COMMAND … &>/dev/null &`), so
    a failed launch leaves nothing to read. `FREERDP_COMMAND` points at a
    generated `manifest-freerdp` wrapper that keeps stderr in
@@ -253,6 +259,235 @@ produces "the window didn't open", so none of them are guessable from a log.
     takes effect on the guest's *next* boot: the first restart after
     installation is what frees the console. Cost: `http://localhost:8006` lands
     on a lock screen, so setup says why.
+21. **The kiosk session is the default launch path; RemoteApp is the fallback.**
+    RemoteApp is per-window by construction — RAIL surfaces every guest
+    top-level as its own X client — so the *host* compositor ends up owning a
+    set of windows it cannot relate to each other. That is the whole of the
+    fragility: a file dialog or a sign-in browser arrives as a new client and
+    takes a tile over whatever you were using, and `float_windows` is a 24-second
+    poll racing window creation to undo it. It is also why `Chromium renders
+    blank` and why Firefox-family doorhangers arrive as blank 1920x1091
+    transients (§ the Waterfox note in the source) — those are FreeRDP RAIL
+    bugs, reachable only through RAIL.
+
+    The kiosk path connects **once**, with `/shell:` naming a PowerShell stub
+    (`KIOSK_SHELL_PS1`) as the session's shell. No explorer means no taskbar, no
+    Start menu, no desktop icons — nothing was started. The app runs maximized
+    inside that session and every further window it opens is composited *by the
+    guest*, so Linux sees exactly one client that never changes count, and
+    `/dynamic-resolution` makes resizing it resize the guest.
+
+    Things that are not obvious and cost something to rediscover:
+    - **The stub proves it ran; nothing else can.** Windows ignores `/shell:`
+      whenever the session already exists and serves an ordinary desktop, which
+      passes a duration check, an exit status *and* FreeRDP's log identically —
+      §5's trap, arrived at from the third side. The stub therefore touches
+      `Z:\.manifest-shell-alive`; `kiosk_launch` deletes it, connects, and waits
+      for it to come back. **Do not remove that check to simplify the function.**
+    - **The heartbeat is periodic, not write-once.** A *reconnect* to a session
+      the stub is already running has to prove itself too, and there is no
+      second first-run to be had.
+    - **A guest is only condemned on a live connection.** FreeRDP dying outright
+      says nothing about the shell (the VM may still be booting), so only "still
+      connected, no heartbeat" writes `.kiosk-unsupported`. Stamping on any
+      failure permanently demotes a guest for having been slow once. The stamp
+      is cleared on reinstall, and by `setup_oem_step` — it records what one
+      *particular* Windows could not do.
+    - **Several apps, one session.** Client editions still allow one interactive
+      session, so a second launch must not open a second connection — it would
+      take the session away from the first app. Instead it writes the path to
+      `Z:\.manifest-launch`, which the stub is already polling, and raises the
+      existing window. The stub *renames* the queue file before reading it, so
+      the file disappearing is also how the host knows that session is alive and
+      consuming; if it doesn't disappear, that session is gone however healthy
+      its pid looks.
+    - **Both launch paths block.** On a second launch the window belongs to
+      another `windows-vm-run`, so `wait` is unavailable and it polls instead.
+      Returning as soon as the app *started* would run the caller's "what did it
+      install?" step against an installer still on its first page, and announce
+      that the user's installer had closed while they were looking at it.
+    - **Everything lives at the root of `Z:`.** The guest lists
+      `Z:\Windows Transfer` stale — a file written from Linux a moment ago reads
+      as "does not exist", which is why the app enumerator passes its script
+      `-EncodedCommand`. Root-level files opened by exact path are the one shape
+      of this shown to work here (the disk-grow script runs that way). A stub
+      written to the subdirectory yields a session with **no shell at all**.
+    - **A session whose app never started looks exactly like one whose app was
+      quit** — it idles out in 30 s and closes cleanly either way. So the stub
+      writes `Z:\.manifest-shell-error` when `Start-Process` throws, and
+      `kiosk_launch` returns 1 on finding it. Without that, `windows-vm-run`
+      reads the clean close as "the installer ran and was closed" and writes a
+      launcher for an app the guest never managed to start.
+    - **Escape hatch:** `MANIFEST_WINVM_MODE=remoteapp windows-vm-run …` forces
+      the old path, for comparing the two without a rebuild.
+    - **The stub is not fully syntax-checked.** There is no PowerShell on the dev
+      host, same as `debloat.ps1` and `manifest-browser.ps1`. What exists is a
+      *balance* smoke test over every generated PowerShell — depth returns to zero
+      and never goes negative, for both `{}` and `()`. That is §11's `then : fi`
+      in the other language, and it matters most here because this script is the
+      session's shell: a parse error is a session with nothing in it. It is not a
+      parser. It works because the only braces inside string literals are `-f`
+      placeholders (`"{0}`t{1}"`), which balance; a literal unmatched brace in a
+      string would need a real one.
+22. **The dev box runs niri, and every window-management branch missed it.**
+    `float_windows` tests `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, `I3SOCK`,
+    then `wmctrl` — niri sets none of the three, and `wmctrl` is X11-only and
+    not installed — so it hit its `else break` on the *first* pass and did
+    nothing at all. Silently: the loop just exits. Any RemoteApp launch made on
+    this machine has therefore had **zero** window management, which is a large
+    part of what "it breaks when windows pop in front" actually was here. Worth
+    remembering before attributing the next layout problem to RAIL.
+
+    niri is now a branch in both `float_windows` and `kiosk_raise`, via a shared
+    `niri_ids` helper, because **niri has no class selector**: unlike hyprctl,
+    swaymsg and i3-msg, every action it exposes takes `--id`, so the window has
+    to be looked up by App ID first (`niri msg windows`, parsed with awk — no
+    `jq` on the box). Verified against a live window, not assumed.
+
+    The two match different classes and must not be merged: a RemoteApp window
+    is XWayland with WM_CLASS `RAIL:<hex>`, while a kiosk session is an ordinary
+    desktop client FreeRDP names `xfreerdp` / `FreeRDP:<host>`.
+23. **The console windows that flashed up after every launch were the app scan.**
+    `enum_apps_step` runs its enumerator as a RemoteApp — `/app:program:cmd.exe,
+    cmd:/C powershell …` — so RAIL surfaced a **cmd console and then a PowerShell
+    console** as real windows, every time an app closed, plus whatever
+    `manifest windows-vm --link` opened to do the same job worse.
+
+    On the kiosk path there is no round trip at all now: the stub ends every
+    session by writing `Z:\.manifest-apps.tsv` itself, from inside the session,
+    already hidden — and that is exactly the right moment, because the app has
+    closed so anything it installed is on disk. `windows-vm-run` then calls
+    `manifest __winvm-apps --from-share`, which only turns that file into
+    launchers. `--link` is skipped with it: it writes entries solely for apps in
+    WinApps' own hardcoded catalog, which the scan supersedes.
+
+    The RemoteApp fallback still uses the RDP one-shot, unchanged. The two
+    remaining one-shots (`GUEST_POLICY_CMD`, disk-grow) still flash consoles but
+    fire **once per guest** and once per size change — and they are on verified
+    paths (§16.3), so leave them be unless there is a reason.
+24. **Why launching two apps from Linux breaks, while an app opening another app
+    does not.** Reported as "opening multiple apps breaks things sometimes, which
+    is odd, because Inventor opening Waterfox to sign in is fine". Both halves are
+    true and the difference is structural:
+    - **Inventor → Waterfox** happens *inside the guest*. No new RDP connection —
+      the already-connected client is simply told about a new window. One session,
+      one connection, nothing to contend for.
+    - **Two `windows-vm-run` launches** on the RemoteApp path are two RDP
+      connections. Windows client editions allow **one** interactive session, so
+      the second does not add a window: it *takes the session* from the first.
+
+    The evidence is in `~/.local/state/windows-vm-freerdp.log`: 20 FreeRDP
+    processes over three minutes with routinely overlapping lifetimes, nine
+    ending `ERRINFO_LOGOFF_BY_USER` — the same code §16.2 identifies as session
+    contention. A useful trap while reading it: a connection with no `rail` lines
+    is **not** a desktop session, it is a RAIL launch that died before window
+    negotiation. Classifying on that mistakenly makes it look like something else
+    is opening plain desktops.
+
+    **And one collision became a cascade, through our own code.** `run_wa`
+    retried under `sg docker` on *any* non-zero exit. `winapps manual` blocks on
+    `wait $FREERDP_PID` (§7), so a launch that Windows logged off exits non-zero
+    too — and the retry then opened a *second* connection while the first was
+    still dying. That is the pair of connections **261 ms apart** in the log:
+    far too fast to be a person clicking twice. The retry is now gated on the
+    failure actually looking like the docker-group problem it exists for, and
+    both branches are behaviour-tested, not just asserted on.
+
+    The RemoteApp path also takes a **single-flight claim** (`.rail.pid`) for the
+    length of a launch, so a second one refuses with an explanation instead of
+    stealing the session. Released before the "what got installed?" step, which
+    can run for a while; `rail_busy` checks the pid is alive rather than that the
+    file exists, so a crash cannot wedge it.
+
+    **The kiosk session has none of this by construction** — a second launch goes
+    through the queue the resident stub is already polling, which is precisely
+    what Inventor-starting-Waterfox does. Generalising that is the fix; the
+    single-flight claim is damage control for the fallback.
+25. **Debloat covers more than apps now.** Added: the third-party preinstall
+    stubs (Spotify/Netflix/TikTok/… — matched by *wildcard*, since their package
+    names are vendor-specific and region-dependent, so the exact-name list cannot
+    catch them), OneDrive, Paint 3D / 3D Viewer / Copilot / Mail+Calendar,
+    notification and suggestion toasts, idle services, telemetry and defrag
+    scheduled tasks, hibernation, System Restore, and **visual effects**.
+
+    Visual effects are the biggest single win and the least obvious: animations,
+    shadows and transparency are pixels that have to cross RDP, so they cost
+    latency on every frame rather than GPU the guest hasn't got.
+
+    Kept, deliberately, each pinned by a unit test — **Defender** (`Z:` is the
+    user's real `$HOME` mounted in, and the guest runs arbitrary downloaded
+    installers, so it is not a sandbox and its AV is not redundant), **Print
+    Spooler** (apps enumerate printers at startup and some hang without it;
+    "Print to PDF" is useful when the host is Linux), **WebView2/Edge**
+    (installers embed it to draw their own UI), **Windows Update**, and the
+    **pagefile** (safe to drop only with RAM to spare, and it fails as an app
+    dying mid-install with nothing that says why).
+
+    **`manifest windows-vm --debloat` applies it to a guest already installed.**
+    Setup-time debloat is a FirstLogonCommand, and §3's rule bites: no re-running
+    setup, so a guest built before the list grew keeps the old one forever. This
+    is the way out that isn't a 40-minute reinstall. Explicit, not automatic —
+    removing app packages takes minutes, and prepending that to someone's app
+    launch is worse than asking; `windows-vm-run` prints a one-line hint instead.
+
+    The privilege split is the whole difficulty, and it is why the runtime script
+    is not just the setup one re-run:
+    - **An RDP logon can get a filtered token.** Nothing in the guest disables
+      UAC (checked — WinApps' own `install.bat` self-elevates with `fltmc` +
+      `RunAs`, which is the tell). So the machine-scope half — services,
+      scheduled tasks, HKLM policy, provisioned packages, hibernation, System
+      Restore — may be refused. With `$ErrorActionPreference = 'SilentlyContinue'`
+      over the whole script, refused means **silent**. Same class of bug as §5.
+    - **It does not self-elevate**, though WinApps does. An elevated process gets
+      a different logon session, and **mapped drives are per-session**, so the
+      elevated copy would see no `Z:` — it could neither read the script nor
+      write its result back. A UAC consent dialog arriving as a RAIL window is
+      also the shape that paints blank.
+    - **So it reports instead.** `$admin` is checked, not assumed; the
+      machine-scope half is *guarded* by it; `$skipped` names what was refused;
+      and the result goes back through the share, the direction that works.
+      `.debloat-applied` is stamped **only** on a clean run — stamping a partial
+      one would hide the single thing the user needs to know and withdraw the
+      offer.
+    - **The unelevated half is most of what is felt**: visual effects,
+      transparency, animations, notification toasts and per-user app removal are
+      all user-scope. A partial run is genuinely useful, which is why it happens
+      rather than being refused outright.
+    - **The guest turned out NOT to be token-filtered.** First real run on the
+      KVM box reported `ok` — i.e. `$skipped` was empty, so `$admin` was true and
+      the machine-scope half (services, tasks, HKLM policy, provisioned packages,
+      hibernation, System Restore) really did apply over RDP. Good news, and it
+      answers a question that was guesswork. The guard stays anyway: it costs
+      nothing, it depends on how dockur happens to set the account up, and the
+      failure it protects against is silent.
+    - **CRLF ate the first run's result.** `Set-Content` writes `ok\r\n`, and
+      `$(cat …)` strips the trailing newline but **not** the carriage return — so
+      the value was `ok\r`, every arm of the `case` missed, and a completely
+      successful debloat was reported as an unrecognised result and left
+      unstamped. Read it with `tr -d '\r\n'`. This is the CRLF trap from the
+      other direction: elsewhere in this tier the danger is *forgetting* CRLF for
+      a batch file Windows reads, and here it is forgetting that anything Windows
+      *writes* carries it.
+    - **It starts the VM first.** The guest is stopped after `idle_minutes`, so
+      on any normal day this command finds it down; without a start-and-wait every
+      run would fail as *"the debloat did not report back"*, which reads like the
+      script is broken. `rdp_ready` (§19) is now shared between `windows-vm-run`
+      and this rather than duplicated. It also touches the activity file, or the
+      idle watchdog can stop the VM underneath a debloat that takes minutes.
+    - **One body, two callers.** `DEBLOAT_BODY` is shared by `debloat_ps1` and
+      `debloat_runtime_ps1` so the lists cannot drift; a test asserts both carry
+      it, and that the machine-scope calls sit inside an `$admin` guard rather
+      than merely after the check.
+
+    Two traps worth naming. The `Get-AppxPackage *x* | Remove-AppxPackage` form
+    every debloat gist uses removes a package **for the calling user only** and
+    leaves the provisioned copy, so the next profile Windows creates gets all of
+    it back — both removals need `-AllUsers`, and the provisioned one is separate.
+    And the exclusion *comments* trip any test that greps for a service name, so
+    those assertions match the quoted list-entry form instead; the comments are
+    the part worth keeping, because without them the next person re-adds them.
+
+    **Not yet verified on real hardware** — see the open-issues list.
 
 Engine gate: strata/Android orchestration is unit + dry-run + (strata) VM-verified;
 **Android/Waydroid rendering is real-hardware-only** (VBox GL 2.1 can't run gralloc).
@@ -292,6 +527,7 @@ is the unattended CLI form of all of it (what `audit-vms.sh` drives).
 | **Android/Waydroid** (`android` block, lazy lifecycle, `android-install`, `.apkm`) | ✅ | **real HW** (install, ARM libndk, launchers, open-to-install) |
 | **Windows wine tier** (`windows` block, oracle, per-app prefix, lazy wine) | ✅ | real HW (Notepad++) |
 | **Windows VM tier** (dockur + WinApps RemoteApp) | ✅ **single-window launch works** — needs all three of §16 | real HW (KVM): setup → install → borderless RemoteApp window, screenshotted |
+| **Windows VM tier — kiosk session** (`/shell:`, §21, now the default) | ⚠️ built + unit-tested, **not yet run on real HW** | unit only — see the open-issues list for what to check |
 | `manifest update` (host + AUR + strata + Flatpak + Waydroid) | ✅ | unit + dry-run |
 | WiFi list+connect (rfkill-unblock included) | ✅ | real HW (laptop) |
 | Install-log to USB on a real-HW failure | ✅ fixed | needs a real failing USB to re-confirm |
@@ -462,16 +698,31 @@ the always-on ISO builder + package cache; ephemeral `review-*`/`audit-*`/
   `Z:` share tried first), which is why five releases of registry-only work
   showed nothing. Verified end to end on this KVM box and screenshotted.
   Remaining polish, none of it blocking:
-  - **The launch check is still a duration heuristic**, so it reports success
-    for a launch that painted nothing. It no longer *hides* a failure now that
-    the working path is tried first, but it is still wrong. The reliable signal
-    is the X11 window class — a real RemoteApp is `RAIL:<hex>`, a desktop
-    session is `xfreerdp` / `FreeRDP: <host>` — and FreeRDP's log cannot tell
-    them apart (`Invalid appWindow` and `xf_rail_monitored_desktop` appear
-    identically in both). Costs an `xdotool`-class dependency, hence deferred.
-  - **RemoteApp windows land tiled.** Hyprland stretched a small dialog to a
-    full tile; they almost certainly want a float rule per compositor.
+  - **The duration heuristic is gone from the default path** — the kiosk session
+    (§21) is judged by the guest's own heartbeat file, which is a real signal
+    rather than a stopwatch. It still governs the **RemoteApp fallback**, where
+    it remains wrong: it reports success for a launch that painted nothing. The
+    reliable signal there is the X11 window class — a real RemoteApp is
+    `RAIL:<hex>`, a desktop session is `xfreerdp` / `FreeRDP: <host>` — and
+    FreeRDP's log cannot tell them apart (`Invalid appWindow` and
+    `xf_rail_monitored_desktop` appear identically in both). Costs an
+    `xdotool`-class dependency, hence still deferred.
+  - ~~**RemoteApp windows land tiled.**~~ — addressed by §21 rather than fixed:
+    the kiosk session presents one client, so there is nothing per-window for a
+    compositor to tile. `float_windows` stays for the RemoteApp fallback, where
+    the underlying problem is unchanged.
   - `--link` app detection is untested since the cert-pin fix.
+- **The kiosk session (§21) has not run on real hardware.** Unit tests cover the
+  ordering, the proof-before-success rule, the stamping guard and that both
+  paths block; none of that can tell you whether Windows honours `/shell:` on
+  *this* guest. What to check on the KVM box, in order: a launch produces one
+  window with **no taskbar**; `Z:\.manifest-shell-alive` appears within ~45 s
+  (if it never does, `.kiosk-unsupported` gets stamped and you silently fall
+  back to RemoteApp — check for that file before concluding anything); a file
+  dialog opens *inside* the window rather than as a second client; a second app
+  launched while the first is open lands in the same window; and closing the
+  window ends the session rather than leaving one to time out 30 s later.
+  Compare against `MANIFEST_WINVM_MODE=remoteapp`.
 - **Phase 6c — GPU passthrough (`vm-vfio`, §14.3):** not started. The CAD /
   SolidWorks path.
 - **Real hardware:** WiFi connect, dual-boot alongside Windows, strata GUI and
