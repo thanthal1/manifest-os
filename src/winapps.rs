@@ -1264,18 +1264,32 @@ via_kiosk=0
 # stale dialog instead. Setup writes this into C:\OEM\install.bat for new
 # guests; a guest installed before that never ran it, so apply it once here.
 # Costs one short RDP round-trip, exactly once per guest.
+# The stamp records the policy VERSION, not merely that something was once
+# applied. A bare stamp meant every later addition to this policy reached new
+# guests only -- silently, and for good.
 POLICY_STAMP="$VMDIR/.guest-policy-set"
 WACONF="$HOME/.config/winapps/winapps.conf"
-if [ ! -f "$POLICY_STAMP" ] && [ -r "$WACONF" ]; then
+if [ "$(cat "$POLICY_STAMP" 2>/dev/null)" != "{policy_version}" ] && [ -r "$WACONF" ]; then
   RDP_USER=""; RDP_PASS=""; FREERDP_COMMAND=""
   . "$WACONF" 2>/dev/null || true
   if [ -n "$RDP_USER" ]; then
-    timeout 60 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
-      /v:127.0.0.1:3389 {GUEST_POLICY_CMD} >/dev/null 2>&1
+    cat > "$HOME/.manifest-policy.ps1" <<'MOSPOLEOF'
+{policy_ps1}
+MOSPOLEOF
+    rm -f "$HOME/.manifest-policy-result" 2>/dev/null || true
+    timeout 120 "${{FREERDP_COMMAND:-xfreerdp3}}" /cert:ignore /u:"$RDP_USER" /p:"$RDP_PASS" \
+      /v:127.0.0.1:3389 \
+      "$(printf '/app:program:C:\\Windows\\System32\\cmd.exe,cmd:/C powershell -NoProfile -ExecutionPolicy Bypass -File Z:\\.manifest-policy.ps1 & tsdiscon')" \
+      >/dev/null 2>&1 || true
+    # Only stamp what the guest confirms. Stamping regardless is how the old
+    # version convinced itself a policy had been applied that never was.
+    if [ "$(tr -d '\r\n' < "$HOME/.manifest-policy-result" 2>/dev/null)" = ok ]; then
+      printf '%s' "{policy_version}" > "$POLICY_STAMP" 2>/dev/null || true
+      echo "Windows settings updated (autostart off, sign-in prompt fixed)."
+      echo "  Some of it takes effect when Windows next restarts."
+    fi
+    rm -f "$HOME/.manifest-policy-result" 2>/dev/null || true
   fi
-  # Best-effort: if it fails the prompts may still appear, which is visible and
-  # recoverable. Never block the launch on it.
-  touch "$POLICY_STAMP" 2>/dev/null || true
 fi
 
 # Growing the disk is two steps, and only the first is dockur's. It enlarges the
@@ -1585,6 +1599,8 @@ run_wa windows || {{
         nirifn = niri_ids_fn(),
         rdpready = rdp_ready_fn(),
         kioskfn = kiosk_launch_fn(),
+        policy_version = GUEST_POLICY_VERSION,
+        policy_ps1 = guest_policy_ps1().trim_end(),
     )
 }
 
@@ -2416,11 +2432,12 @@ fn setup_autologon_step() -> String {
 fn setup_guest_policy_step() -> String {
     format!(
         r#"b="{COMPOSE_DIR}/oem/install.bat"
-           if ! grep -qi 'Internet Settings' "$b" 2>/dev/null; then
+           if ! grep -qi 'DisableLocalMachineRun' "$b" 2>/dev/null; then
              {{
-{GUEST_POLICY_BAT}
+{bat}
              }} >> "$b"
-           fi"#
+           fi"#,
+        bat = guest_policy_bat(),
     )
 }
 
@@ -2601,22 +2618,107 @@ const WATERFOX_URL: &str =
 /// session, so there is no headroom to absorb the leak. 30 s after the last
 /// client for a session goes away, log it off; the next launch then gets a
 /// clean session instead of a fight over a stale one.
-const GUEST_POLICY_BAT: &str = concat!(
-    "               printf '%s\\r\\n' 'reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\3\" /v 1806 /t REG_DWORD /d 0 /f >nul 2>&1'\n",
-    "               printf '%s\\r\\n' 'reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\" /v MaxDisconnectionTime /t REG_DWORD /d 30000 /f >nul 2>&1'\n",
-    "               printf '%s\\r\\n' 'reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\" /v fResetBroken /t REG_DWORD /d 1 /f >nul 2>&1'",
-);
+/// Startup entries are blocked rather than deleted. An app that adds itself to
+/// `Run` gets launched at every logon, and under RAIL each of those is a window
+/// on the *Linux* desktop — so a guest slowly accumulates junk that appears
+/// every time you open anything. `DisableLocalMachineRun` and friends are the
+/// documented policies for "do not process the run list": the entries stay put
+/// (uninstallers still find them), they simply never execute.
+///
+/// Scope note: this stops **Run/RunOnce**, which is how nearly everything
+/// autostarts. It does not stop a *service* — deliberately, because that is how
+/// licensing daemons work, and Inventor's is one.
+const STARTUP_POLICY: [(&str, &str); 4] = [
+    (r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "DisableLocalMachineRun"),
+    (r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "DisableLocalMachineRunOnce"),
+    (r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "DisableCurrentUserRun"),
+    (r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "DisableCurrentUserRunOnce"),
+];
+
+/// The startup-blocking policy as `install.bat` lines. Pure — unit-tested.
+fn startup_policy_bat() -> String {
+    STARTUP_POLICY
+        .iter()
+        .map(|(k, v)| {
+            format!("               printf '%s\\r\\n' 'reg add \"{k}\" /v {v} /t REG_DWORD /d 1 /f >nul 2>&1'\n")
+        })
+        .collect()
+}
+
+fn guest_policy_bat() -> String {
+    format!(
+        "{}{}",
+        concat!(
+            "               printf '%s\\r\\n' 'reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\3\" /v 1806 /t REG_DWORD /d 0 /f >nul 2>&1'\n",
+            "               printf '%s\\r\\n' 'reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\" /v MaxDisconnectionTime /t REG_DWORD /d 30000 /f >nul 2>&1'\n",
+            "               printf '%s\\r\\n' 'reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\" /v fResetBroken /t REG_DWORD /d 1 /f >nul 2>&1'\n",
+        ),
+        startup_policy_bat().trim_end(),
+    )
+}
 
 /// The same policy as one `cmd.exe` line, for applying to a guest that was
 /// installed before it existed. Ends in `tsdiscon` — a RemoteApp session does
 /// not close when its program exits, so without it FreeRDP sits there until the
 /// timeout, stalling the launch the user actually asked for.
-const GUEST_POLICY_CMD: &str = concat!(
-    r#"'/app:program:C:\Windows\System32\cmd.exe,cmd:/C "#,
-    r#"reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v 1806 /t REG_DWORD /d 0 /f & "#,
-    r#"reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v MaxDisconnectionTime /t REG_DWORD /d 30000 /f & "#,
-    r#"reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fResetBroken /t REG_DWORD /d 1 /f & tsdiscon'"#,
-);
+/// Bumped whenever the policy changes. `.guest-policy-set` stores this, and the
+/// launcher re-applies when it differs — a bare "we did it once" stamp meant
+/// every later addition reached new guests only, silently, forever.
+const GUEST_POLICY_VERSION: &str = "2";
+
+/// The runtime policy, as a **script on the share** rather than one giant
+/// `cmd:` line. Pure — unit-tested.
+///
+/// It was a single `cmd.exe /C a & b & c` line, and grew past what that can
+/// carry safely: two separate attempts at long `cmd:` payloads tonight came back
+/// empty because of quoting, with nothing to say why. The `-File Z:\…` shape is
+/// the one that has actually worked here (the disk-grow and debloat scripts both
+/// use it).
+fn guest_policy_ps1() -> String {
+    let startup: String = STARTUP_POLICY
+        .iter()
+        .map(|(k, v)| {
+            let hive = if k.starts_with("HKLM") { "HKLM:" } else { "HKCU:" };
+            let path = k.split_once('\\').map(|x| x.1).unwrap_or_default();
+            format!("New-Item -Path '{hive}\\{path}' -Force | Out-Null\nSet-ItemProperty -Path '{hive}\\{path}' -Name '{v}' -Value 1 -Type DWord\n")
+        })
+        .collect();
+    format!(
+        r#"# ManifestOS - guest policy (generated; applied to an installed guest).
+$ErrorActionPreference = 'SilentlyContinue'
+
+# Launching an .exe from Z: (a network location) otherwise raises "Open File -
+# Security Warning", which is fatal to a RemoteApp: the app never starts and the
+# modal stays parked in the session.
+$z = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3'
+New-Item -Path $z -Force | Out-Null
+Set-ItemProperty -Path $z -Name '1806' -Value 0 -Type DWord
+
+# A RemoteApp session does not end when its program exits, it disconnects -- and
+# with no limit it lingers forever. A later connection collides with it, and on a
+# single-session client edition that collision IS "Another user is signed in".
+$ts = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+New-Item -Path $ts -Force | Out-Null
+Set-ItemProperty -Path $ts -Name 'MaxDisconnectionTime' -Value 30000 -Type DWord
+Set-ItemProperty -Path $ts -Name 'fResetBroken' -Value 1 -Type DWord
+
+# Stop apps autostarting. Entries are left in place -- uninstallers still find
+# them -- they simply never run. Under RAIL every autostarted app is a window on
+# the Linux desktop, appearing whenever anything is opened.
+{startup}
+# Automatic sign-in off. This lives in install.bat for new guests, but a guest
+# built before that never ran it -- and while it is on, dockur holds a console
+# session, every connection collides with it, and an alternate shell is ignored.
+# Takes effect on the guest's next boot.
+$wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+Set-ItemProperty -Path $wl -Name 'AutoAdminLogon' -Value '0' -Type String
+Remove-ItemProperty -Path $wl -Name 'DefaultPassword'
+Remove-ItemProperty -Path $wl -Name 'AutoLogonCount'
+
+Set-Content -Path 'Z:\.manifest-policy-result' -Value 'ok' -Encoding ASCII
+"#
+    )
+}
 
 /// Append our debloat call to WinApps' `install.bat`. Pure — unit-tested.
 ///
@@ -3608,7 +3710,17 @@ mod tests {
         assert!(s.contains(r"Internet Settings\Zones\3"), "{s}");
         assert!(s.contains("/v 1806 /t REG_DWORD /d 0 /f"), "{s}");
         assert!(s.contains(">> \"$b\""), "append to the OEM hook, never replace it: {s}");
-        assert!(s.contains("grep -qi 'Internet Settings'"), "idempotent: {s}");
+        // Idempotent, and keyed on the NEWEST line in the block. Keying on the
+        // oldest ("Internet Settings") meant a guest whose install.bat already
+        // had the original policy never received anything added later.
+        assert!(s.contains("grep -qi 'DisableLocalMachineRun'"), "idempotent: {s}");
+        // Apps must not be able to autostart: under RAIL every autostarted app
+        // is a window on the *Linux* desktop, appearing whenever anything opens.
+        // Blocked, not deleted -- uninstallers still find their entries.
+        for v in ["DisableLocalMachineRun", "DisableCurrentUserRun",
+                  "DisableLocalMachineRunOnce", "DisableCurrentUserRunOnce"] {
+            assert!(s.contains(v), "startup entries must be blocked ({v}): {s}");
+        }
         // "Another user is signed in": a RemoteApp session does NOT end when its
         // program exits, it only disconnects, and Windows sets no disconnection
         // limit by default — so sessions linger forever, pile up, and a later
@@ -3620,14 +3732,33 @@ mod tests {
         assert!(s.contains("fResetBroken /t REG_DWORD /d 1"), "logging off needs both: {s}");
         // A guest installed before this existed never ran that install.bat, so
         // the launcher applies it once itself rather than telling the user to.
+        // Runtime it is a SCRIPT on the share, not one long `cmd:` line. Two
+        // separate attempts at long cmd: payloads came back empty from quoting
+        // alone, with nothing to say why; `-File Z:\…` is the shape that works.
         let run = vm_run_script();
         assert!(run.contains(".guest-policy-set"), "existing guests get it too: {run}");
-        assert!(run.contains("/v 1806 /t REG_DWORD /d 0 /f"), "{run}");
-        assert!(run.contains("MaxDisconnectionTime"), "{run}");
+        assert!(run.contains("-File Z:\\\\.manifest-policy.ps1"), "a file, not a cmd: line: {run}");
         assert!(run.contains("tsdiscon"), "or FreeRDP sits there stalling the launch: {run}");
+        let ps = guest_policy_ps1();
+        assert!(ps.contains("Name '1806' -Value 0"), "{ps}");
+        assert!(ps.contains("MaxDisconnectionTime"), "{ps}");
+        assert!(ps.contains("DisableLocalMachineRun"), "startup entries blocked at runtime: {ps}");
+        // Automatic sign-in lived only in install.bat, so a guest built before
+        // it never got it -- and while it is on, dockur holds a console session,
+        // every connect collides with it (that IS "another user is signed in"),
+        // and an alternate shell is ignored.
+        assert!(ps.contains("'AutoAdminLogon' -Value '0'"), "{ps}");
+
+        // The stamp holds the policy VERSION. A bare "done once" stamp meant
+        // every later addition reached new guests only, silently and for good.
+        assert!(run.contains("!= \"2\""), "the stamp is versioned: {run}");
+        // And it is written only on the guest's own confirmation.
+        let confirm = run.find("manifest-policy-result\" 2>/dev/null)\" = ok").expect("confirmed");
+        let write = run.find("> \"$POLICY_STAMP\"").expect("stamp write");
+        assert!(confirm < write, "stamp only what the guest confirms:\n{run}");
         let stamp = run.find("POLICY_STAMP=").expect("stamp");
         let launch = run.find("run_wa manual \"$WINPATH\"").expect("launch");
-        assert!(stamp < launch, "must be set before the first launch, not after:\n{run}");
+        assert!(stamp < launch, "must be applied before the first launch, not after:\n{run}");
     }
 
     /// The stamp answers "was the Windows in storage/ INSTALLED with
