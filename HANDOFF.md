@@ -352,14 +352,32 @@ produces "the window didn't open", so none of them are guessable from a log.
     windows`, parsed with awk — no `jq` on the box). Verified against a live
     window, not assumed. Note a kiosk session is an ordinary desktop client
     FreeRDP names `xfreerdp` / `FreeRDP:<host>` — never `RAIL:<hex>`.
-22b. **The "window spam" on opening an app is RAIL surfacing the whole desktop,
+22a. **No X server means no window, and it looks identical to a failed launch.**
+    `xfreerdp3` is an **X11** client. On niri, XWayland is a separate service
+    (`xwayland-satellite`) that ships **disabled**, and when it is not running an
+    app launch produces no window at all — the user sees their desktop
+    background and reports "it just refuses". Two traps: the stale
+    `/tmp/.X11-unix/X0` socket **outlives** the server, so checking for the
+    socket proves nothing (`pgrep -x Xwayland` is the real test), and the
+    failure is completely silent because a launcher has no terminal.
+    `manifest-freerdp` now checks, prefers `sdl-freerdp3` when there is no X,
+    and `notify-send`s the fix rather than dying quietly.
+
+    Unblock: `systemctl --user enable --now xwayland-satellite`.
+22b. **The FreeRDP log used to truncate to EMPTY at 256 KB, and destroyed
+    evidence mid-investigation.** A kiosk launch was being diagnosed; the log
+    rolled; `grep -c 'shell:powershell'` then returned 0 and was briefly taken as
+    proof the kiosk path had never run — when in fact the entry had simply been
+    erased. It now keeps the most recent 256 KB of a 512 KB cap. **Any log a
+    diagnosis depends on must never be emptied**, only trimmed.
+22c. **The "window spam" on opening an app is RAIL surfacing the whole desktop,
     and no client-side rule can fix it.** RAIL surfaces every top-level window in
     the *session*, and on the RemoteApp path explorer.exe is running behind the
     RemoteApp — so a connect surfaces the desktop with it. Measured in
     `windows-vm-freerdp.log`: **31–111 `xf_rail_monitored_desktop` events and 7
     tray icons per connection.** Not running a shell in the session is the fix,
     which is what the kiosk path is.
-22c. **A stamp from an abandoned experiment silently disabled the kiosk path for
+22d. **A stamp from an abandoned experiment silently disabled the kiosk path for
     two days.** `.kiosk-unsupported` was found dated *2026-07-28 02:42*,
     alongside a 2791-byte `~/.manifest-shell.ps1` — an earlier, uncommitted
     attempt at the same idea. It predated the shipped kiosk code by two days and

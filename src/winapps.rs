@@ -1580,15 +1580,53 @@ pub fn freerdp_wrapper() -> &'static str {
 # Exists purely so FreeRDP's errors survive winapps' `&>/dev/null`.
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/windows-vm-freerdp.log"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-# Keep the log from growing without bound.
-[ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt 262144 ] && : > "$LOG"
+# Keep the log from growing without bound, but KEEP THE TAIL rather than
+# emptying it. Truncating to nothing destroyed the record of a launch that was
+# being investigated at the time, and made "no such launch in the log" look like
+# evidence that it never happened. Half a megabyte, and the recent half survives.
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt 524288 ]; then
+    tail -c 262144 "$LOG" > "$LOG.trim" 2>/dev/null && mv -f "$LOG.trim" "$LOG"
+fi
 {
   echo "--- $(date '+%Y-%m-%d %H:%M:%S')"
   echo "    args: $*"
 } >> "$LOG" 2>/dev/null || true
 
-for c in xfreerdp3 xfreerdp sdl-freerdp3 wlfreerdp; do
+# Is there an X server this can actually draw on? `xfreerdp3` is an X11 client:
+# on a Wayland session with no XWayland it exits immediately, no window is ever
+# mapped, and the launch looks exactly like "nothing happened" -- which on niri,
+# where XWayland is a separate service that ships DISABLED, is what it was.
+# The stale socket outlives the server, so the socket alone proves nothing.
+x_usable() {
+    [ -n "${DISPLAY:-}" ] || return 1
+    n=${DISPLAY#*:}; n=${n%%.*}
+    [ -S "/tmp/.X11-unix/X$n" ] || return 1
+    pgrep -x Xwayland >/dev/null 2>&1 || pgrep -x Xorg >/dev/null 2>&1
+}
+
+if x_usable; then
+    ORDER="xfreerdp3 xfreerdp sdl-freerdp3 wlfreerdp"
+else
+    # No X. Prefer the clients that can talk to Wayland directly; an X11 one is
+    # kept last so a machine with nothing else still gets its real error.
+    echo "    no usable X display (DISPLAY=${DISPLAY:-unset}) — preferring a Wayland client" >> "$LOG"
+    ORDER="sdl-freerdp3 wlfreerdp xfreerdp3 xfreerdp"
+fi
+
+for c in $ORDER; do
     if command -v "$c" >/dev/null 2>&1; then
+        if [ "$c" = xfreerdp3 ] || [ "$c" = xfreerdp ]; then
+            x_usable || {
+                m='No X display: Windows apps cannot open a window. Start XWayland with: systemctl --user enable --now xwayland-satellite'
+                echo "    $m" >> "$LOG"
+                # Say it out loud. A launcher has no terminal, so without this the
+                # only symptom is an app that never appears.
+                command -v notify-send >/dev/null 2>&1 && notify-send 'Windows VM' "$m"
+                echo "$m" >&2
+                exit 3
+            }
+        fi
+        echo "    using $c" >> "$LOG"
         exec 2>>"$LOG"
         exec "$c" "$@"
     fi
@@ -2912,6 +2950,18 @@ mod tests {
         assert!(c.contains("FREERDP_COMMAND=\"manifest-freerdp\""), "{c}");
         let w = freerdp_wrapper();
         assert!(w.contains("xfreerdp3"), "wrapper resolves a real binary: {w}");
+        // An X11 client on a Wayland session with no XWayland exits at once and
+        // maps no window -- the launch looks like "nothing happened", which is
+        // exactly what it looked like on niri, where XWayland is a separate
+        // service shipped DISABLED. The stale socket outlives the server, so a
+        // socket check alone proves nothing; the server process must be there.
+        assert!(w.contains("pgrep -x Xwayland"), "a stale socket is not a server: {w}");
+        assert!(w.contains("ORDER=\"sdl-freerdp3"), "prefer a Wayland client with no X: {w}");
+        assert!(w.contains("notify-send"), "a launcher has no terminal — say it out loud: {w}");
+        // Trimming to EMPTY destroyed the record of the very launch under
+        // investigation, and made its absence look like proof it never ran.
+        assert!(w.contains("tail -c 262144"), "keep the tail, don't empty the log: {w}");
+        assert!(!w.contains("-gt 262144 ] && : > \"$LOG\""), "no truncate-to-nothing: {w}");
         assert!(w.contains("exec 2>>\"$LOG\""), "wrapper must keep stderr: {w}");
     }
 
