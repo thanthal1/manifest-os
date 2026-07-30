@@ -1424,6 +1424,18 @@ fi
 if [ "$opened" = 1 ]; then
   echo
   echo "$base has closed."
+  # An app that was already inside the guest cannot have installed itself, and
+  # it is certainly not a portable .exe sitting in Windows Transfer -- so there
+  # is nothing to scan for and nothing to add to the launcher. Everything below
+  # only makes sense for a file we handed across.
+  #
+  # Skipping it is also what stops the window spam after an ordinary launch: on
+  # the RemoteApp path the scan costs a cmd window AND a PowerShell window, and
+  # another connection into a Windows that allows one session.
+  if [ "$INGUEST" = 1 ]; then
+    rm -f "$APPSBEFORE" 2>/dev/null || true
+    exit 0
+  fi
   # Whatever it installed should now be in your launcher — re-detect so you
   # never have to run anything yourself.
   echo "Checking for newly installed Windows apps..."
@@ -1440,11 +1452,19 @@ if [ "$opened" = 1 ]; then
   # `--link` is skipped with it: it only ever writes entries for apps in
   # WinApps' own hardcoded catalog, which the scan above supersedes, and its
   # setup.sh makes its own connection to do it.
+  #
+  # `manifest windows-vm --link` is NOT called here, and must not be re-added.
+  # It runs WinApps' setup.sh, which opens its own `/cert:tofu` connection and
+  # executes `installed.bat` in a **visible cmd window** — after every single
+  # launch. That was most of the "ton of windows spamming cmd", and the second
+  # connection is what produced Windows' "another user is signed in" prompt on a
+  # single-session guest. It only ever wrote entries for apps in WinApps' own
+  # hardcoded catalog, which the Start Menu scan above supersedes — so it cost a
+  # connection and two windows to add nothing.
   if [ "$via_kiosk" = 1 ]; then
     manifest __winvm-apps --from-share >/dev/null 2>&1 || true
   else
     manifest __winvm-apps >/dev/null 2>&1 || true
-    manifest windows-vm --link >/dev/null 2>&1 || true
   fi
   APPSAFTER=$(mktemp) && list_apps > "$APPSAFTER"
   new=$(comm -13 "$APPSBEFORE" "$APPSAFTER" 2>/dev/null)
@@ -3042,8 +3062,23 @@ mod tests {
         let manual_at = s.find("run_wa manual").expect("manual launch");
         let desktop_at = s.find("run_wa windows").expect("desktop fallback");
         assert!(manual_at < desktop_at, "RemoteApp must be tried before the desktop:\n{s}");
-        // After installing, newly-installed apps get added to the launcher.
-        assert!(s.contains("manifest windows-vm --link"), "re-detects apps: {s}");
+        // `--link` must NOT run after a launch. It invokes WinApps' setup.sh,
+        // which opens its own /cert:tofu connection and runs installed.bat in a
+        // visible cmd window -- every launch. That was most of the cmd-window
+        // spam, and the extra connection is what made a single-session Windows
+        // put up "another user is signed in". It only ever added entries for
+        // apps in WinApps' hardcoded catalog, which the Start Menu scan
+        // supersedes, so it cost a connection and two windows to add nothing.
+        assert!(
+            !s.contains("manifest windows-vm --link >"),
+            "--link must not run after a launch: {s}"
+        );
+        // Launching something already in the guest cannot install anything, so
+        // the scan (two more windows, one more connection) is skipped outright.
+        let inguest_exit = s.find("if [ \"$INGUEST\" = 1 ]; then\n    rm -f \"$APPSBEFORE\"")
+            .expect("in-guest launches skip the post-launch scan");
+        let scan = s.find("manifest __winvm-apps").expect("scan");
+        assert!(inguest_exit < scan, "skip before scanning:\n{s}");
         // winapps exits 0 even when nothing painted, so success must be judged
         // by how long the session lasted -- never by exit status alone.
         assert!(s.contains("t1 - t0"), "launch success is timed, not assumed: {s}");

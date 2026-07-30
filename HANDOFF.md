@@ -370,6 +370,31 @@ produces "the window didn't open", so none of them are guessable from a log.
     proof the kiosk path had never run — when in fact the entry had simply been
     erased. It now keeps the most recent 256 KB of a 512 KB cap. **Any log a
     diagnosis depends on must never be emptied**, only trimmed.
+22bb. **Most of the cmd-window spam and every "another user is signed in" prompt
+    was `manifest windows-vm --link`, which we called after every launch.**
+    `--link` runs WinApps' `setup.sh`, and that opens **its own `/cert:tofu`
+    connection** and executes `installed.bat` in a **visible cmd window**. Caught
+    in the act — `pgrep` during a complaint showed:
+
+    ```
+    xfreerdp3 … /cert:tofu … +home-drive /app:program:cmd.exe,cmd:/C \\tsclient\home\.local\share\winapps\installed.bat
+    ```
+
+    So an ordinary launch made three connections into a guest that allows one
+    session: the app, the Start Menu scan, and this. The second and third are
+    what produced the dual-connection prompt and the retry-to-get-it-to-appear
+    behaviour. `--link` only ever wrote entries for apps in WinApps' hardcoded
+    catalog, which the direct Start Menu scan supersedes — it cost a connection
+    and two windows to add nothing. **Never re-add it to the launch path**; a
+    test pins that.
+
+    A launch of something already installed now also skips the post-launch scan
+    entirely (`INGUEST=1` → exit). An app already in the guest cannot have
+    installed itself, and it is not a portable `.exe` in Windows Transfer — so
+    the scan was two more windows and another connection for a question with no
+    possible answer. It also fixes a real bug: that path used to write a bogus
+    "portable app" launcher pointing into `Windows Transfer` for apps that were
+    never there.
 22c. **The "window spam" on opening an app is RAIL surfacing the whole desktop,
     and no client-side rule can fix it.** RAIL surfaces every top-level window in
     the *session*, and on the RemoteApp path explorer.exe is running behind the
