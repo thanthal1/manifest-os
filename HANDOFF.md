@@ -338,15 +338,41 @@ produces "the window didn't open", so none of them are guessable from a log.
     part of what "it breaks when windows pop in front" actually was here. Worth
     remembering before attributing the next layout problem to RAIL.
 
-    niri is now a branch in both `float_windows` and `kiosk_raise`, via a shared
-    `niri_ids` helper, because **niri has no class selector**: unlike hyprctl,
-    swaymsg and i3-msg, every action it exposes takes `--id`, so the window has
-    to be looked up by App ID first (`niri msg windows`, parsed with awk — no
-    `jq` on the box). Verified against a live window, not assumed.
+    **`float_windows` is now gone entirely, and should not come back.** Floating
+    was the wrong call — it existed because Hyprland once stretched a small
+    dialog to a full tile, but tiling these windows behaves better in practice.
+    The loop was also its own bug: it re-issued float+focus for *every* matching
+    window on *every* pass, so a session surfacing a dozen windows got well over
+    a hundred focus dispatches across 24 s — from the user's side,
+    indistinguishable from windows spawning and stealing focus by themselves.
 
-    The two match different classes and must not be merged: a RemoteApp window
-    is XWayland with WM_CLASS `RAIL:<hex>`, while a kiosk session is an ordinary
-    desktop client FreeRDP names `xfreerdp` / `FreeRDP:<host>`.
+    `niri_ids` survives for `kiosk_raise`, because **niri has no class
+    selector**: unlike hyprctl, swaymsg and i3-msg, every action it exposes
+    takes `--id`, so the window is looked up by App ID first (`niri msg
+    windows`, parsed with awk — no `jq` on the box). Verified against a live
+    window, not assumed. Note a kiosk session is an ordinary desktop client
+    FreeRDP names `xfreerdp` / `FreeRDP:<host>` — never `RAIL:<hex>`.
+22b. **The "window spam" on opening an app is RAIL surfacing the whole desktop,
+    and no client-side rule can fix it.** RAIL surfaces every top-level window in
+    the *session*, and on the RemoteApp path explorer.exe is running behind the
+    RemoteApp — so a connect surfaces the desktop with it. Measured in
+    `windows-vm-freerdp.log`: **31–111 `xf_rail_monitored_desktop` events and 7
+    tray icons per connection.** Not running a shell in the session is the fix,
+    which is what the kiosk path is.
+22c. **A stamp from an abandoned experiment silently disabled the kiosk path for
+    two days.** `.kiosk-unsupported` was found dated *2026-07-28 02:42*,
+    alongside a 2791-byte `~/.manifest-shell.ps1` — an earlier, uncommitted
+    attempt at the same idea. It predated the shipped kiosk code by two days and
+    gated it out completely: `grep -c 'shell:powershell'` over the FreeRDP log
+    returned **0**, so the feature had never once executed while appearing to be
+    live.
+
+    The stamp now carries a **reason** (`no-heartbeat`) and the gate greps for
+    it, so an empty or foreign file counts as absent and the path is retried.
+    Both directions are behaviour-tested. **General rule this re-teaches:** a
+    marker file whose meaning is "existence" cannot distinguish *its own* writer
+    from anyone else's, and the failure mode is silence — the feature simply
+    never runs, and every test still passes.
 23. **The console windows that flashed up after every launch were the app scan.**
     `enum_apps_step` runs its enumerator as a RemoteApp — `/app:program:cmd.exe,
     cmd:/C powershell …` — so RAIL surfaced a **cmd console and then a PowerShell

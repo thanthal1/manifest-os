@@ -735,18 +735,11 @@ fn rdp_ready_fn() -> &'static str {
 "
 }
 
-/// Window ids from niri, by App ID. Shared by `float_windows` and `kiosk_raise`.
+/// Window ids from niri, by App ID. Used by `kiosk_raise`.
 ///
 /// niri has no class *selector* — unlike hyprctl, swaymsg and i3-msg, every
 /// action it exposes takes `--id`, so the id has to be looked up first. Hence a
 /// helper rather than a one-liner in each branch.
-///
-/// This machine runs niri, and until it was added **neither** function did
-/// anything at all here: no `HYPRLAND_INSTANCE_SIGNATURE`, no `SWAYSOCK`, no
-/// `I3SOCK`, and `wmctrl` is X11-only and not installed — so `float_windows`
-/// fell through to `break` on its first pass and RemoteApp windows got no
-/// management whatsoever. That is a large part of what "it breaks when windows
-/// pop in front" *was* on niri.
 fn niri_ids_fn() -> &'static str {
     "niri_ids() {
          # $1 -- a lowercase extended-regex matched against each App ID.
@@ -757,40 +750,26 @@ fn niri_ids_fn() -> &'static str {
 "
 }
 
-fn float_windows_fn() -> &'static str {
-    "float_windows() {
-         # Run detached: the launch below blocks until the app exits, and
-         # windows appear a few seconds after it starts.
-         (
-           i=0
-           while [ $i -lt 12 ]; do
-             sleep 2; i=$((i+1))
-             if [ -n \"${HYPRLAND_INSTANCE_SIGNATURE:-}\" ] && command -v hyprctl >/dev/null 2>&1; then
-                 hyprctl dispatch setfloating 'class:^(RAIL:.*)$'   >/dev/null 2>&1
-                 hyprctl dispatch alterzorder 'top,class:^(RAIL:.*)$' >/dev/null 2>&1
-             elif [ -n \"${SWAYSOCK:-}\" ] && command -v swaymsg >/dev/null 2>&1; then
-                 swaymsg '[class=\"^RAIL:.*$\"] floating enable, focus' >/dev/null 2>&1
-             elif command -v i3-msg >/dev/null 2>&1 && [ -n \"${I3SOCK:-}\" ]; then
-                 i3-msg '[class=\"^RAIL:.*$\"] floating enable, focus' >/dev/null 2>&1
-             elif [ -n \"${NIRI_SOCKET:-}\" ] && command -v niri >/dev/null 2>&1; then
-                 # A RAIL window is XWayland, so its WM_CLASS (RAIL:<hex>) is
-                 # what niri reports as the App ID.
-                 for w in $(niri_ids 'rail:'); do
-                     niri msg action move-window-to-floating --id \"$w\" >/dev/null 2>&1
-                     niri msg action focus-window --id \"$w\"           >/dev/null 2>&1
-                 done
-             elif command -v wmctrl >/dev/null 2>&1; then
-                 # Last resort: no floating concept reachable, but at least
-                 # raise it so it is not lost behind what you were using.
-                 wmctrl -x -a 'RAIL' >/dev/null 2>&1
-             else
-                 break
-             fi
-           done
-         ) >/dev/null 2>&1 &
-     }
-"
-}
+// There was a `float_windows` here: a detached loop that, every 2 s for 24 s,
+// told the compositor to float and raise every `RAIL:*` window. It is gone, and
+// should not come back.
+//
+// Floating was the wrong call. It existed because Hyprland once stretched a
+// small dialog to a full tile, but tiling these windows turns out to behave
+// better in practice, and a rule that fights the compositor on every window is
+// worse than letting it do its job.
+//
+// The loop was also its own bug. It re-issued float+focus for *every* matching
+// window on *every* pass, so a session surfacing a dozen windows got well over a
+// hundred focus dispatches over 24 seconds — indistinguishable, from the user's
+// side, from the windows spawning and stealing focus by themselves.
+//
+// None of this is the real problem anyway. RAIL surfaces every top-level window
+// in the guest session, and on this path explorer.exe is running behind the
+// RemoteApp, so a connect surfaces the whole desktop: measured at 31-111
+// `xf_rail_monitored_desktop` events and 7 tray icons *per connection*. No
+// amount of client-side window management fixes that. Not running a shell in the
+// session does — see the kiosk path.
 
 /// The guest session's **shell** — what runs instead of `explorer.exe`.
 ///
@@ -921,8 +900,8 @@ fn kiosk_launch_fn() -> String {
     format!(
         r####"kiosk_raise() {{
          # One window, already mapped -- so this is a plain focus, not a race
-         # against window creation the way the RemoteApp path's float_windows
-         # is. There is nothing to float: the session is a single client.
+         # against window creation: the session is a single client, and there
+         # is nothing to float.
          if [ -n "${{HYPRLAND_INSTANCE_SIGNATURE:-}}" ] && command -v hyprctl >/dev/null 2>&1; then
              hyprctl dispatch focuswindow 'class:^([Xx]?[Ff]ree[Rr][Dd][Pp].*)$' >/dev/null 2>&1
          elif [ -n "${{SWAYSOCK:-}}" ] && command -v swaymsg >/dev/null 2>&1; then
@@ -1021,7 +1000,14 @@ MOSKIOSKEOF
              # plain-desktop case. Don't leave a stray Windows desktop on the
              # user's screen, and don't ask this guest again -- it cannot do it.
              kill "$KPID" 2>/dev/null || true
-             touch "$VMDIR/.kiosk-unsupported" 2>/dev/null || true
+             # Write a REASON, and gate on that reason rather than on the file
+             # existing. An empty or foreign stamp is treated as absent, so a
+             # file left behind by some earlier experiment cannot silently
+             # disable this for good. That is not hypothetical: a stamp from an
+             # abandoned attempt two days older than this code was found gating
+             # the whole path out, and the symptom was simply that nothing ever
+             # changed.
+             echo 'no-heartbeat' > "$VMDIR/.kiosk-unsupported" 2>/dev/null || true
            fi
            # FreeRDP dying outright is NOT evidence about the shell (the VM may
            # still be booting), so that case is left unstamped and retried.
@@ -1106,7 +1092,7 @@ case "$f" in
   *) INGUEST=0 ;;
 esac
 VMDIR="$HOME/.local/share/manifest-os/windows-vm"
-{docker}{wipe}{nirifn}{floatfn}{kioskfn}
+{docker}{wipe}{nirifn}{kioskfn}
 # 1. First use? Set the VM up (downloads and installs Windows — one time).
 if [ ! -f "$VMDIR/compose.yaml" ]; then
   echo "The Windows VM isn't set up yet."
@@ -1364,14 +1350,17 @@ fi
 #     precisely why /shell: was ruled out here for five releases. kiosk_launch
 #     therefore makes the guest PROVE the shell ran, and stamps the guest
 #     .kiosk-unsupported when it demonstrably didn't.
-if [ -f "$VMDIR/.remoteapp-enabled" ] && [ ! -f "$VMDIR/.kiosk-unsupported" ]    && [ "${{MANIFEST_WINVM_MODE:-kiosk}}" = kiosk ]; then
+if [ -f "$VMDIR/.remoteapp-enabled" ] && ! grep -qs no-heartbeat "$VMDIR/.kiosk-unsupported"    && [ "${{MANIFEST_WINVM_MODE:-kiosk}}" = kiosk ]; then
   kiosk_launch "$WINPATH" && {{ opened=1; via_kiosk=1; }}
 fi
 
 # 5b. RemoteApp: one X client per guest window. Correct in principle and what
 #     this tier shipped on, but the host compositor then owns windows it has no
-#     way to relate to each other -- see float_windows for the mitigation, and
-#     5a for why it is no longer the first choice.
+#     way to relate to each other. Worse, RAIL surfaces every top-level window in
+#     the SESSION, and explorer.exe is running behind the RemoteApp here -- so a
+#     connect surfaces the whole desktop (31-111 monitored-desktop events and 7
+#     tray icons per connection, measured). That is the window spam, and no
+#     client-side rule fixes it; 5a not running a shell at all does.
 if [ "$opened" != 1 ] && [ -f "$VMDIR/.remoteapp-enabled" ] && rail_busy; then
   echo >&2
   echo "Another Windows app is already open." >&2
@@ -1389,9 +1378,9 @@ if [ "$opened" != 1 ] && [ -f "$VMDIR/.remoteapp-enabled" ]; then
   # Claim the session for the length of this launch, so a second windows-vm-run
   # refuses above instead of taking the session away from this one.
   echo $$ > "$VMDIR/.rail.pid" 2>/dev/null || true
-  # Float and raise the windows as they appear, so a second window from a
-  # Windows app doesn't tile itself over whatever you were using.
-  float_windows
+  # Nothing floats or raises these -- the compositor tiles them, which turns out
+  # to behave better than fighting it, and the loop that used to do it was
+  # re-focusing every window every 2 s for 24 s. See the note where it lived.
   # An in-guest path is already exact -- the share-prefix search below only
   # applies to a file we copied across.
   if [ "$INGUEST" = 1 ]; then set -- "$f"; else set -- 'Z:\Windows Transfer\' '\\tsclient\home\Windows Transfer\'; fi
@@ -1575,7 +1564,6 @@ run_wa windows || {{
         wipe = wipe_storage_fn(),
         nirifn = niri_ids_fn(),
         rdpready = rdp_ready_fn(),
-        floatfn = float_windows_fn(),
         kioskfn = kiosk_launch_fn(),
     )
 }
@@ -3035,8 +3023,16 @@ mod tests {
             "the shell must PROVE it ran, not be assumed to have: {s}"
         );
         assert!(
-            s.contains("touch \"$VMDIR/.kiosk-unsupported\""),
+            s.contains("echo 'no-heartbeat' > \"$VMDIR/.kiosk-unsupported\""),
             "a guest that ignores the shell is never asked twice: {s}"
+        );
+        // Gated on the stamp's REASON, not on the file existing. An empty or
+        // foreign stamp counts as absent -- one left by an abandoned experiment
+        // two days older than this code was found disabling the whole path,
+        // and the only symptom was that nothing ever changed.
+        assert!(
+            s.contains("! grep -qs no-heartbeat \"$VMDIR/.kiosk-unsupported\""),
+            "a stale or foreign stamp must not disable the kiosk path: {s}"
         );
         // Erasing a Windows install must never happen without being asked.
         let rm_at = s.find("wipe_storage \"$VMDIR/storage\"").expect("reinstall path");
@@ -3044,32 +3040,22 @@ mod tests {
         assert!(prompt_at < rm_at, "must confirm BEFORE deleting the install:
 {s}");
         assert!(s.contains("[ -t 0 ]"), "never prompt where there is no terminal: {s}");
-        // A RemoteApp window is an ordinary client, so a tiling compositor
-        // tiles it -- and a second window from a Windows app (a sign-in
-        // browser, a file dialog, Inventor's part chooser) then takes a share
-        // of the layout or a whole screen and buries what you were using.
-        // Float and raise them instead, imperatively: rule syntax differs per
-        // compositor AND per version (Hyprland 0.56 rejects every `windowrule`
-        // spelling 0.4x accepted), while these dispatchers are stable.
-        let float_at = s.find("float_windows\n").expect("called");
-        let launch_at = s.find("run_wa manual \"$WINPATH\"").expect("launch");
-        assert!(float_at < launch_at, "must be running before the window appears:\n{s}");
-        // niri is in this list because it is what the dev box runs, and until
-        // it was added float_windows hit its `else break` on the first pass:
-        // no HYPRLAND_INSTANCE_SIGNATURE, no SWAYSOCK, no I3SOCK, and wmctrl is
-        // X11-only and not installed. RemoteApp windows got no management at
-        // all, silently -- the loop just exited.
-        assert!(s.contains("niri msg action move-window-to-floating"), "niri floats too: {s}");
-        assert!(s.contains("niri msg action focus-window"), "and raises: {s}");
+        // Nothing floats these any more, and nothing should. Tiling them
+        // behaves better in practice, and the loop that used to float+raise
+        // re-issued itself for every matching window every 2 s for 24 s --
+        // which on a session surfacing a dozen windows is a hundred-plus focus
+        // dispatches, indistinguishable from the windows stealing focus on
+        // their own. The real cause of the window spam is upstream of any
+        // client-side rule: RAIL surfaces every top-level window in the
+        // session, and explorer is running behind the RemoteApp.
+        assert!(!s.contains("float_windows"), "the float loop must stay gone: {s}");
+        assert!(!s.contains("move-window-to-floating"), "no floating rule: {s}");
+        assert!(!s.contains("setfloating"), "no floating rule: {s}");
+        // kiosk_raise survives -- one window, focused once, on demand.
+        assert!(s.contains("niri msg action focus-window"), "kiosk still raises: {s}");
         // Every action niri exposes takes --id; it has no class selector, so a
         // hyprctl-style one-liner cannot be written for it.
         assert!(s.contains("niri_ids() {"), "ids are looked up first: {s}");
-        for c in ["hyprctl dispatch setfloating", "swaymsg", "i3-msg", "wmctrl"] {
-            assert!(s.contains(c), "no path for {c}: {s}");
-        }
-        // The launch blocks until the app exits, so the watcher has to be
-        // detached or it would never run.
-        assert!(s.contains(") >/dev/null 2>&1 &"), "float_windows must detach: {s}");
         // A guest without the registry key cannot run a RemoteApp, but it CAN
         // serve the console session -- a full Windows desktop that outlives the
         // 5-second check and reports success. Verified on real hardware: the
