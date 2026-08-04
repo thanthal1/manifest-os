@@ -509,7 +509,7 @@ fn run() -> Result<()> {
             let body = match name.as_str() {
                 "android-install" => android::installer_script(),
                 "waydroid-launch" => android::launcher_script(),
-                "waydroid-arm-setup" => android::arm_setup_script().to_string(),
+                "waydroid-arm-setup" => android::arm_setup_script(),
                 "manifest-install-gui" => android::gui_install_script().to_string(),
                 "strata-install" => strata::strata_install_script().to_string(),
                 "windows-install" => winapps_wine::install_script().to_string(),

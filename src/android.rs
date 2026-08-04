@@ -35,6 +35,9 @@ const MIME_HANDLER: &str = "/usr/share/applications/manifest-apkm-install.deskto
 /// GUI-friendly installer wrapper (opens a terminal if there is one, else runs
 /// headless with desktop notifications) — what the file-manager handlers Exec.
 const GUI_INSTALL: &str = "/usr/local/bin/manifest-install-gui";
+/// Graphical `SUDO_ASKPASS` helper — how anything launched from a file manager
+/// (no terminal) gets to ask for a password at all. See [`askpass_script`].
+pub const ASKPASS: &str = "/usr/local/bin/manifest-askpass";
 /// System-wide XDG default-application map (merged, never clobbered).
 const MIMEAPPS: &str = "/etc/xdg/mimeapps.list";
 /// Default auto-stop timeout when `idle_minutes` is unset.
@@ -68,7 +71,16 @@ fn ensure_waydroid(ctx: &Ctx) -> Result<()> {
     }
     println!("  · installing waydroid (AUR)");
     crate::pacman::bootstrap_paru(ctx)?;
-    ctx.shell("paru -S --needed --noconfirm waydroid", false)
+    // `-Syu`, not `-S`: a bare `-S` installs against whatever the local sync DB
+    // last saw, and Arch mirrors keep only the current build of a package. On a
+    // machine whose DB is a few days old that means the exact filename pacman
+    // asks for is already gone — "failed retrieving file 'libgbinder-…' … 404",
+    // which reads like a broken mirror but is really a partial upgrade. Refresh
+    // and upgrade in the same transaction (the same rule as `pacman::sync_system`).
+    ctx.shell(
+        "paru -Syu --needed --noconfirm --disable-download-timeout waydroid",
+        false,
+    )
 }
 
 /// `binderfs` is the kernel gate — try to load/mount it, best-effort, and warn
@@ -154,31 +166,72 @@ fn sudoers_content() -> &'static str {
      ALL ALL=(root) NOPASSWD: /usr/bin/systemctl start waydroid-container.service, /usr/bin/systemctl stop waydroid-container.service\n"
 }
 
+/// `msudo` — the only way these scripts are allowed to become root.
+///
+/// A plain `sudo` is unusable when the script was started from a file manager:
+/// no controlling terminal, so it can't prompt and dies with "sudo: a password
+/// is required". `msudo` asks through `SUDO_ASKPASS` (a dialog) in that case and
+/// through the terminal otherwise, and — this is the part that matters — it
+/// validates first, so the *command* itself always runs under `sudo -n` and can
+/// never sit waiting for an answer.
+///
+/// From a terminal one authentication covers the whole run: sudo's timestamp is
+/// keyed by tty, which `$(…)` subshells share. With no tty it falls back to a
+/// parent-pid key, which they don't — so a GUI-launched split install can put up
+/// the dialog more than once. Ugly, not broken; installing under a single root
+/// shell is the fix, and that's a bigger change than this one.
+///
+/// Do NOT try to dodge that by capturing output in a shared file: the first
+/// redirect wins the file and later ones hit EACCES ("Permission denied" from
+/// the *shell*, before the command runs), which silently reuses stale output.
+fn sudo_helper() -> &'static str {
+    "mos_auth() {\n  \
+       if [ -t 0 ] || [ -z \"$SUDO_ASKPASS\" ]; then sudo -v; else sudo -A -v; fi\n\
+     }\n\
+     msudo() {\n  \
+       sudo -n -v 2>/dev/null || mos_auth >/dev/null 2>&1 || {\n    \
+         echo \"  ! this step needs root and there is no way to ask for your password here\" >&2\n    \
+         echo \"    (run it from a terminal: android-install <file>)\" >&2\n    \
+         return 1\n  \
+       }\n  \
+       sudo -n \"$@\"\n\
+     }\n"
+}
+
 /// Shell snippet that brings Android up on demand: start the container
 /// (passwordless), then the session, waiting for it to come up.
-fn ensure_up() -> &'static str {
-    "systemctl is-active --quiet waydroid-container.service 2>/dev/null || \
-       sudo systemctl start waydroid-container.service\n\
-     waydroid status 2>/dev/null | grep -qi 'session.*running' || {\n  \
-       waydroid session start >/dev/null 2>&1 &\n  \
-       i=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do\n    \
-         i=$((i+1)); [ \"$i\" -gt 60 ] && break; sleep 1\n  \
-       done\n\
-     }\n\
-     # `session running` only means the container is up — Android's framework\n\
-     # services (package manager) register later, and `pm` fails with\n\
-     # \"Can't find service\" until then. Wait for the boot to actually complete.\n\
-     wait_android_ready() {\n  \
-       k=0\n  \
-       while [ $k -lt 120 ]; do\n    \
-         bc=$(sudo waydroid shell -- getprop sys.boot_completed 2>/dev/null | tr -d '\\r\\n')\n    \
-         if [ \"$bc\" = 1 ] && sudo waydroid shell -- cmd package list packages >/dev/null 2>&1; then return 0; fi\n    \
-         [ $k = 0 ] && echo \"  waiting for Android to finish booting...\"\n    \
-         k=$((k+1)); sleep 2\n  \
-       done\n  \
-       echo \"  ! Android did not finish booting in time (pm may fail)\" >&2; return 1\n\
-     }\n\
-     wait_android_ready || true\n"
+fn ensure_up() -> String {
+    format!(
+        "{helper}\
+         {body}",
+        helper = sudo_helper(),
+        // The scoped sudoers rule makes the container start passwordless; only
+        // fall back to asking if that rule is missing.
+        body = "systemctl is-active --quiet waydroid-container.service 2>/dev/null || \
+           sudo -n systemctl start waydroid-container.service 2>/dev/null || \
+           msudo systemctl start waydroid-container.service\n\
+         waydroid status 2>/dev/null | grep -qi 'session.*running' || {\n  \
+           waydroid session start >/dev/null 2>&1 &\n  \
+           i=0; while ! waydroid status 2>/dev/null | grep -qi 'session.*running'; do\n    \
+             i=$((i+1)); [ \"$i\" -gt 60 ] && break; sleep 1\n  \
+           done\n\
+         }\n\
+         # `session running` only means the container is up — Android's framework\n\
+         # services (package manager) register later, and `pm` fails with\n\
+         # \"Can't find service\" until then. Wait for the boot to actually complete.\n\
+         # Probed with `waydroid app list`, which runs as you: a root probe here\n\
+         # would be up to 120 password prompts on a system without the sudoers rule.\n\
+         wait_android_ready() {\n  \
+           k=0\n  \
+           while [ $k -lt 120 ]; do\n    \
+             if waydroid app list 2>/dev/null | grep -q packageName; then return 0; fi\n    \
+             [ $k = 0 ] && echo \"  waiting for Android to finish booting...\"\n    \
+             k=$((k+1)); sleep 2\n  \
+           done\n  \
+           echo \"  ! Android did not finish booting in time (pm may fail)\" >&2; return 1\n\
+         }\n\
+         wait_android_ready || true\n"
+    )
 }
 
 /// Snippet that stamps the activity marker (touched on launch + by the watchdog
@@ -213,6 +266,37 @@ pub fn thin_stub(name: &str) -> String {
     )
 }
 
+/// A `SUDO_ASKPASS` helper: asks for the password in a zenity dialog instead of
+/// on a terminal that isn't there.
+///
+/// Everything launched from a file manager runs with no controlling tty and
+/// stdin on `/dev/null`, so a plain `sudo` cannot prompt — it fails outright
+/// with "sudo: a password is required", which reads as "your password is wrong"
+/// when in fact nothing ever asked for it. `sudo -A` runs this instead.
+///
+/// It prints the password on stdout and nothing else; a cancelled dialog exits
+/// non-zero so sudo gives up rather than retrying against an empty answer.
+pub fn askpass_script() -> &'static str {
+    r####"#!/bin/sh
+# ManifestOS — graphical SUDO_ASKPASS helper (generated; do not edit).
+# sudo passes its own prompt ("[sudo] password for you:") as $1.
+command -v zenity >/dev/null 2>&1 || {
+  echo 'manifest-askpass: zenity is not installed' >&2; exit 1
+}
+exec zenity --password --title='ManifestOS' \
+  --text="${1:-Enter your password to continue}" 2>/dev/null
+"####
+}
+
+/// Install the askpass helper. Written as a real script rather than a thin stub:
+/// sudo execs it, and a stub that shells out to `manifest` to fetch its own body
+/// would put a whole process between sudo and the dialog for no gain.
+pub fn write_askpass(ctx: &Ctx) -> Result<()> {
+    println!("  · installing the graphical password helper (`manifest-askpass`)");
+    ctx.write_root(ASKPASS, askpass_script())?;
+    ctx.sudo("chmod", &["0755", ASKPASS])
+}
+
 fn write_installer(ctx: &Ctx) -> Result<()> {
     println!("  · installing the `android-install` command (thin stub → binary)");
     ctx.write_root(INSTALLER, &thin_stub("android-install"))?;
@@ -229,33 +313,37 @@ fn write_arm_setup(ctx: &Ctx) -> Result<()> {
 /// an x86 host (idempotent). Uses the standard `waydroid_script` tool. Called
 /// automatically by `android-install` when it detects an ARM-only app on x86.
 /// Pure — structure unit-tested.
-pub fn arm_setup_script() -> &'static str {
-    "#!/bin/sh\n\
-     # ManifestOS — install ARM translation into Waydroid via waydroid_script,\n\
-     # in an isolated venv (Arch python is externally-managed). Generated logic.\n\
-     command -v waydroid >/dev/null || { echo 'waydroid-arm-setup: waydroid not installed' >&2; exit 1; }\n\
-     if sudo waydroid shell getprop ro.dalvik.vm.native.bridge 2>/dev/null | grep -qiE 'libndk|libhoudini'; then\n  \
-       echo 'waydroid-arm-setup: ARM translation already installed'; exit 0\n\
-     fi\n\
-     echo 'waydroid-arm-setup: installing ARM translation (one-time; downloads translation blobs)'\n\
-     sudo pacman -S --needed --noconfirm git python lzip >/dev/null 2>&1 || true\n\
-     d=$(mktemp -d)\n\
-     if ! git clone --depth 1 https://github.com/casualsnek/waydroid_script \"$d/ws\" >/dev/null 2>&1; then\n  \
-       echo '  ! could not clone waydroid_script' >&2; sudo rm -rf \"$d\"; exit 1\n\
-     fi\n\
-     echo '  · setting up its Python deps in a venv'\n\
-     python -m venv \"$d/venv\" >/dev/null 2>&1\n\
-     if [ -f \"$d/ws/requirements.txt\" ]; then \"$d/venv/bin/pip\" install -q -r \"$d/ws/requirements.txt\" >/dev/null 2>&1; fi\n\
-     \"$d/venv/bin/pip\" install -q InquirerPy requests tqdm >/dev/null 2>&1 || true\n\
-     waydroid session stop >/dev/null 2>&1 || true\n\
-     PY=\"$d/venv/bin/python\"\n\
-     if sudo \"$PY\" \"$d/ws/main.py\" install libndk; then\n  \
-       echo 'waydroid-arm-setup: done (libndk) — ARM apps run after the session restarts'; sudo rm -rf \"$d\"; exit 0\n\
-     elif sudo \"$PY\" \"$d/ws/main.py\" install libhoudini; then\n  \
-       echo 'waydroid-arm-setup: done (libhoudini) — ARM apps run after the session restarts'; sudo rm -rf \"$d\"; exit 0\n\
-     else\n  \
-       echo '  ! ARM translation install failed (tried libndk and libhoudini)' >&2; sudo rm -rf \"$d\"; exit 1\n\
-     fi\n"
+pub fn arm_setup_script() -> String {
+    format!(
+        "#!/bin/sh\n\
+         # ManifestOS — install ARM translation into Waydroid via waydroid_script,\n\
+         # in an isolated venv (Arch python is externally-managed). Generated logic.\n\
+         command -v waydroid >/dev/null || {{ echo 'waydroid-arm-setup: waydroid not installed' >&2; exit 1; }}\n\
+         {helper}\
+         if msudo waydroid shell getprop ro.dalvik.vm.native.bridge 2>/dev/null | grep -qiE 'libndk|libhoudini'; then\n  \
+           echo 'waydroid-arm-setup: ARM translation already installed'; exit 0\n\
+         fi\n\
+         echo 'waydroid-arm-setup: installing ARM translation (one-time; downloads translation blobs)'\n\
+         msudo pacman -S --needed --noconfirm git python lzip >/dev/null 2>&1 || true\n\
+         d=$(mktemp -d)\n\
+         if ! git clone --depth 1 https://github.com/casualsnek/waydroid_script \"$d/ws\" >/dev/null 2>&1; then\n  \
+           echo '  ! could not clone waydroid_script' >&2; msudo rm -rf \"$d\"; exit 1\n\
+         fi\n\
+         echo '  · setting up its Python deps in a venv'\n\
+         python -m venv \"$d/venv\" >/dev/null 2>&1\n\
+         if [ -f \"$d/ws/requirements.txt\" ]; then \"$d/venv/bin/pip\" install -q -r \"$d/ws/requirements.txt\" >/dev/null 2>&1; fi\n\
+         \"$d/venv/bin/pip\" install -q InquirerPy requests tqdm >/dev/null 2>&1 || true\n\
+         waydroid session stop >/dev/null 2>&1 || true\n\
+         PY=\"$d/venv/bin/python\"\n\
+         if msudo \"$PY\" \"$d/ws/main.py\" install libndk; then\n  \
+           echo 'waydroid-arm-setup: done (libndk) — ARM apps run after the session restarts'; msudo rm -rf \"$d\"; exit 0\n\
+         elif msudo \"$PY\" \"$d/ws/main.py\" install libhoudini; then\n  \
+           echo 'waydroid-arm-setup: done (libhoudini) — ARM apps run after the session restarts'; msudo rm -rf \"$d\"; exit 0\n\
+         else\n  \
+           echo '  ! ARM translation install failed (tried libndk and libhoudini)' >&2; msudo rm -rf \"$d\"; exit 1\n\
+         fi\n",
+        helper = sudo_helper(),
+    )
 }
 
 /// `android-install <file | fdroid-id> …` — brings Android up if needed and
@@ -307,7 +395,7 @@ install_bundle() {
   fi
   if [ "$extracted" = 0 ]; then
     echo "  · installing unzip and retrying" >&2
-    sudo pacman -S --needed --noconfirm unzip >/dev/null 2>&1 && unzip -qo "$bundle" -d "$dir" && extracted=1
+    msudo pacman -S --needed --noconfirm unzip >/dev/null 2>&1 && unzip -qo "$bundle" -d "$dir" && extracted=1
   fi
   [ "$extracted" = 1 ] || { echo "  ! cannot read $bundle (no working extractor)" >&2; rm -rf "$dir"; return 1; }
   # mktemp -d is 0700; make it traversable/readable so the base-APK fallback's
@@ -354,7 +442,7 @@ install_bundle() {
       esac ;;
   esac
   total=0; for f in $sel; do total=$((total + $(stat -c%s "$f"))); done
-  out=$(sudo waydroid shell -- pm install-create -S "$total" 2>&1)
+  out=$(msudo waydroid shell -- pm install-create -S "$total" 2>&1)
   sid=$(printf '%s' "$out" | sed -n 's/.*\[\([0-9]*\)\].*/\1/p' | head -n1)
   ok=1
   [ -n "$sid" ] || { echo "  ! pm install-create failed: $out" >&2; ok=0; }
@@ -365,19 +453,19 @@ install_bundle() {
     # writes it into its own session with the right SELinux context, so no host
     # file in /data/local/tmp (which Android's confined installer can't open).
     echo "  writing $bn ($sz bytes)"
-    r=$(sudo waydroid shell -- pm install-write -S "$sz" "$sid" "split$i" - < "$f" 2>&1)
+    r=$(msudo waydroid shell -- pm install-write -S "$sz" "$sid" "split$i" - < "$f" 2>&1)
     streamed=$(printf '%s' "$r" | sed -n 's/.*streamed \([0-9][0-9]*\) bytes.*/\1/p')
     if [ "${streamed:-0}" != "$sz" ]; then
       echo "  ! install-write $bn: ${r:-no output} (streamed ${streamed:-0}/$sz)" >&2; ok=0
     fi
   done
   if [ "$ok" = 1 ]; then
-    r=$(sudo waydroid shell -- pm install-commit "$sid" 2>&1)
+    r=$(msudo waydroid shell -- pm install-commit "$sid" 2>&1)
     if printf '%s' "$r" | grep -qi success; then
       echo "  installed $(basename "$bundle") - it can take a few seconds to appear in the launcher"
     else echo "  ! install-commit: $r" >&2; ok=0; fi
   fi
-  [ -n "$sid" ] && [ "$ok" != 1 ] && sudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1
+  [ -n "$sid" ] && [ "$ok" != 1 ] && msudo waydroid shell -- pm install-abandon "$sid" >/dev/null 2>&1
   # .xapk bundles ship expansion data (Android/obb/<pkg>/*.obb) that must live in
   # the app's OBB dir or the game re-downloads it (or refuses to start).
   if [ "$ok" = 1 ]; then
@@ -388,8 +476,8 @@ install_bundle() {
         opkg=$(basename "$(dirname "$o")")
         dst="/var/lib/waydroid/data/media/0/Android/obb/$opkg"
         echo "  installing expansion file $(basename "$o") for $opkg"
-        sudo mkdir -p "$dst" 2>/dev/null
-        sudo cp "$o" "$dst/$(basename "$o")" 2>/dev/null && sudo chmod 644 "$dst/$(basename "$o")" 2>/dev/null           || echo "  ! could not place $(basename "$o")" >&2
+        msudo mkdir -p "$dst" 2>/dev/null || true
+        msudo cp "$o" "$dst/$(basename "$o")" 2>/dev/null && msudo chmod 644 "$dst/$(basename "$o")" 2>/dev/null           || echo "  ! could not place $(basename "$o")" >&2
       done
     fi
   fi
@@ -413,7 +501,7 @@ done
 @RELAZY@
 @STAMP@
 "####;
-    body.replace("@ENSURE@\n", ensure_up())
+    body.replace("@ENSURE@\n", &ensure_up())
         .replace("@RELAZY@\n", relaunch_rewrite())
         .replace("@STAMP@\n", stamp_activity())
 }
@@ -430,6 +518,7 @@ fn write_mime(ctx: &Ctx) -> Result<()> {
     ctx.shell("update-mime-database /usr/share/mime 2>/dev/null || true", true)?;
     ctx.write_root(GUI_INSTALL, &thin_stub("manifest-install-gui"))?;
     ctx.sudo("chmod", &["0755", GUI_INSTALL])?;
+    write_askpass(ctx)?;
     ctx.write_root(MIME_HANDLER, mime_handler_desktop())?;
     // Windows installers: the handler + the runtime command it needs. Wine
     // itself is NOT installed here — windows-install offers that on first use.
@@ -572,6 +661,18 @@ case "$MOS_FILE" in
 esac
 export MOS_FILE MOS_TOOL MOS_WHAT MOS_SETUP
 MOS_NAME=$(basename "$MOS_FILE")
+
+# Opened from a file manager there is no controlling terminal, so a plain `sudo`
+# anywhere below (setting Android up installs packages; a split install talks to
+# the container as root) cannot ask for a password at all -- it fails with
+# "sudo: a password is required" and the user is told they need a password they
+# already have. SUDO_ASKPASS + `sudo -A` puts that prompt in a dialog instead.
+# Everything downstream inherits it: `manifest android`, android-install,
+# strata-install.
+if [ -z "$SUDO_ASKPASS" ] && [ -x /usr/local/bin/manifest-askpass ]; then
+  SUDO_ASKPASS=/usr/local/bin/manifest-askpass
+  export SUDO_ASKPASS
+fi
 
 # --- graphical path -------------------------------------------------------
 # Double-clicking a file in a file manager should not fling a terminal at you.
@@ -974,6 +1075,69 @@ mod tests {
             waydroid_init_cmd(&android(Some("GAPPS"), None, &[], &[], None)),
             "waydroid init -s 'GAPPS'"
         );
+    }
+
+    /// Every `sudo` in a generated script, minus the two lines of `mos_auth`
+    /// that exist precisely to do the asking.
+    fn privileged_calls(script: &str) -> Vec<String> {
+        script
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.starts_with('#'))
+            // A bare `sudo` token — `msudo` is the wrapper, not a call.
+            .filter(|l| l.split_whitespace().any(|t| t == "sudo"))
+            .filter(|l| !l.contains("sudo -v") && !l.contains("sudo -A -v"))
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn installer_asks_for_a_password_where_one_can_be_typed() {
+        for s in [installer_script(), arm_setup_script()] {
+            // The command itself is always `sudo -n`: authentication happens up
+            // front in `mos_auth` (terminal prompt, or a dialog via SUDO_ASKPASS),
+            // so no privileged call can hang — or die with "a password is
+            // required" — when there is no terminal to type into.
+            for line in privileged_calls(&s) {
+                let t: Vec<&str> = line.split_whitespace().collect();
+                let i = t.iter().position(|x| *x == "sudo").expect("filtered on it");
+                assert_eq!(t.get(i + 1), Some(&"-n"), "interactive sudo: {line}");
+            }
+            assert!(s.contains("mos_auth"), "no way to authenticate at all: {s}");
+            assert!(s.contains("sudo -A -v"), "no askpass path: {s}");
+            // Output is captured with `$(…)`, never redirected into a shared
+            // file: a second redirect to the same path fails with EACCES and the
+            // caller then parses the *previous* command's output as its own.
+            assert!(!s.contains("$dir/.out"), "shared capture file: {s}");
+        }
+    }
+
+    #[test]
+    fn installer_probes_the_boot_without_root() {
+        let s = installer_script();
+        // Up to 120 probes: one password prompt each would be unusable, so the
+        // readiness check has to be something the user can run themselves.
+        assert!(s.contains("waydroid app list"), "unprivileged probe: {s}");
+        assert!(!s.contains("waydroid shell -- getprop"), "root boot probe: {s}");
+    }
+
+    #[test]
+    fn askpass_is_a_dialog_and_nothing_else() {
+        let s = askpass_script();
+        assert!(s.starts_with("#!/bin/sh"), "{s}");
+        // sudo reads the password off stdout, so the dialog is all that may
+        // write there — hence `exec`, and zenity's own chatter to /dev/null.
+        assert!(s.contains("exec zenity --password"), "{s}");
+        assert!(s.contains("2>/dev/null"), "{s}");
+    }
+
+    #[test]
+    fn the_gui_wrapper_points_sudo_at_the_dialog() {
+        let s = gui_install_script();
+        assert!(s.contains("SUDO_ASKPASS=/usr/local/bin/manifest-askpass"), "{s}");
+        assert!(s.contains("export SUDO_ASKPASS"), "inherited by the tools: {s}");
+        // Don't override a caller that already has its own helper.
+        assert!(s.contains("[ -z \"$SUDO_ASKPASS\" ]"), "{s}");
     }
 
     #[test]

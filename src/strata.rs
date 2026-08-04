@@ -521,6 +521,9 @@ pub fn write_cnf_handler(ctx: &Ctx) -> Result<()> {
         &crate::android::thin_stub("manifest-install-gui"),
     )?;
     ctx.sudo("chmod", &["0755", "/usr/local/bin/manifest-install-gui"])?;
+    // …and the password dialog it points SUDO_ASKPASS at, for the same reason:
+    // a file-manager launch has no terminal to type a password into.
+    crate::android::write_askpass(ctx)?;
     ctx.write_root(DEB_RPM_HANDLER, deb_rpm_handler_desktop())?;
     ctx.shell(
         &format!("update-desktop-database {APPLICATIONS_DIR} 2>/dev/null || true"),

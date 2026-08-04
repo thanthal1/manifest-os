@@ -14,6 +14,25 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// `sudo`, plus `-A` when there is no terminal to type a password into.
+///
+/// Everything launched from a file manager or a .desktop entry (opening an .apk
+/// offers to run `manifest android`, for one) runs with no controlling terminal.
+/// A plain `sudo` there cannot prompt at all — it exits immediately with
+/// "sudo: a password is required", which reads like the password was wrong when
+/// nothing ever asked for it. With `SUDO_ASKPASS` set (the GUI wrapper points it
+/// at `manifest-askpass`), `-A` puts that prompt in a dialog instead.
+///
+/// The gate is `/dev/tty`, not `isatty(stdin)`: a terminal run with its output
+/// redirected still has a tty for sudo to prompt on, and must keep doing so.
+fn sudo_command() -> Command {
+    let mut c = Command::new("sudo");
+    if std::env::var_os("SUDO_ASKPASS").is_some() && std::fs::File::open("/dev/tty").is_err() {
+        c.arg("-A");
+    }
+    c
+}
+
 /// Shared execution context threaded through the install pipeline.
 pub struct Ctx {
     /// When true, commands are printed but never run.
@@ -62,7 +81,7 @@ impl Ctx {
             return Ok(());
         }
         let mut cmd = if root {
-            let mut c = Command::new("sudo");
+            let mut c = sudo_command();
             c.arg(program);
             c
         } else {
@@ -85,7 +104,7 @@ impl Ctx {
             return Ok(());
         }
         let mut cmd = if root {
-            let mut c = Command::new("sudo");
+            let mut c = sudo_command();
             c.args(["sh", "-c"]);
             c
         } else {
@@ -111,12 +130,12 @@ impl Ctx {
         }
         if let Some(parent) = std::path::Path::new(path).parent() {
             let parent = parent.to_string_lossy();
-            let status = Command::new("sudo").args(["mkdir", "-p", &parent]).status();
+            let status = sudo_command().args(["mkdir", "-p", &parent]).status();
             if !matches!(status, Ok(s) if s.success()) {
                 bail!("failed to create directory {parent}");
             }
         }
-        let mut child = Command::new("sudo")
+        let mut child = sudo_command()
             .args(["tee", path])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -143,7 +162,7 @@ impl Ctx {
             return Ok(String::new());
         }
         let mut cmd = if root {
-            let mut c = Command::new("sudo");
+            let mut c = sudo_command();
             c.arg(program);
             c
         } else {
@@ -184,7 +203,7 @@ impl Ctx {
         if self.dry_run {
             return Ok(());
         }
-        let mut child = Command::new("sudo")
+        let mut child = sudo_command()
             .arg("chpasswd")
             .stdin(Stdio::piped())
             .spawn()
@@ -211,7 +230,7 @@ impl Ctx {
         if self.dry_run {
             return Ok(());
         }
-        let mut child = Command::new("sudo")
+        let mut child = sudo_command()
             .args(["arch-chroot", root, "chpasswd"])
             .stdin(Stdio::piped())
             .spawn()
@@ -237,7 +256,7 @@ impl Ctx {
         if self.dry_run {
             return Ok(());
         }
-        let mut child = Command::new("sudo")
+        let mut child = sudo_command()
             .arg("cryptsetup")
             .args(args)
             .stdin(Stdio::piped())
